@@ -216,6 +216,8 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
                 "role": "assistant",
                 "content": "\n\n\n".join(prompts),
             },
+        )
+        messages.append(
             {
                 "role": "user",
                 "content": prompt,
