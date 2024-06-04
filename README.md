@@ -5,7 +5,7 @@
 ```bash
 $ brew install python@3.9
 
-$ npm install -g serverless
+$ npm install -g serverless@3.38.0
 
 $ sls plugin install -n serverless-python-requirements
 $ sls plugin install -n serverless-dotenv-plugin

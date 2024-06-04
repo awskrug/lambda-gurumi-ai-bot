@@ -15,7 +15,6 @@ env:
   SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
   DYNAMODB_TABLE_NAME: ${{ secrets.DYNAMODB_TABLE_NAME }}
   SYSTEM_MESSAGE: ${{ secrets.SYSTEM_MESSAGE }}
-  TEMPERATURE: ${{ secrets.TEMPERATURE }}
 
 jobs:
   deploy:
@@ -51,7 +50,6 @@ jobs:
           echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
           echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
-          echo "TEMPERATURE=${TEMPERATURE}" >> .env
 
       - name: Deploy to AWS Lambda 🚀
         env:

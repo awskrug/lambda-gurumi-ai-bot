@@ -28,8 +28,6 @@ ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
-TEMPERATURE = float(os.environ.get("TEMPERATURE", 0))
-
 MESSAGE_MAX = int(os.environ.get("MESSAGE_MAX", 4000))
 
 # Initialize Slack app
