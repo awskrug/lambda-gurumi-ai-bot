@@ -215,11 +215,13 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
 
         messages = messages[::-1]  # reversed
 
-    # Send the prompt to ChatGPT
+    # Send the prompt to Bedrock
     try:
+        chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+
         print("conversation: {}".format(messages))
 
-        # Send the prompt to ChatGPT
+        # Send the prompt to Bedrock
         message = reply_text(messages, channel, latest_ts, user)
 
         print("conversation: {}".format(message))
