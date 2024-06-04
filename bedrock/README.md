@@ -1,4 +1,4 @@
-# lambda-slack-ai-bot
+# bedrock
 
 ## Install
 
