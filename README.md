@@ -76,27 +76,6 @@ curl -X POST -H "Content-Type: application/json" \
 https://xxxx.execute-api.us-east-1.amazonaws.com/dev/slack/events
 ```
 
-## OpenAi API Test
-
-```bash
-curl https://api.openai.com/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [
-      {
-        "role": "system",
-        "content": "You are a helpful assistant."
-      },
-      {
-        "role": "user",
-        "content": "Hello!"
-      }
-    ]
-  }'
-```
-
 ## References
 
-* <https://github.com/openai/openai-python>
+* <https://docs.aws.amazon.com/ko_kr/code-library/latest/ug/python_3_bedrock-runtime_code_examples.html>

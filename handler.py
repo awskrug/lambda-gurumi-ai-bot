@@ -9,8 +9,6 @@ import time
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
-from openai import OpenAI
-
 BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
 
 # Set up Slack API credentials
@@ -20,10 +18,10 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 # Keep track of conversation history by thread and user
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "slack-ai-bot-context")
 
-# Set up ChatGPT API credentials
-OPENAI_ORG_ID = os.environ.get("OPENAI_ORG_ID", None)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+# Amazon Bedrock Model ID
+BEDROCK_MODEL_ID = os.environ.get("MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
+ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
@@ -45,11 +43,8 @@ bot_id = app.client.api_call("auth.test")["user_id"]
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-# Initialize OpenAI
-openai = OpenAI(
-    organization=OPENAI_ORG_ID if OPENAI_ORG_ID != "None" else None,
-    api_key=OPENAI_API_KEY,
-)
+# Initialize the Amazon Bedrock runtime client
+bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
 
 
 # Get the context from DynamoDB
@@ -91,28 +86,53 @@ def chat_update(channel, ts, message, blocks=None):
     app.client.chat_update(channel=channel, ts=ts, text=message, blocks=blocks)
 
 
+def invoke_claude_3(messages):
+    """
+    Invokes Anthropic Claude 3 Sonnet to run an inference using the input
+    provided in the request body.
+
+    :param prompt: The prompt that you want Claude 3 to complete.
+    :return: Inference response from the model.
+    """
+
+    text = ""
+
+    try:
+        body = {
+            "anthropic_version": ANTHROPIC_VERSION,
+            "max_tokens": ANTHROPIC_TOKENS,
+            "messages": messages,
+        }
+
+        response = bedrock.invoke_model(
+            modelId=BEDROCK_MODEL_ID,
+            body=json.dumps(body),
+        )
+
+        # Process and print the response
+        result = json.loads(response.get("body").read())
+
+        input_tokens = result["usage"]["input_tokens"]
+        output_tokens = result["usage"]["output_tokens"]
+        output_list = result.get("content", [])
+
+        print(f"- The input length is {input_tokens} tokens.")
+        print(f"- The output length is {output_tokens} tokens.")
+
+        print(f"- The model returned {len(output_list)} response(s):")
+
+        for output in output_list:
+            text = output["text"]
+
+        return text
+
+    except Exception as e:
+        print("Error: {}".format(e))
+
+
 # Reply to the message
 def reply_text(messages, channel, ts, user):
-    stream = openai.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=TEMPERATURE,
-        stream=True,
-        user=user,
-    )
-
-    counter = 0
-    message = ""
-    for part in stream:
-        reply = part.choices[0].delta.content or ""
-
-        if reply:
-            message += reply
-
-        if counter % 16 == 1:
-            chat_update(channel, ts, message + " " + BOT_CURSOR)
-
-        counter = counter + 1
+    message = invoke_claude_3(messages)
 
     chat_update(channel, ts, message)
 
@@ -211,7 +231,6 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
     except Exception as e:
         print("conversation: Error handling message: {}".format(e))
-        print("conversation: OpenAI Model: {}".format(OPENAI_MODEL))
 
         message = f"```{e}```"
 
@@ -286,7 +305,6 @@ def lambda_handler(event, context):
 
     # Duplicate execution prevention
     if "event" not in body or "client_msg_id" not in body["event"]:
-        # print("lambda_handler: {}".format("Cannot find the event or client_msg_id"))
         return {
             "statusCode": 200,
             "headers": {"Content-type": "application/json"},
@@ -298,7 +316,6 @@ def lambda_handler(event, context):
     prompt = get_context(token, body["event"]["user"])
 
     if prompt != "":
-        # print("lambda_handler: {}".format("Cannot find the prompt"))
         return {
             "statusCode": 200,
             "headers": {"Content-type": "application/json"},
