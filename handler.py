@@ -204,7 +204,7 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
 
         replies = conversations_replies(channel, thread_ts, client_msg_id)
 
-        prompts = [{reply["content"]} for reply in replies if reply["content"].strip()]
+        prompts = [reply["content"] for reply in replies if reply["content"].strip()]
 
     # Send the prompt to Bedrock
     if prompt:
@@ -212,6 +212,8 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
 
     # Send the prompt to Bedrock
     try:
+        chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+
         messages = []
         messages.append(
             {
@@ -224,8 +226,6 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
                 ],
             },
         )
-
-        chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
 
         print("conversation: {}".format(messages))
 
