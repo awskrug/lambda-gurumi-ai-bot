@@ -18,8 +18,8 @@ provider:
       Action:
         - bedrock:InvokeModel
       Resource:
-        - "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-*"
-        - "arn:aws:bedrock:*::foundation-model/stability.stable-diffusion-xl-*"
+        - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
+        - "arn:aws:bedrock:*::foundation-model/stability.stable-diffusion-*"
 
 functions:
   mention:
