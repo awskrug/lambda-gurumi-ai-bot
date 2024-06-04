@@ -138,7 +138,9 @@ def reply_text(messages, channel, ts, user):
 
 
 # Get thread messages using conversations.replies API method
-def conversations_replies(channel, ts, client_msg_id, messages=[]):
+def conversations_replies(channel, ts, client_msg_id):
+    messages = []
+
     try:
         response = app.client.conversations_replies(channel=channel, ts=ts)
 
@@ -176,6 +178,8 @@ def conversations_replies(channel, ts, client_msg_id, messages=[]):
                 messages.pop(0)  # remove the oldest message
                 break
 
+        messages.reverse()
+
     except Exception as e:
         print("conversations_replies: {}".format(e))
 
@@ -198,14 +202,13 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
     if thread_ts != None:
         chat_update(channel, latest_ts, "이전 대화 내용 확인 중... " + BOT_CURSOR)
 
-        replies = conversations_replies(channel, thread_ts, client_msg_id, [])
-
-        replies = replies[::-1]  # reversed
+        replies = conversations_replies(channel, thread_ts, client_msg_id)
 
         prompts = [{reply["content"]} for reply in replies if reply["content"].strip()]
 
     # Send the prompt to Bedrock
-    prompts.append(prompt)
+    if prompt:
+        prompts.append(prompt)
 
     # Send the prompt to Bedrock
     try:
