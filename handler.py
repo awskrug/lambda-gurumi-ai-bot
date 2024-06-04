@@ -112,12 +112,7 @@ def invoke_claude_3(messages):
         # Process and print the response
         result = json.loads(response.get("body").read())
 
-        input_tokens = result["usage"]["input_tokens"]
-        output_tokens = result["usage"]["output_tokens"]
         output_list = result.get("content", [])
-
-        print(f"- The input length is {input_tokens} tokens.")
-        print(f"- The output length is {output_tokens} tokens.")
 
         print(f"- The model returned {len(output_list)} response(s):")
 
@@ -170,7 +165,7 @@ def conversations_replies(
             messages.append(
                 {
                     "role": role,
-                    "content": message.get("text", ""),
+                    "content": [{"type": "text", "text": message.get("text", "")}],
                 }
             )
 
@@ -187,7 +182,7 @@ def conversations_replies(
         messages.append(
             {
                 "role": "system",
-                "content": SYSTEM_MESSAGE,
+                "content": [{"type": "text", "text": SYSTEM_MESSAGE}],
             }
         )
 
@@ -197,8 +192,8 @@ def conversations_replies(
 
 
 # Handle the chatgpt conversation
-def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
-    print("conversation: {}".format(json.dumps(content)))
+def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
+    print("conversation: {}".format(json.dumps(prompt)))
 
     # Keep track of the latest message timestamp
     result = say(text=BOT_CURSOR, thread_ts=thread_ts)
@@ -208,7 +203,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     messages.append(
         {
             "role": "user",
-            "content": content,
+            "content": [{"type": "text", "text": prompt}],
         },
     )
 
@@ -237,14 +232,6 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
         chat_update(channel, latest_ts, message)
 
 
-# Extract content from the message
-def content_from_message(prompt, event):
-    content = []
-    content.append({"type": "text", "text": prompt})
-
-    return content
-
-
 # Handle the app_mention event
 @app.event("app_mention")
 def handle_mention(body: dict, say: Say):
@@ -262,9 +249,9 @@ def handle_mention(body: dict, say: Say):
     user = event["user"]
     client_msg_id = event["client_msg_id"]
 
-    content = content_from_message(prompt, event)
+    # content = content_from_message(prompt, event)
 
-    conversation(say, thread_ts, content, channel, user, client_msg_id)
+    conversation(say, thread_ts, prompt, channel, user, client_msg_id)
 
 
 # Handle the DM (direct message) event
@@ -283,10 +270,10 @@ def handle_message(body: dict, say: Say):
     user = event["user"]
     client_msg_id = event["client_msg_id"]
 
-    content = content_from_message(prompt, event)
+    # content = content_from_message(prompt, event)
 
     # Use thread_ts=None for regular messages, and user ID for DMs
-    conversation(say, None, content, channel, user, client_msg_id)
+    conversation(say, None, prompt, channel, user, client_msg_id)
 
 
 # Handle the Lambda function
