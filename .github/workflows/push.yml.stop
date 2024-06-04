@@ -1,0 +1,67 @@
+name: Deploy to AWS Lambda
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  repository_dispatch:
+    types:
+      - deploy
+
+env:
+  BOT_CURSOR: ${{ secrets.BOT_CURSOR }}
+  SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+  SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+  DYNAMODB_TABLE_NAME: ${{ secrets.DYNAMODB_TABLE_NAME }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+  OPENAI_ORG_ID: ${{ secrets.OPENAI_ORG_ID }}
+  SYSTEM_MESSAGE: ${{ secrets.SYSTEM_MESSAGE }}
+  TEMPERATURE: ${{ secrets.TEMPERATURE }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.9 🐍
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Python dependencies
+        run: npx serverless plugin install --name serverless-python-requirements
+
+      - name: Install dotenv plugin
+        run: npx serverless plugin install --name serverless-dotenv-plugin
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Set up environment variables 📝
+        run: |
+          echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
+          echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> .env
+          echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
+          echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
+          echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> .env
+          echo "OPENAI_MODEL=${OPENAI_MODEL}" >> .env
+          echo "OPENAI_ORG_ID=${OPENAI_ORG_ID}" >> .env
+          echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
+          echo "TEMPERATURE=${TEMPERATURE}" >> .env
+
+      - name: Deploy to AWS Lambda 🚀
+        env:
+          AWS_REGION: 'us-east-1'
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: npx serverless deploy

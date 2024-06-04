@@ -1,0 +1,33 @@
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# NodeJS dependencies
+node_modules/
+
+# Serverless runtime cache
+.serverless_sdk
+
+# Serverless directories
+.serverless
+
+# Local configuration
+.env
+
+.DS_Store
+
+build/

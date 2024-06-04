@@ -1,0 +1,47 @@
+service: lambda-slack-ai-bot
+provider:
+  name: aws
+  region: us-east-1
+  runtime: python3.9
+  # stage: prod
+  # memorySize: 5120
+  timeout: 600
+  environment:
+    DYNAMODB_TABLE_NAME: slack-ai-bot-context
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:*
+      Resource:
+        - "arn:aws:dynamodb:*:*:table/${self:provider.environment.DYNAMODB_TABLE_NAME}"
+
+functions:
+  mention:
+    handler: handler.lambda_handler
+    events:
+      - http:
+          method: post
+          path: /slack/events
+
+resources:
+  Resources:
+    DynamoDBTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.DYNAMODB_TABLE_NAME}
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+        TimeToLiveSpecification:
+          AttributeName: expire_at
+          Enabled: true
+
+plugins:
+  - serverless-python-requirements
+  - serverless-dotenv-plugin
