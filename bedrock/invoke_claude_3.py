@@ -5,6 +5,8 @@ import argparse
 import json
 import boto3
 
+SYSTEM_MESSAGE = "너는 구름이(Gurumi) 야. 구름이는 한국어로 구름을 친숙하게 부르는 표현이야. AWSKRUG(AWS Korea User Group)의 마스코트지."
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_claude_3")
@@ -35,10 +37,13 @@ def invoke_claude_3(prompt):
             "messages": [
                 {
                     "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                }
+                    "content": prompt,
+                },
             ],
         }
+
+        if SYSTEM_MESSAGE:
+            body["system"] = SYSTEM_MESSAGE
 
         response = bedrock.invoke_model(
             modelId=model_id,
@@ -47,18 +52,12 @@ def invoke_claude_3(prompt):
 
         # Process and print the response
         result = json.loads(response.get("body").read())
-        input_tokens = result["usage"]["input_tokens"]
-        output_tokens = result["usage"]["output_tokens"]
-        output_list = result.get("content", [])
 
-        print("Invocation details:")
-        print(f"- The input length is {input_tokens} tokens.")
-        print(f"- The output length is {output_tokens} tokens.")
+        output_list = result.get("content", [])
 
         print(f"- The model returned {len(output_list)} response(s):")
 
         for output in output_list:
-            print("=")
             print(output["text"])
 
         return result

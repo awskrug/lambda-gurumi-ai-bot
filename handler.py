@@ -138,9 +138,7 @@ def reply_text(messages, channel, ts, user):
 
 
 # Get thread messages using conversations.replies API method
-def conversations_replies(
-    channel, ts, client_msg_id, messages=[], message_max=MESSAGE_MAX
-):
+def conversations_replies(channel, ts, client_msg_id, messages=[]):
     try:
         response = app.client.conversations_replies(channel=channel, ts=ts)
 
@@ -168,13 +166,13 @@ def conversations_replies(
             messages.append(
                 {
                     "role": role,
-                    "content": [{"type": "text", "text": message.get("text", "")}],
+                    "content": message.get("text", ""),
                 }
             )
 
             # print("conversations_replies: messages size: {}".format(sys.getsizeof(messages)))
 
-            if sys.getsizeof(messages) > message_max:
+            if sys.getsizeof(messages) > MESSAGE_MAX:
                 messages.pop(0)  # remove the oldest message
                 break
 
@@ -194,24 +192,36 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
     result = say(text=BOT_CURSOR, thread_ts=thread_ts)
     latest_ts = result["ts"]
 
-    messages = []
-    messages.append(
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": prompt}],
-        },
-    )
+    prompts = []
 
     # Get the thread messages
     if thread_ts != None:
         chat_update(channel, latest_ts, "이전 대화 내용 확인 중... " + BOT_CURSOR)
 
-        messages = conversations_replies(channel, thread_ts, client_msg_id, messages)
+        replies = conversations_replies(channel, thread_ts, client_msg_id, [])
 
-        messages = messages[::-1]  # reversed
+        replies = replies[::-1]  # reversed
+
+        prompts = [
+            f"{reply['role']}: {reply['content']}"
+            for reply in replies
+            if reply["content"].strip()
+        ]
 
     # Send the prompt to Bedrock
     try:
+        messages = []
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "\n\n\n".join(prompts),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        )
+
         chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
 
         print("conversation: {}".format(messages))
@@ -237,7 +247,6 @@ def handle_mention(body: dict, say: Say):
     event = body["event"]
 
     if "bot_id" in event:  # Ignore messages from the bot itself
-        # print("handle_mention: {}".format("Ignore messages from the bot itself"))
         return
 
     thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
@@ -259,7 +268,6 @@ def handle_message(body: dict, say: Say):
     event = body["event"]
 
     if "bot_id" in event:  # Ignore messages from the bot itself
-        # print("handle_mention: {}".format("Ignore messages from the bot itself"))
         return
 
     prompt = event["text"].strip()
