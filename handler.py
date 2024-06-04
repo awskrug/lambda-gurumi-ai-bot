@@ -132,6 +132,8 @@ def invoke_claude_3(messages):
 def reply_text(messages, channel, ts, user):
     message = invoke_claude_3(messages)
 
+    message = re.sub(f"**", "*", message)
+
     chat_update(channel, ts, message)
 
     return message
