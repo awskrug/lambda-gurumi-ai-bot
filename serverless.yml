@@ -1,4 +1,4 @@
-service: lambda-slack-ai-bot
+service: lambda-gureumi-ai-bot
 provider:
   name: aws
   region: us-east-1
@@ -7,7 +7,7 @@ provider:
   # memorySize: 5120
   timeout: 600
   environment:
-    DYNAMODB_TABLE_NAME: slack-ai-bot-context
+    DYNAMODB_TABLE_NAME: gureumi-ai-bot-context
   iamRoleStatements:
     - Effect: Allow
       Action:
