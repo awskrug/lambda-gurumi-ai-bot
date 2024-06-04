@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-      - master
-  repository_dispatch:
-    types:
-      - deploy
 
 env:
   BOT_CURSOR: ${{ secrets.BOT_CURSOR }}
