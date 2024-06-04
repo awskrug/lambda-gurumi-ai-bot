@@ -213,7 +213,12 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
         messages.append(
             {
                 "role": "user",
-                "content": "\n\n\n".join(prompts),
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "\n\n\n".join(prompts),
+                    }
+                ],
             },
         )
 
