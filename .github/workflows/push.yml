@@ -16,7 +16,7 @@ env:
   DYNAMODB_TABLE_NAME: ${{ secrets.DYNAMODB_TABLE_NAME }}
   TEXT_MODEL_ID: ${{ secrets.TEXT_MODEL_ID }}
   IMAGE_MODEL_ID: ${{ secrets.IMAGE_MODEL_ID }}
-  SYSTEM_MESSAGE: ${{ secrets.SYSTEM_MESSAGE }}
+  SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
 jobs:
   deploy:

@@ -104,6 +104,9 @@ def invoke_claude_3(messages):
             "messages": messages,
         }
 
+        if SYSTEM_MESSAGE != "None":
+            body["system"] = SYSTEM_MESSAGE
+
         response = bedrock.invoke_model(
             modelId=TEXT_MODEL_ID,
             body=json.dumps(body),
@@ -177,14 +180,6 @@ def conversations_replies(
 
     except Exception as e:
         print("conversations_replies: {}".format(e))
-
-    if SYSTEM_MESSAGE != "None":
-        messages.append(
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": SYSTEM_MESSAGE}],
-            }
-        )
 
     print("conversations_replies: {}".format(messages))
 
