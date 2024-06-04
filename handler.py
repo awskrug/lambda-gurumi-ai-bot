@@ -202,25 +202,18 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
 
         replies = replies[::-1]  # reversed
 
-        prompts = [
-            f"{reply['role']}: {reply['content']}"
-            for reply in replies
-            if reply["content"].strip()
-        ]
+        prompts = [{reply["content"]} for reply in replies if reply["content"].strip()]
+
+    # Send the prompt to Bedrock
+    prompts.append(prompt)
 
     # Send the prompt to Bedrock
     try:
         messages = []
         messages.append(
             {
-                "role": "assistant",
-                "content": "\n\n\n".join(prompts),
-            },
-        )
-        messages.append(
-            {
                 "role": "user",
-                "content": prompt,
+                "content": "\n\n\n".join(prompts),
             },
         )
 
