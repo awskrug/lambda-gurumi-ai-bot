@@ -346,7 +346,7 @@ def handle_mention(body: dict, say: Say):
 
     allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
     if channel not in allowed_channel_ids:
-        # say("Sorry, I'm not allowed to respond in this channel.")
+        say("Sorry, I'm not allowed to respond in this channel.")
         return
 
     thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
