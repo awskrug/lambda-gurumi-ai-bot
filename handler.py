@@ -7,6 +7,9 @@ import sys
 import time
 import base64
 import requests
+import io
+
+from PIL import Image
 
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
@@ -102,21 +105,16 @@ def invoke_claude_3(content):
     :return: Inference response from the model.
     """
 
-    text = ""
-
-    messages = []
-    messages.append(
-        {
-            "role": "user",
-            "content": content,
-        },
-    )
-
     try:
         body = {
             "anthropic_version": ANTHROPIC_VERSION,
             "max_tokens": ANTHROPIC_TOKENS,
-            "messages": messages,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": content,
+                },
+            ],
         }
 
         if SYSTEM_MESSAGE != "None":
@@ -141,6 +139,58 @@ def invoke_claude_3(content):
 
     except Exception as e:
         print("Error: {}".format(e))
+
+        return None
+
+
+def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
+    """
+    Invokes the Stability.ai Stable Diffusion XL model to create an image using
+    the input provided in the request body.
+
+    :param prompt: The prompt that you want Stable Diffusion  to use for image generation.
+    :param seed: Random noise seed (omit this option or use 0 for a random seed)
+    :param style_preset: Pass in a style preset to guide the image model towards
+                          a particular style.
+    :return: Base64-encoded inference response from the model.
+    """
+
+    try:
+        # The different model providers have individual request and response formats.
+        # For the format, ranges, and available style_presets of Stable Diffusion models refer to:
+        # https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-stability-diffusion.html
+
+        body = {
+            "text_prompts": [{"text": prompt}],
+            "seed": seed,
+            "cfg_scale": 10,
+            "steps": 30,
+            "samples": 1,
+        }
+
+        if style_preset:
+            body["style_preset"] = style_preset
+
+        response = bedrock.invoke_model(
+            modelId=IMAGE_MODEL_ID,
+            body=json.dumps(body),
+        )
+
+        body = json.loads(response["body"].read())
+
+        base64_image = body.get("artifacts")[0].get("base64")
+        base64_bytes = base64_image.encode("ascii")
+        image_bytes = base64.b64decode(base64_bytes)
+
+        image = Image.open(io.BytesIO(image_bytes))
+        image.show()
+
+        return image_bytes
+
+    except Exception as e:
+        print("Error: {}".format(e))
+
+        return None
 
 
 # Get thread messages using conversations.replies API method
@@ -229,17 +279,30 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         prompts.append(message)
 
-    # Send the prompt to Bedrock
-    if prompt:
-        prompts.append(prompt)
+        if prompt:
+            prompts.append(prompt)
 
-    # Send the prompt to Bedrock
-    try:
-        chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+        chat_update(channel, latest_ts, "이미지 생성 준비 중... " + BOT_CURSOR)
+
+        prompts.append(
+            "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
+        )
 
         prompt = "\n\n\n".join(prompts)
 
-        print("conversation: {}".format(prompt))
+        content = []
+        content.append({"type": "text", "text": prompt})
+
+        # Send the prompt to Bedrock
+        message = invoke_claude_3(content)
+
+    else:
+        chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+
+        if prompt:
+            prompts.append(prompt)
+
+        prompt = "\n\n\n".join(prompts)
 
         content[0]["text"] = prompt
 
@@ -248,16 +311,24 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         message = message.replace("**", "*")
 
-        chat_update(channel, latest_ts, message)
+    # Update the message in Slack
+    chat_update(channel, latest_ts, message)
 
-        print("conversation: {}".format(message))
+    # Generate an image
+    if type == "image" and len(content) > 1:
+        prompt = message
 
-    except Exception as e:
-        print("conversation: Error handling message: {}".format(e))
+        image = invoke_stable_diffusion(prompt)
 
-        message = f"```{e}```"
-
-        chat_update(channel, latest_ts, message)
+        if image:
+            # Send the image to Slack
+            app.client.files_upload(
+                channels=channel,
+                file=io.BytesIO(image),
+                title="Generated Image",
+                filename="image.jpg",
+                initial_comment="Here is the generated image.",
+            )
 
 
 # Get image from URL

@@ -56,8 +56,12 @@ def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
             body=json.dumps(body),
         )
 
-        response_body = json.loads(response["body"].read())
-        base64_image = response_body.get("artifacts")[0].get("base64")
+        body = json.loads(response["body"].read())
+
+        # body["artifacts"][0]["base64"] = None
+        # print("response: {}".format(body))
+
+        base64_image = body.get("artifacts")[0].get("base64")
         base64_bytes = base64_image.encode("ascii")
         image_bytes = base64.b64decode(base64_bytes)
 

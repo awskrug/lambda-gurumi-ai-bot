@@ -58,11 +58,11 @@ def invoke_claude_3(prompt):
         )
 
         # Process and print the response
-        result = json.loads(response.get("body").read())
+        body = json.loads(response.get("body").read())
 
-        # print("response: {}".format(result))
+        # print("response: {}".format(body))
 
-        content = result.get("content", [])
+        content = body.get("content", [])
 
         for output in content:
             print(output["text"])
