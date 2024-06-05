@@ -29,7 +29,7 @@ ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
 ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 
 # Set up the allowed channel ID
-ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "")
+ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
 ENABLE_IMAGE = os.environ.get("ENABLE_IMAGE", "False")
 
@@ -407,7 +407,7 @@ def handle_mention(body: dict, say: Say):
 
     channel = event["channel"]
 
-    if ALLOWED_CHANNEL_IDS != "":
+    if ALLOWED_CHANNEL_IDS != "None":
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
             # say("Sorry, I'm not allowed to respond in this channel.")
