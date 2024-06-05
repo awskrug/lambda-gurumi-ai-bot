@@ -30,6 +30,8 @@ ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "AAA,CCC,EEE,GGG")
 
+ENABLE_IMAGE = os.environ.get("ENABLE_IMAGE", "False")
+
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
@@ -91,7 +93,7 @@ def chat_update(channel, ts, message, blocks=None):
     app.client.chat_update(channel=channel, ts=ts, text=message, blocks=blocks)
 
 
-def invoke_claude_3(messages):
+def invoke_claude_3(content):
     """
     Invokes Anthropic Claude 3 Sonnet to run an inference using the input
     provided in the request body.
@@ -101,6 +103,14 @@ def invoke_claude_3(messages):
     """
 
     text = ""
+
+    messages = []
+    messages.append(
+        {
+            "role": "user",
+            "content": content,
+        },
+    )
 
     try:
         body = {
@@ -118,30 +128,19 @@ def invoke_claude_3(messages):
         )
 
         # Process and print the response
-        result = json.loads(response.get("body").read())
+        body = json.loads(response.get("body").read())
 
-        print("response: {}".format(result))
+        print("response: {}".format(body))
 
-        content = result.get("content", [])
+        result = body.get("content", [])
 
-        for output in content:
+        for output in result:
             text = output["text"]
 
         return text
 
     except Exception as e:
         print("Error: {}".format(e))
-
-
-# Reply to the message
-def reply_text(messages, channel, ts, user):
-    message = invoke_claude_3(messages)
-
-    message = message.replace("**", "*")
-
-    chat_update(channel, ts, message)
-
-    return message
 
 
 # Get thread messages using conversations.replies API method
@@ -206,8 +205,8 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     prompt = content[0]["text"]
 
     type = "text"
-    # if "그려줘" in prompt:
-    #     type = "image"
+    if ENABLE_IMAGE == "True" and "그려줘" in prompt:
+        type = "image"
 
     prompts = []
 
@@ -225,16 +224,8 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         content[0]["text"] = "Describe the image in great detail as if viewing a photo."
 
-        messages = []
-        messages.append(
-            {
-                "role": "user",
-                "content": content,
-            },
-        )
-
         # Send the prompt to Bedrock
-        message = invoke_claude_3(messages)
+        message = invoke_claude_3(content)
 
         prompts.append(message)
 
@@ -246,23 +237,18 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     try:
         chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
 
-        messages = []
-        messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "\n\n\n".join(prompts),
-                    }
-                ],
-            },
-        )
+        prompt = "\n\n\n".join(prompts)
 
-        print("conversation: {}".format(messages))
+        print("conversation: {}".format(prompt))
+
+        content[0]["text"] = prompt
 
         # Send the prompt to Bedrock
-        message = reply_text(messages, channel, latest_ts, user)
+        message = invoke_claude_3(content)
+
+        message = message.replace("**", "*")
+
+        chat_update(channel, latest_ts, message)
 
         print("conversation: {}".format(message))
 
