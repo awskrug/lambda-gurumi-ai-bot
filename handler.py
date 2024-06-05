@@ -308,7 +308,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         if image:
             # Send the image to Slack
-            app.client.files_upload(
+            app.client.files_upload_v2(
                 channels=channel,
                 file=io.BytesIO(image),
                 title="Generated Image",
