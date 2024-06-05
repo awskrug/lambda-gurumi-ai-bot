@@ -5,6 +5,8 @@ import os
 import re
 import sys
 import time
+import base64
+import requests
 
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
@@ -24,6 +26,9 @@ IMAGE_MODEL_ID = os.environ.get("IMAGE_MODEL_ID", "stability.stable-diffusion-xl
 
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
 ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
+
+# Set up the allowed channel ID
+ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "AAA,CCC,EEE,GGG")
 
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
@@ -115,11 +120,11 @@ def invoke_claude_3(messages):
         # Process and print the response
         result = json.loads(response.get("body").read())
 
-        output_list = result.get("content", [])
+        print("response: {}".format(result))
 
-        print(f"- The model returned {len(output_list)} response(s):")
+        content = result.get("content", [])
 
-        for output in output_list:
+        for output in content:
             text = output["text"]
 
         return text
@@ -191,12 +196,18 @@ def conversations_replies(channel, ts, client_msg_id):
 
 
 # Handle the chatgpt conversation
-def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
-    print("conversation: {}".format(json.dumps(prompt)))
+def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
+    print("conversation: {}".format(json.dumps(content)))
 
     # Keep track of the latest message timestamp
     result = say(text=BOT_CURSOR, thread_ts=thread_ts)
     latest_ts = result["ts"]
+
+    prompt = content[0]["text"]
+
+    type = "text"
+    # if "그려줘" in prompt:
+    #     type = "image"
 
     prompts = []
 
@@ -207,6 +218,25 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
         replies = conversations_replies(channel, thread_ts, client_msg_id)
 
         prompts = [reply["content"] for reply in replies if reply["content"].strip()]
+
+    # Get the image from the message
+    if type == "image" and len(content) > 1:
+        chat_update(channel, latest_ts, "이미지 감상 중... " + BOT_CURSOR)
+
+        content[0]["text"] = "Describe the image in great detail as if viewing a photo."
+
+        messages = []
+        messages.append(
+            {
+                "role": "user",
+                "content": content,
+            },
+        )
+
+        # Send the prompt to Bedrock
+        message = invoke_claude_3(messages)
+
+        prompts.append(message)
 
     # Send the prompt to Bedrock
     if prompt:
@@ -244,6 +274,64 @@ def conversation(say: Say, thread_ts, prompt, channel, user, client_msg_id):
         chat_update(channel, latest_ts, message)
 
 
+# Get image from URL
+def get_image_from_url(image_url, token=None):
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    response = requests.get(image_url, headers=headers)
+
+    if response.status_code == 200:
+        return response.content
+    else:
+        print("Failed to fetch image: {}".format(image_url))
+
+    return None
+
+
+# Get image from Slack
+def get_image_from_slack(image_url):
+    return get_image_from_url(image_url, SLACK_BOT_TOKEN)
+
+
+# Get encoded image from Slack
+def get_encoded_image_from_slack(image_url):
+    image = get_image_from_slack(image_url)
+
+    if image:
+        return base64.b64encode(image).decode("utf-8")
+
+    return None
+
+
+# Extract content from the message
+def content_from_message(prompt, event):
+    content = []
+    content.append({"type": "text", "text": prompt})
+
+    if "files" in event:
+        files = event.get("files", [])
+        for file in files:
+            mimetype = file["mimetype"]
+            if mimetype.startswith("image"):
+                image_url = file.get("url_private")
+                base64_image = get_encoded_image_from_slack(image_url)
+                if base64_image:
+                    content.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mimetype,
+                                "data": base64_image,
+                            },
+                        }
+                    )
+
+    return content
+
+
 # Handle the app_mention event
 @app.event("app_mention")
 def handle_mention(body: dict, say: Say):
@@ -254,15 +342,22 @@ def handle_mention(body: dict, say: Say):
     if "bot_id" in event:  # Ignore messages from the bot itself
         return
 
-    thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
-    prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
     channel = event["channel"]
+
+    allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
+    if channel not in allowed_channel_ids:
+        # say("Sorry, I'm not allowed to respond in this channel.")
+        return
+
+    thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
     user = event["user"]
     client_msg_id = event["client_msg_id"]
 
-    # content = content_from_message(prompt, event)
+    prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
 
-    conversation(say, thread_ts, prompt, channel, user, client_msg_id)
+    content = content_from_message(prompt, event)
+
+    conversation(say, thread_ts, content, channel, user, client_msg_id)
 
 
 # Handle the DM (direct message) event
@@ -275,15 +370,16 @@ def handle_message(body: dict, say: Say):
     if "bot_id" in event:  # Ignore messages from the bot itself
         return
 
-    prompt = event["text"].strip()
     channel = event["channel"]
     user = event["user"]
     client_msg_id = event["client_msg_id"]
 
-    # content = content_from_message(prompt, event)
+    prompt = event["text"].strip()
+
+    content = content_from_message(prompt, event)
 
     # Use thread_ts=None for regular messages, and user ID for DMs
-    conversation(say, None, prompt, channel, user, client_msg_id)
+    conversation(say, None, content, channel, user, client_msg_id)
 
 
 # Handle the Lambda function

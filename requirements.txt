@@ -2,3 +2,4 @@ boto3
 slack-bolt
 slack-sdk
 pillow
+requests

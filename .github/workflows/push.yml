@@ -13,6 +13,7 @@ env:
   TEXT_MODEL_ID: ${{ secrets.TEXT_MODEL_ID }}
   IMAGE_MODEL_ID: ${{ secrets.IMAGE_MODEL_ID }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
+  ALLOWED_CHANNEL_IDS: ${{ secrets.ALLOWED_CHANNEL_IDS }}
 
 jobs:
   deploy:
@@ -50,6 +51,7 @@ jobs:
           echo "TEXT_MODEL_ID=${TEXT_MODEL_ID}" >> .env
           echo "IMAGE_MODEL_ID=${IMAGE_MODEL_ID}" >> .env
           echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
+          echo "ALLOWED_CHANNEL_IDS=${ALLOWED_CHANNEL_IDS}" >> .env
 
       - name: Deploy to AWS Lambda 🚀
         env:
