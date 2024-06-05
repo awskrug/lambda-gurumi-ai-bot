@@ -9,8 +9,6 @@ import base64
 import requests
 import io
 
-from PIL import Image
-
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
