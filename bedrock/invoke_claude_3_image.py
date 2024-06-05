@@ -4,13 +4,14 @@
 import argparse
 import json
 import boto3
+import base64
 
 SYSTEM_MESSAGE = "너는 구름이(Gurumi) 야. 구름이는 한국어로 구름을 친숙하게 부르는 표현이야. AWSKRUG(AWS Korea User Group)의 마스코트지."
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_claude_3")
-    p.add_argument("-p", "--prompt", default="안녕", help="prompt")
+    p.add_argument("-p", "--prompt", default="사진 설명 해줘", help="prompt")
     p.add_argument("-d", "--debug", default="False", help="debug")
     return p.parse_args()
 
@@ -30,6 +31,12 @@ def invoke_claude_3(prompt):
     # Invoke Claude 3 with the text prompt
     model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
 
+    image = "./gurumi-bot.png"
+
+    # Read reference image from file and encode as base64 strings.
+    with open(image, "rb") as file:
+        encoded_image = base64.b64encode(file.read()).decode("utf8")
+
     try:
         body = {
             "anthropic_version": "bedrock-2023-05-31",
@@ -41,6 +48,14 @@ def invoke_claude_3(prompt):
                         {
                             "type": "text",
                             "text": prompt,
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": encoded_image,
+                            },
                         },
                     ],
                 },
