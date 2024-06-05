@@ -29,7 +29,7 @@ ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
 ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 
 # Set up the allowed channel ID
-ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "AAA,CCC,EEE,GGG")
+ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
 ENABLE_IMAGE = os.environ.get("ENABLE_IMAGE", "False")
 
@@ -333,6 +333,8 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     except Exception as e:
         print("conversation: Error: {}".format(e))
 
+        chat_update(channel, latest_ts, f"```{e}```")
+
 
 # Get image from URL
 def get_image_from_url(image_url, token=None):
@@ -399,15 +401,17 @@ def handle_mention(body: dict, say: Say):
 
     event = body["event"]
 
-    if "bot_id" in event:  # Ignore messages from the bot itself
+    if "bot_id" in event and event["bot_id"] == bot_id:
+        # Ignore messages from the bot itself
         return
 
     channel = event["channel"]
 
-    allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
-    if channel not in allowed_channel_ids:
-        # say("Sorry, I'm not allowed to respond in this channel.")
-        return
+    if ALLOWED_CHANNEL_IDS != "None":
+        allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
+        if channel not in allowed_channel_ids:
+            # say("Sorry, I'm not allowed to respond in this channel.")
+            return
 
     thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
     user = event["user"]
@@ -427,7 +431,8 @@ def handle_message(body: dict, say: Say):
 
     event = body["event"]
 
-    if "bot_id" in event:  # Ignore messages from the bot itself
+    if "bot_id" in event:
+        # Ignore messages from the bot itself
         return
 
     channel = event["channel"]
