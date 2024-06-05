@@ -333,6 +333,8 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     except Exception as e:
         print("conversation: Error: {}".format(e))
 
+        chat_update(channel, latest_ts, f"```{e}```")
+
 
 # Get image from URL
 def get_image_from_url(image_url, token=None):
