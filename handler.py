@@ -9,8 +9,6 @@ import base64
 import requests
 import io
 
-from PIL import Image
-
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
@@ -138,9 +136,9 @@ def invoke_claude_3(content):
         return text
 
     except Exception as e:
-        print("Error: {}".format(e))
+        print("invoke_claude_3: Error: {}".format(e))
 
-        return None
+        raise e
 
 
 def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
@@ -180,17 +178,15 @@ def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
 
         base64_image = body.get("artifacts")[0].get("base64")
         base64_bytes = base64_image.encode("ascii")
-        image_bytes = base64.b64decode(base64_bytes)
 
-        image = Image.open(io.BytesIO(image_bytes))
-        image.show()
+        image = base64.b64decode(base64_bytes)
 
-        return image_bytes
+        return image
 
     except Exception as e:
-        print("Error: {}".format(e))
+        print("invoke_stable_diffusion: Error: {}".format(e))
 
-        return None
+        raise e
 
 
 # Get thread messages using conversations.replies API method
@@ -262,75 +258,80 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
     prompts = []
 
-    # Get the thread messages
-    if thread_ts != None:
-        chat_update(channel, latest_ts, "이전 대화 내용 확인 중... " + BOT_CURSOR)
+    try:
+        # Get the thread messages
+        if thread_ts != None:
+            chat_update(channel, latest_ts, "이전 대화 내용 확인 중... " + BOT_CURSOR)
 
-        replies = conversations_replies(channel, thread_ts, client_msg_id)
+            replies = conversations_replies(channel, thread_ts, client_msg_id)
 
-        prompts = [reply["content"] for reply in replies if reply["content"].strip()]
+            prompts = [
+                reply["content"] for reply in replies if reply["content"].strip()
+            ]
 
-    # Get the image from the message
-    if type == "image" and len(content) > 1:
-        chat_update(channel, latest_ts, "이미지 감상 중... " + BOT_CURSOR)
+        # Get the image from the message
+        if type == "image" and len(content) > 1:
+            chat_update(channel, latest_ts, "이미지 감상 중... " + BOT_CURSOR)
 
-        content[0]["text"] = "Describe the image in great detail as if viewing a photo."
+            content[0][
+                "text"
+            ] = "Describe the image in great detail as if viewing a photo."
 
-        # Send the prompt to Bedrock
-        message = invoke_claude_3(content)
+            # Send the prompt to Bedrock
+            message = invoke_claude_3(content)
 
-        prompts.append(message)
+            prompts.append(message)
 
-    if prompt:
-        prompts.append(prompt)
+        if prompt:
+            prompts.append(prompt)
 
-    if type == "image":
-        chat_update(channel, latest_ts, "이미지 생성 준비 중... " + BOT_CURSOR)
+        if type == "image":
+            chat_update(channel, latest_ts, "이미지 생성 준비 중... " + BOT_CURSOR)
 
-        prompts.append(
-            "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
-        )
-
-        prompt = "\n\n\n".join(prompts)
-
-        content = []
-        content.append({"type": "text", "text": prompt})
-
-        # Send the prompt to Bedrock
-        message = invoke_claude_3(content)
-
-        chat_update(channel, latest_ts, "이미지 그리는 중... " + BOT_CURSOR)
-
-        image = invoke_stable_diffusion(message)
-
-        # Update the message in Slack
-        chat_update(channel, latest_ts, message)
-
-        if image:
-            # Send the image to Slack
-            app.client.files_upload_v2(
-                channels=channel,
-                file=io.BytesIO(image),
-                title="Generated Image",
-                filename="image.jpg",
-                initial_comment="Here is the generated image.",
-                thread_ts=latest_ts,
+            prompts.append(
+                "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
             )
 
-    else:
-        chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+            prompt = "\n\n\n".join(prompts)
 
-        prompt = "\n\n\n".join(prompts)
+            content = []
+            content.append({"type": "text", "text": prompt})
 
-        content[0]["text"] = prompt
+            # Send the prompt to Bedrock
+            message = invoke_claude_3(content)
 
-        # Send the prompt to Bedrock
-        message = invoke_claude_3(content)
+            chat_update(channel, latest_ts, "이미지 그리는 중... " + BOT_CURSOR)
 
-        message = message.replace("**", "*")
+            image = invoke_stable_diffusion(message)
 
-        # Update the message in Slack
-        chat_update(channel, latest_ts, message)
+            if image:
+                # Update the message in Slack
+                chat_update(channel, latest_ts, message)
+
+                # Send the image to Slack
+                app.client.files_upload_v2(
+                    channels=channel,
+                    file=io.BytesIO(image),
+                    title="Generated Image",
+                    filename="image.jpg",
+                    initial_comment="Here is the generated image.",
+                    thread_ts=latest_ts,
+                )
+        else:
+            chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+
+            prompt = "\n\n\n".join(prompts)
+
+            content[0]["text"] = prompt
+
+            # Send the prompt to Bedrock
+            message = invoke_claude_3(content)
+
+            # Update the message in Slack
+            chat_update(channel, latest_ts, message.replace("**", "*"))
+
+    except Exception as e:
+        print("conversation: Error: {}".format(e))
 
 
 # Get image from URL
