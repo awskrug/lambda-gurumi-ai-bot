@@ -401,9 +401,9 @@ def handle_mention(body: dict, say: Say):
 
     event = body["event"]
 
-    if "bot_id" in event and event["bot_id"] == bot_id:
-        # Ignore messages from the bot itself
-        return
+    # if "bot_id" in event and event["bot_id"] == bot_id:
+    #     # Ignore messages from the bot itself
+    #     return
 
     channel = event["channel"]
 
