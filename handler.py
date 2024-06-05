@@ -258,6 +258,8 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     if ENABLE_IMAGE == "True" and "그려줘" in prompt:
         type = "image"
 
+    print("conversation: {}".format(type))
+
     prompts = []
 
     # Get the thread messages
@@ -279,9 +281,10 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         prompts.append(message)
 
-        if prompt:
-            prompts.append(prompt)
+    if prompt:
+        prompts.append(prompt)
 
+    if type == "image":
         chat_update(channel, latest_ts, "이미지 생성 준비 중... " + BOT_CURSOR)
 
         prompts.append(
@@ -298,9 +301,6 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
     else:
         chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
-
-        if prompt:
-            prompts.append(prompt)
 
         prompt = "\n\n\n".join(prompts)
 
