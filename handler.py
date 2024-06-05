@@ -316,9 +316,11 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
     # Generate an image
     if type == "image" and len(content) > 1:
-        prompt = message
+        chat_update(channel, latest_ts, "이미지 그리는 중... " + BOT_CURSOR)
 
-        image = invoke_stable_diffusion(prompt)
+        image = invoke_stable_diffusion(message)
+
+        chat_update(channel, latest_ts, message)
 
         if image:
             # Send the image to Slack
