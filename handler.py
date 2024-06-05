@@ -299,6 +299,24 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
         # Send the prompt to Bedrock
         message = invoke_claude_3(content)
 
+        chat_update(channel, latest_ts, "이미지 그리는 중... " + BOT_CURSOR)
+
+        image = invoke_stable_diffusion(message)
+
+        # Update the message in Slack
+        chat_update(channel, latest_ts, message)
+
+        if image:
+            # Send the image to Slack
+            app.client.files_upload(
+                channels=channel,
+                file=io.BytesIO(image),
+                title="Generated Image",
+                filename="image.jpg",
+                initial_comment="Here is the generated image.",
+                thread_ts=latest_ts,
+            )
+
     else:
         chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
 
@@ -311,26 +329,8 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         message = message.replace("**", "*")
 
-    # Update the message in Slack
-    chat_update(channel, latest_ts, message)
-
-    # Generate an image
-    if type == "image" and len(content) > 1:
-        chat_update(channel, latest_ts, "이미지 그리는 중... " + BOT_CURSOR)
-
-        image = invoke_stable_diffusion(message)
-
+        # Update the message in Slack
         chat_update(channel, latest_ts, message)
-
-        if image:
-            # Send the image to Slack
-            app.client.files_upload(
-                channels=channel,
-                file=io.BytesIO(image),
-                title="Generated Image",
-                filename="image.jpg",
-                initial_comment="Here is the generated image.",
-            )
 
 
 # Get image from URL
