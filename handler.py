@@ -183,7 +183,7 @@ def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
 
         image = base64.b64decode(base64_bytes)
 
-        return image, None
+        return image
 
     except Exception as e:
         print("invoke_stable_diffusion: Error: {}".format(e))
