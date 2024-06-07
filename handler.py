@@ -91,7 +91,10 @@ def put_context(thread_ts, user, conversation=""):
 # Update the message in Slack
 def chat_update(channel, ts, message, blocks=None):
     # print("chat_update: {}".format(message))
-    app.client.chat_update(channel=channel, ts=ts, text=message, blocks=blocks)
+
+    text = message.replace("**", "*")
+
+    app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
 
 
 def invoke_claude_3(content):
@@ -328,7 +331,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
             message = invoke_claude_3(content)
 
             # Update the message in Slack
-            chat_update(channel, latest_ts, message.replace("**", "*"))
+            chat_update(channel, latest_ts, message)
 
     except Exception as e:
         print("conversation: Error: {}".format(e))
@@ -401,9 +404,9 @@ def handle_mention(body: dict, say: Say):
 
     event = body["event"]
 
-    if "bot_id" in event and event["bot_id"] == bot_id:
-        # Ignore messages from the bot itself
-        return
+    # if "bot_id" in event and event["bot_id"] == bot_id:
+    #     # Ignore messages from the bot itself
+    #     return
 
     channel = event["channel"]
 
