@@ -22,8 +22,8 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-context")
 
 # Amazon Bedrock Model ID
-TEXT_MODEL_ID = os.environ.get("TEXT_MODEL_ID", "anthropic.claude-3")
-IMAGE_MODEL_ID = os.environ.get("IMAGE_MODEL_ID", "stability.stable-diffusion-xl")
+MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
+MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
 
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
 ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
@@ -128,7 +128,7 @@ def invoke_claude_3(content):
             body["system"] = SYSTEM_MESSAGE
 
         response = bedrock.invoke_model(
-            modelId=TEXT_MODEL_ID,
+            modelId=MODEL_ID_TEXT,
             body=json.dumps(body),
         )
 
@@ -179,7 +179,7 @@ def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
             body["style_preset"] = style_preset
 
         response = bedrock.invoke_model(
-            modelId=IMAGE_MODEL_ID,
+            modelId=MODEL_ID_IMAGE,
             body=json.dumps(body),
         )
 
