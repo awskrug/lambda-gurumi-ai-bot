@@ -39,6 +39,14 @@ SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 10000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
+KEYWARD_IMAGE = "그려줘"
+
+MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
+MSG_IMAGE_DESCRIBE = "이미지 감상 중... " + BOT_CURSOR
+MSG_IMAGE_GENERATE = "이미지 생성 준비 중... " + BOT_CURSOR
+MSG_IMAGE_DRAW = "이미지 그리는 중... " + BOT_CURSOR
+MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
+
 COMMAND_DESCRIBE = "Describe the image in great detail as if viewing a photo."
 COMMAND_GENERATE = "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
 
@@ -93,14 +101,48 @@ def put_context(thread_ts, user, conversation=""):
 
 
 # Update the message in Slack
-def chat_update(channel, ts, message, blocks=None):
+def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=False):
     # print("chat_update: {}".format(message))
 
-    text = message.replace("**", "*")
+    if sys.getsizeof(message) > MAX_LEN_SLACK:
+        split_key = "\n\n"
+        if "```" in message:
+            split_key = "```"
 
-    app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
+        parts = message.split(split_key)
 
-    return message, ts
+        last_one = parts.pop()
+
+        if len(parts) % 2 == 0:
+            text = split_key.join(parts)
+            message = split_key + last_one
+        else:
+            text = split_key.join(parts) + split_key
+            message = last_one
+
+        text = text.replace("**", "*")
+
+        # Update the message
+        app.client.chat_update(channel=channel, ts=latest_ts, text=text)
+
+        if continue_thread:
+            text = text.replace("**", "*") + " " + BOT_CURSOR
+        else:
+            text = text.replace("**", "*")
+
+        # New message
+        result = say(text=text, thread_ts=thread_ts)
+        latest_ts = result["ts"]
+    else:
+        if continue_thread:
+            text = message.replace("**", "*") + " " + BOT_CURSOR
+        else:
+            text = message.replace("**", "*")
+
+        # Update the message
+        app.client.chat_update(channel=channel, ts=latest_ts, text=text)
+
+    return message, latest_ts
 
 
 def invoke_claude_3(content):
@@ -260,7 +302,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     prompt = content[0]["text"]
 
     type = "text"
-    if ENABLE_IMAGE == "True" and "그려줘" in prompt:
+    if ENABLE_IMAGE == "True" and KEYWARD_IMAGE in prompt:
         type = "image"
 
     print("conversation: {}".format(type))
@@ -270,7 +312,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
     try:
         # Get the thread messages
         if thread_ts != None:
-            chat_update(channel, latest_ts, "이전 대화 내용 확인 중... " + BOT_CURSOR)
+            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
 
             replies = conversations_replies(channel, thread_ts, client_msg_id)
 
@@ -280,7 +322,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
 
         # Get the image from the message
         if type == "image" and len(content) > 1:
-            chat_update(channel, latest_ts, "이미지 감상 중... " + BOT_CURSOR)
+            chat_update(say, channel, thread_ts, latest_ts, MSG_IMAGE_DESCRIBE)
 
             content[0]["text"] = COMMAND_DESCRIBE
 
@@ -293,7 +335,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
             prompts.append(prompt)
 
         if type == "image":
-            chat_update(channel, latest_ts, "이미지 생성 준비 중... " + BOT_CURSOR)
+            chat_update(say, channel, thread_ts, latest_ts, MSG_IMAGE_GENERATE)
 
             prompts.append(COMMAND_GENERATE)
 
@@ -305,25 +347,25 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
             # Send the prompt to Bedrock
             message = invoke_claude_3(content)
 
-            chat_update(channel, latest_ts, "이미지 그리는 중... " + BOT_CURSOR)
+            chat_update(say, channel, thread_ts, latest_ts, MSG_IMAGE_DRAW)
 
             image = invoke_stable_diffusion(message)
 
             if image:
                 # Update the message in Slack
-                chat_update(channel, latest_ts, message)
+                chat_update(say, channel, thread_ts, latest_ts, message)
 
                 # Send the image to Slack
                 app.client.files_upload_v2(
                     channels=channel,
+                    thread_ts=thread_ts,
                     file=io.BytesIO(image),
-                    title="Generated Image",
                     filename="image.jpg",
+                    title="Generated Image",
                     initial_comment="Here is the generated image.",
-                    thread_ts=latest_ts,
                 )
         else:
-            chat_update(channel, latest_ts, "응답 기다리는 중... " + BOT_CURSOR)
+            chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
             prompt = "\n\n\n".join(prompts)
 
@@ -333,12 +375,12 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
             message = invoke_claude_3(content)
 
             # Update the message in Slack
-            chat_update(channel, latest_ts, message)
+            chat_update(say, channel, thread_ts, latest_ts, message)
 
     except Exception as e:
         print("conversation: Error: {}".format(e))
 
-        chat_update(channel, latest_ts, f"```{e}```")
+        chat_update(say, channel, thread_ts, latest_ts, f"```{e}```")
 
 
 # Get image from URL
