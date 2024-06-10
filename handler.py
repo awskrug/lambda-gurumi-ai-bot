@@ -36,7 +36,7 @@ ENABLE_IMAGE = os.environ.get("ENABLE_IMAGE", "False")
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
-MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 2000))
+MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
 KEYWARD_IMAGE = "그려줘"
