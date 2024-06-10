@@ -36,7 +36,11 @@ ENABLE_IMAGE = os.environ.get("ENABLE_IMAGE", "False")
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
-MESSAGE_MAX = int(os.environ.get("MESSAGE_MAX", 4000))
+MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 10000))
+MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
+
+COMMAND_DESCRIBE = "Describe the image in great detail as if viewing a photo."
+COMMAND_GENERATE = "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
 
 # Initialize Slack app
 app = App(
@@ -95,6 +99,8 @@ def chat_update(channel, ts, message, blocks=None):
     text = message.replace("**", "*")
 
     app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
+
+    return message, ts
 
 
 def invoke_claude_3(content):
@@ -229,7 +235,7 @@ def conversations_replies(channel, ts, client_msg_id):
 
             # print("conversations_replies: messages size: {}".format(sys.getsizeof(messages)))
 
-            if sys.getsizeof(messages) > MESSAGE_MAX:
+            if sys.getsizeof(messages) > MAX_LEN_BEDROCK:
                 messages.pop(0)  # remove the oldest message
                 break
 
@@ -276,9 +282,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
         if type == "image" and len(content) > 1:
             chat_update(channel, latest_ts, "이미지 감상 중... " + BOT_CURSOR)
 
-            content[0][
-                "text"
-            ] = "Describe the image in great detail as if viewing a photo."
+            content[0]["text"] = COMMAND_DESCRIBE
 
             # Send the prompt to Bedrock
             message = invoke_claude_3(content)
@@ -291,9 +295,7 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
         if type == "image":
             chat_update(channel, latest_ts, "이미지 생성 준비 중... " + BOT_CURSOR)
 
-            prompts.append(
-                "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
-            )
+            prompts.append(COMMAND_GENERATE)
 
             prompt = "\n\n\n".join(prompts)
 
