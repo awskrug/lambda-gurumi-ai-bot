@@ -31,7 +31,7 @@ def invoke_claude_3(prompt):
     # Invoke Claude 3 with the text prompt
     model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
 
-    image = "./gurumi-bot.png"
+    image = "../images/gurumi-bot.png"
 
     # Read reference image from file and encode as base64 strings.
     with open(image, "rb") as file:

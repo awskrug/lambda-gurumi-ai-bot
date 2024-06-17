@@ -1,5 +1,9 @@
 # lambda-gurumi-ai-bot
 
+A serverless Slack bot using AWS Lambda, API Gateway, and DynamoDB.
+
+![Gurumi Bot](images/gurumi-bot.png)
+
 ## Install
 
 ```bash

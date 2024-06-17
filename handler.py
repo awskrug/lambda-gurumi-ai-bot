@@ -126,9 +126,9 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
         app.client.chat_update(channel=channel, ts=latest_ts, text=text)
 
         if continue_thread:
-            text = text.replace("**", "*") + " " + BOT_CURSOR
+            text = message.replace("**", "*") + " " + BOT_CURSOR
         else:
-            text = text.replace("**", "*")
+            text = message.replace("**", "*")
 
         # New message
         result = say(text=text, thread_ts=thread_ts)
