@@ -50,6 +50,15 @@ MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
 COMMAND_DESCRIBE = "Describe the image in great detail as if viewing a photo."
 COMMAND_GENERATE = "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
 
+CONVERSION_ARRAY = [
+    ["**", "*"],
+    # ["#### ", "🔸 "],
+    # ["### ", "🔶 "],
+    # ["## ", "🟠 "],
+    # ["# ", "🟡 "],
+]
+
+
 # Initialize Slack app
 app = App(
     token=SLACK_BOT_TOKEN,
@@ -100,6 +109,13 @@ def put_context(thread_ts, user, conversation=""):
         )
 
 
+# Replace text
+def replace_text(text):
+    for old, new in CONVERSION_ARRAY:
+        text = text.replace(old, new)
+    return text
+
+
 # Update the message in Slack
 def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=False):
     # print("chat_update: {}".format(message))
@@ -114,30 +130,30 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
         last_one = parts.pop()
 
         if len(parts) % 2 == 0:
-            text = split_key.join(parts)
-            message = split_key + last_one
-        else:
             text = split_key.join(parts) + split_key
             message = last_one
+        else:
+            text = split_key.join(parts)
+            message = split_key + last_one
 
-        text = text.replace("**", "*")
+        text = replace_text(text)
 
         # Update the message
         app.client.chat_update(channel=channel, ts=latest_ts, text=text)
 
         if continue_thread:
-            text = message.replace("**", "*") + " " + BOT_CURSOR
+            text = replace_text(message) + " " + BOT_CURSOR
         else:
-            text = message.replace("**", "*")
+            text = replace_text(message)
 
         # New message
         result = say(text=text, thread_ts=thread_ts)
         latest_ts = result["ts"]
     else:
         if continue_thread:
-            text = message.replace("**", "*") + " " + BOT_CURSOR
+            text = replace_text(message) + " " + BOT_CURSOR
         else:
-            text = message.replace("**", "*")
+            text = replace_text(message)
 
         # Update the message
         app.client.chat_update(channel=channel, ts=latest_ts, text=text)
