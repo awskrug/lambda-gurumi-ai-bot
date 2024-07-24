@@ -60,7 +60,7 @@ SLACK_SIGNING_SECRET="xxxx"
 In order to deploy the example, you need to run the following command:
 
 ```bash
-$ sls deploy
+$ sls deploy --region us-east-1
 ```
 
 ## Slack Test
