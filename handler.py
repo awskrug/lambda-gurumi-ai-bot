@@ -21,6 +21,9 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 # Keep track of conversation history by thread and user
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-context")
 
+# Amazon Bedrock Knowledge Base ID
+KB_ID = os.environ.get("KB_ID", "None")
+
 # Amazon Bedrock Model ID
 MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
 MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
