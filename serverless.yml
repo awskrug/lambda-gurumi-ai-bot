@@ -16,6 +16,11 @@ provider:
         - "arn:aws:dynamodb:*:*:table/${self:provider.environment.DYNAMODB_TABLE_NAME}"
     - Effect: Allow
       Action:
+        - bedrock:Retrieve
+      Resource:
+        - "arn:aws:bedrock:*:*:knowledge-base/*"
+    - Effect: Allow
+      Action:
         - bedrock:InvokeModel
       Resource:
         - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"

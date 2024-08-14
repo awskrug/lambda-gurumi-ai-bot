@@ -9,10 +9,15 @@ import base64
 import requests
 import io
 
+from botocore.client import Config
+
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
+
 BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
+
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 # Set up Slack API credentials
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
@@ -20,6 +25,9 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 
 # Keep track of conversation history by thread and user
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-context")
+
+# Amazon Bedrock Knowledge Base ID
+KB_ID = os.environ.get("KB_ID", "None")
 
 # Amazon Bedrock Model ID
 MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
@@ -73,7 +81,14 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
 # Initialize the Amazon Bedrock runtime client
-bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
+bedrock = boto3.client(service_name="bedrock-runtime", region_name=AWS_REGION)
+
+bedrock_config = Config(
+    connect_timeout=120, read_timeout=120, retries={"max_attempts": 0}
+)
+bedrock_agent_client = boto3.client(
+    "bedrock-agent-runtime", region_name=AWS_REGION, config=bedrock_config
+)
 
 
 # Get the context from DynamoDB
@@ -159,6 +174,41 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
         app.client.chat_update(channel=channel, ts=latest_ts, text=text)
 
     return message, latest_ts
+
+
+def invoke_knowledge_base(content):
+    """
+    Invokes the Amazon Bedrock Knowledge Base to retrieve information using the input
+    provided in the request body.
+
+    :param content: The content that you want to use for retrieval.
+    :return: The retrieved contexts from the knowledge base.
+    """
+
+    try:
+        response = bedrock_agent_client.retrieve(
+            retrievalQuery={"text": content},
+            knowledgeBaseId=KB_ID,
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {
+                    "numberOfResults": 3,
+                    # "overrideSearchType": "HYBRID",  # optional
+                }
+            },
+        )
+
+        retrievalResults = response["retrievalResults"]
+
+        contexts = []
+        for retrievedResult in retrievalResults:
+            contexts.append(retrievedResult["content"]["text"])
+
+        return contexts
+
+    except Exception as e:
+        print("invoke_knowledge_base: Error: {}".format(e))
+
+        raise e
 
 
 def invoke_claude_3(content):
@@ -346,6 +396,14 @@ def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
             message = invoke_claude_3(content)
 
             prompts.append(message)
+
+        if KB_ID != "None":
+            chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
+
+            # Get the knowledge base contexts
+            contexts = invoke_knowledge_base(prompt)
+
+            prompts.extend(contexts)
 
         if prompt:
             prompts.append(prompt)
