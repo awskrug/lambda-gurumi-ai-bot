@@ -13,13 +13,18 @@ provider:
       Action:
         - dynamodb:*
       Resource:
-        - "arn:aws:dynamodb:*:*:table/${self:provider.environment.DYNAMODB_TABLE_NAME}"
+        - "arn:aws:dynamodb:::table/${self:provider.environment.DYNAMODB_TABLE_NAME}"
     - Effect: Allow
       Action:
         - bedrock:InvokeModel
       Resource:
-        - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
-        - "arn:aws:bedrock:*::foundation-model/stability.stable-diffusion-*"
+        - "arn:aws:bedrock:::foundation-model/anthropic.claude-*"
+        - "arn:aws:bedrock:::foundation-model/stability.stable-diffusion-*"
+    - Effect: Allow
+      Action:
+        - bedrock:Retrieve
+      Resource:
+        - "arn:aws:bedrock:::knowledge-base/*"
 
 functions:
   mention:
