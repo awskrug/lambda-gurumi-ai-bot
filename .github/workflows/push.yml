@@ -10,9 +10,10 @@ env:
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
   DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
   ENABLE_IMAGE: ${{ vars.ENABLE_IMAGE }}
+  KB_ID: ${{ vars.KB_ID }}
   MODEL_ID_IMAGE: ${{ vars.MODEL_ID_IMAGE }}
-  SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
   MODEL_ID_TEXT: ${{ vars.MODEL_ID_TEXT }}
+  SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -52,11 +53,12 @@ jobs:
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
           echo "ENABLE_IMAGE=${ENABLE_IMAGE}" >> .env
+          echo "KB_ID=${KB_ID}" >> .env
           echo "MODEL_ID_IMAGE=${MODEL_ID_IMAGE}" >> .env
+          echo "MODEL_ID_TEXT=${MODEL_ID_TEXT}" >> .env
           echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> .env
           echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
           echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
-          echo "MODEL_ID_TEXT=${MODEL_ID_TEXT}" >> .env
 
       - name: Deploy to AWS Lambda 🚀
         run: npx serverless deploy --region us-east-1
