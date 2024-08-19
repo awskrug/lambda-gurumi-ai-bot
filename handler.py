@@ -21,7 +21,7 @@ SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 
 # Keep track of conversation history by thread and user
-DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-context")
+DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context")
 
 # Amazon Bedrock Knowledge Base ID
 KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
@@ -368,6 +368,14 @@ def handle_message(body: dict, say: Say):
     conversation(say, None, prompt, channel)
 
 
+def success():
+    return {
+        "statusCode": 200,
+        "headers": {"Content-type": "application/json"},
+        "body": json.dumps({"status": "Success"}),
+    }
+
+
 # Handle the Lambda function
 def lambda_handler(event, context):
     body = json.loads(event["body"])
@@ -384,22 +392,14 @@ def lambda_handler(event, context):
 
     # Duplicate execution prevention
     if "event" not in body or "client_msg_id" not in body["event"]:
-        return {
-            "statusCode": 200,
-            "headers": {"Content-type": "application/json"},
-            "body": json.dumps({"status": "Success"}),
-        }
+        return success()
 
     # Get the context from DynamoDB
     token = body["event"]["client_msg_id"]
     prompt = get_context(token, body["event"]["user"])
 
     if prompt != "":
-        return {
-            "statusCode": 200,
-            "headers": {"Content-type": "application/json"},
-            "body": json.dumps({"status": "Success"}),
-        }
+        return success()
 
     # Put the context in DynamoDB
     put_context(token, body["event"]["user"], body["event"]["text"])
