@@ -212,7 +212,8 @@ def conversations_replies(channel, ts, client_msg_id):
     except Exception as e:
         print("conversations_replies: Error: {}".format(e))
 
-    print("conversations_replies: {}".format(contexts))
+    print("conversations_replies: getsizeof: {}".format(sys.getsizeof(contexts)))
+    # print("conversations_replies: {}".format(contexts))
 
     return contexts
 
@@ -321,17 +322,6 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         prompts.append(SYSTEM_MESSAGE)
 
     try:
-        # Get the previous conversation contexts
-        if thread_ts != None:
-            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
-
-            contexts = conversations_replies(channel, thread_ts, client_msg_id)
-
-            prompts.append("<context>")
-            for reply in contexts:
-                prompts.append(reply["content"])
-            prompts.append("</context>")
-
         # Get the knowledge base contexts
         if KNOWLEDGE_BASE_ID != "None":
             chat_update(say, channel, thread_ts, latest_ts, MSG_KNOWLEDGE)
@@ -345,15 +335,29 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
             for reply in contexts:
                 prompts.append(reply["content"])
             prompts.append("</context>")
+        else:
+            # Get the previous conversation contexts
+            if thread_ts != None:
+                chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
 
-        # Generate the prompt
+                contexts = conversations_replies(channel, thread_ts, client_msg_id)
+
+                prompts.append("<context>")
+                for context in contexts:
+                    prompts.append(context["content"])
+                prompts.append("</context>")
+
+        # Add the question to the prompts
+        prompts.append("")
         prompts.append("<question>")
         prompts.append(query)
         prompts.append("</question>")
+        prompts.append("")
 
         # prompts.append("The response should be specific and use statistics or numbers when possible.")
         prompts.append("Assistant:")
 
+        # Combine the prompts
         prompt = "\n".join(prompts)
 
         # print("conversation: prompt: {}".format(prompt))
