@@ -1,33 +1,44 @@
-# Distribution / packaging
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-*.egg-info/
-.installed.cfg
-*.egg
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
 
-# NodeJS dependencies
-node_modules/
+# Folder config file
+Desktop.ini
 
-# Serverless runtime cache
-.serverless_sdk
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
 
-# Serverless directories
-.serverless
+# Windows shortcuts
+*.lnk
 
-# Local configuration
-.env
-
+# Mac
 .DS_Store
 
+# JetBrains
+.idea/
+*.iml
+
+# Eclipse
+.settings/
+.metadata/
+
+# Build
+target/
 build/
+dist/
+
+# Temp
+*.pid
+*.log
+*.tmp
+
+# python
+venv
+*.pyc
+staticfiles
+.env
+db.sqlite3
+__pycache__
+
+# node
+node_modules

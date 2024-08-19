@@ -7,17 +7,18 @@ provider:
   # memorySize: 5120
   timeout: 600
   environment:
-    DYNAMODB_TABLE_NAME: gurumi-ai-bot-context
+    BASE_NAME: gurumi-ai-bot
   iamRoleStatements:
     - Effect: Allow
       Action:
         - dynamodb:*
       Resource:
-        - "arn:aws:dynamodb:*:*:table/${self:provider.environment.DYNAMODB_TABLE_NAME}"
+        - "arn:aws:dynamodb:*:*:table/${self:provider.environment.BASE_NAME}-*"
     - Effect: Allow
       Action:
         - bedrock:Retrieve
       Resource:
+        # - "arn:aws:bedrock:*:*:knowledge-base/${self:provider.environment.BASE_NAME}-*"
         - "arn:aws:bedrock:*:*:knowledge-base/*"
     - Effect: Allow
       Action:
@@ -39,7 +40,7 @@ resources:
     DynamoDBTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: ${self:provider.environment.DYNAMODB_TABLE_NAME}
+        TableName: ${self:provider.environment.BASE_NAME}-context
         AttributeDefinitions:
           - AttributeName: id
             AttributeType: S
@@ -52,6 +53,15 @@ resources:
         TimeToLiveSpecification:
           AttributeName: expire_at
           Enabled: true
+    # S3Bucket:
+    #   Type: AWS::S3::Bucket
+    #   Properties:
+    #     BucketName:
+    #       Fn::Sub: ${self:provider.environment.BASE_NAME}-${AWS::AccountId}
+    # KnowledgeBase:
+    #   Type: AWS::Bedrock::KnowledgeBase
+    #   Properties:
+    #     Name: ${self:provider.environment.BASE_NAME}-knowledge-base
 
 plugins:
   - serverless-python-requirements

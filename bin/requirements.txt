@@ -1,0 +1,4 @@
+boto3
+python-notion-exporter
+requests
+tqdm
