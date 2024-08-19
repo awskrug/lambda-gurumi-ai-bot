@@ -52,11 +52,11 @@ resources:
         TimeToLiveSpecification:
           AttributeName: expire_at
           Enabled: true
-    S3Bucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName:
-          Fn::Sub: ${self:provider.environment.BASE_NAME}-${AWS::AccountId}
+    # S3Bucket:
+    #   Type: AWS::S3::Bucket
+    #   Properties:
+    #     BucketName:
+    #       Fn::Sub: ${self:provider.environment.BASE_NAME}-${AWS::AccountId}
     # KnowledgeBase:
     #   Type: AWS::Bedrock::KnowledgeBase
     #   Properties:
