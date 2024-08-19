@@ -5,9 +5,6 @@ import os
 import re
 import sys
 import time
-import base64
-import requests
-import io
 
 from botocore.client import Config
 
@@ -27,19 +24,19 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-context")
 
 # Amazon Bedrock Knowledge Base ID
-KB_ID = os.environ.get("KB_ID", "None")
+KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
+
+KB_RETRIEVE_COUNT = int(os.environ.get("KB_RETRIEVE_COUNT", 5))
 
 # Amazon Bedrock Model ID
-MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
-MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
-
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
 ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 
+MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
+MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
+
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
-
-ENABLE_IMAGE = os.environ.get("ENABLE_IMAGE", "False")
 
 # Set up System messages
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
@@ -47,16 +44,8 @@ SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
-KEYWARD_IMAGE = "그려줘"
-
-MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
-MSG_IMAGE_DESCRIBE = "이미지 감상 중... " + BOT_CURSOR
-MSG_IMAGE_GENERATE = "이미지 생성 준비 중... " + BOT_CURSOR
-MSG_IMAGE_DRAW = "이미지 그리는 중... " + BOT_CURSOR
+MSG_PREVIOUS = "지식 기반 검색 중... " + BOT_CURSOR
 MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
-
-COMMAND_DESCRIBE = "Describe the image in great detail as if viewing a photo."
-COMMAND_GENERATE = "Convert the above sentence into a command for stable-diffusion to generate an image within 1000 characters. Just give me a prompt."
 
 CONVERSION_ARRAY = [
     ["**", "*"],
@@ -185,25 +174,28 @@ def invoke_knowledge_base(content):
     :return: The retrieved contexts from the knowledge base.
     """
 
+    if KNOWLEDGE_BASE_ID == "None":
+        return ""
+
     try:
         response = bedrock_agent_client.retrieve(
             retrievalQuery={"text": content},
-            knowledgeBaseId=KB_ID,
+            knowledgeBaseId=KNOWLEDGE_BASE_ID,
             retrievalConfiguration={
                 "vectorSearchConfiguration": {
-                    "numberOfResults": 3,
+                    "numberOfResults": KB_RETRIEVE_COUNT,
                     # "overrideSearchType": "HYBRID",  # optional
                 }
             },
         )
 
-        retrievalResults = response["retrievalResults"]
+        results = response["retrievalResults"]
 
         contexts = []
-        for retrievedResult in retrievalResults:
-            contexts.append(retrievedResult["content"]["text"])
+        for result in results:
+            contexts.append(result["content"]["text"])
 
-        return contexts
+        return "\n".join(contexts)
 
     except Exception as e:
         print("invoke_knowledge_base: Error: {}".format(e))
@@ -211,7 +203,7 @@ def invoke_knowledge_base(content):
         raise e
 
 
-def invoke_claude_3(content):
+def invoke_claude_3(prompt):
     """
     Invokes Anthropic Claude 3 Sonnet to run an inference using the input
     provided in the request body.
@@ -227,13 +219,10 @@ def invoke_claude_3(content):
             "messages": [
                 {
                     "role": "user",
-                    "content": content,
+                    "content": [{"type": "text", "text": prompt}],
                 },
             ],
         }
-
-        if SYSTEM_MESSAGE != "None":
-            body["system"] = SYSTEM_MESSAGE
 
         response = bedrock.invoke_model(
             modelId=MODEL_ID_TEXT,
@@ -258,261 +247,77 @@ def invoke_claude_3(content):
         raise e
 
 
-def invoke_stable_diffusion(prompt, seed=0, style_preset="photographic"):
-    """
-    Invokes the Stability.ai Stable Diffusion XL model to create an image using
-    the input provided in the request body.
+def gen_prompt(query, contexts):
+    if contexts == "":
+        prompt = f"""
+Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible.
+If you don't know the answer, just say that you don't know, don't try to make up an answer.
+{SYSTEM_MESSAGE}
 
-    :param prompt: The prompt that you want Stable Diffusion  to use for image generation.
-    :param seed: Random noise seed (omit this option or use 0 for a random seed)
-    :param style_preset: Pass in a style preset to guide the image model towards
-                          a particular style.
-    :return: Base64-encoded inference response from the model.
-    """
+<question>
+{query}
+</question>
 
-    try:
-        # The different model providers have individual request and response formats.
-        # For the format, ranges, and available style_presets of Stable Diffusion models refer to:
-        # https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-stability-diffusion.html
+The response should be specific and use statistics or numbers when possible.
 
-        body = {
-            "text_prompts": [{"text": prompt}],
-            "seed": seed,
-            "cfg_scale": 10,
-            "steps": 30,
-            "samples": 1,
-        }
+Assistant:"""
 
-        if style_preset:
-            body["style_preset"] = style_preset
+    else:
+        prompt = f"""
+Human: You are a financial advisor AI system, and provides answers to questions by using fact based and statistical information when possible.
+Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags.
+If you don't know the answer, just say that you don't know, don't try to make up an answer.
+{SYSTEM_MESSAGE}
+<context>
+{contexts}
+</context>
 
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID_IMAGE,
-            body=json.dumps(body),
-        )
+<question>
+{query}
+</question>
 
-        body = json.loads(response["body"].read())
+The response should be specific and use statistics or numbers when possible.
 
-        base64_image = body.get("artifacts")[0].get("base64")
-        base64_bytes = base64_image.encode("ascii")
+Assistant:"""
 
-        image = base64.b64decode(base64_bytes)
-
-        return image
-
-    except Exception as e:
-        print("invoke_stable_diffusion: Error: {}".format(e))
-
-        raise e
-
-
-# Get thread messages using conversations.replies API method
-def conversations_replies(channel, ts, client_msg_id):
-    messages = []
-
-    try:
-        response = app.client.conversations_replies(channel=channel, ts=ts)
-
-        print("conversations_replies: {}".format(response))
-
-        if not response.get("ok"):
-            print(
-                "conversations_replies: {}".format(
-                    "Failed to retrieve thread messages."
-                )
-            )
-
-        res_messages = response.get("messages", [])
-        res_messages.reverse()
-        res_messages.pop(0)  # remove the first message
-
-        for message in res_messages:
-            if message.get("client_msg_id", "") == client_msg_id:
-                continue
-
-            role = "user"
-            if message.get("bot_id", "") != "":
-                role = "assistant"
-
-            messages.append(
-                {
-                    "role": role,
-                    "content": message.get("text", ""),
-                }
-            )
-
-            # print("conversations_replies: messages size: {}".format(sys.getsizeof(messages)))
-
-            if sys.getsizeof(messages) > MAX_LEN_BEDROCK:
-                messages.pop(0)  # remove the oldest message
-                break
-
-        messages.reverse()
-
-    except Exception as e:
-        print("conversations_replies: {}".format(e))
-
-    print("conversations_replies: {}".format(messages))
-
-    return messages
+    return prompt
 
 
 # Handle the chatgpt conversation
-def conversation(say: Say, thread_ts, content, channel, user, client_msg_id):
-    print("conversation: {}".format(json.dumps(content)))
+def conversation(say: Say, thread_ts, query, channel):
+    print("conversation: query: {}".format(query))
 
     # Keep track of the latest message timestamp
     result = say(text=BOT_CURSOR, thread_ts=thread_ts)
     latest_ts = result["ts"]
 
-    prompt = content[0]["text"]
-
-    type = "text"
-    if ENABLE_IMAGE == "True" and KEYWARD_IMAGE in prompt:
-        type = "image"
-
-    print("conversation: {}".format(type))
-
-    prompts = []
-
     try:
-        # Get the thread messages
-        if thread_ts != None:
-            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
+        chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
 
-            replies = conversations_replies(channel, thread_ts, client_msg_id)
+        # Get the knowledge base contexts
+        contexts = invoke_knowledge_base(query)
 
-            prompts = [
-                reply["content"] for reply in replies if reply["content"].strip()
-            ]
+        print("conversation: contexts: {}".format(contexts))
 
-        # Get the image from the message
-        if type == "image" and len(content) > 1:
-            chat_update(say, channel, thread_ts, latest_ts, MSG_IMAGE_DESCRIBE)
+        # Generate the prompt
+        prompt = gen_prompt(query, contexts)
 
-            content[0]["text"] = COMMAND_DESCRIBE
+        # print("conversation: prompt: {}".format(prompt))
 
-            # Send the prompt to Bedrock
-            message = invoke_claude_3(content)
+        chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
-            prompts.append(message)
+        # Send the prompt to Bedrock
+        message = invoke_claude_3(prompt)
 
-        if KB_ID != "None":
-            chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
+        print("conversation: message: {}".format(message))
 
-            # Get the knowledge base contexts
-            contexts = invoke_knowledge_base(prompt)
-
-            prompts.extend(contexts)
-
-        if prompt:
-            prompts.append(prompt)
-
-        if type == "image":
-            chat_update(say, channel, thread_ts, latest_ts, MSG_IMAGE_GENERATE)
-
-            prompts.append(COMMAND_GENERATE)
-
-            prompt = "\n\n\n".join(prompts)
-
-            content = []
-            content.append({"type": "text", "text": prompt})
-
-            # Send the prompt to Bedrock
-            message = invoke_claude_3(content)
-
-            chat_update(say, channel, thread_ts, latest_ts, MSG_IMAGE_DRAW)
-
-            image = invoke_stable_diffusion(message)
-
-            if image:
-                # Update the message in Slack
-                chat_update(say, channel, thread_ts, latest_ts, message)
-
-                # Send the image to Slack
-                app.client.files_upload_v2(
-                    channels=channel,
-                    thread_ts=thread_ts,
-                    file=io.BytesIO(image),
-                    filename="image.jpg",
-                    title="Generated Image",
-                    initial_comment="Here is the generated image.",
-                )
-        else:
-            chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
-
-            prompt = "\n\n\n".join(prompts)
-
-            content[0]["text"] = prompt
-
-            # Send the prompt to Bedrock
-            message = invoke_claude_3(content)
-
-            # Update the message in Slack
-            chat_update(say, channel, thread_ts, latest_ts, message)
+        # Update the message in Slack
+        chat_update(say, channel, thread_ts, latest_ts, message)
 
     except Exception as e:
-        print("conversation: Error: {}".format(e))
+        print("conversation: error: {}".format(e))
 
         chat_update(say, channel, thread_ts, latest_ts, f"```{e}```")
-
-
-# Get image from URL
-def get_image_from_url(image_url, token=None):
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    response = requests.get(image_url, headers=headers)
-
-    if response.status_code == 200:
-        return response.content
-    else:
-        print("Failed to fetch image: {}".format(image_url))
-
-    return None
-
-
-# Get image from Slack
-def get_image_from_slack(image_url):
-    return get_image_from_url(image_url, SLACK_BOT_TOKEN)
-
-
-# Get encoded image from Slack
-def get_encoded_image_from_slack(image_url):
-    image = get_image_from_slack(image_url)
-
-    if image:
-        return base64.b64encode(image).decode("utf-8")
-
-    return None
-
-
-# Extract content from the message
-def content_from_message(prompt, event):
-    content = []
-    content.append({"type": "text", "text": prompt})
-
-    if "files" in event:
-        files = event.get("files", [])
-        for file in files:
-            mimetype = file["mimetype"]
-            if mimetype.startswith("image"):
-                image_url = file.get("url_private")
-                base64_image = get_encoded_image_from_slack(image_url)
-                if base64_image:
-                    content.append(
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mimetype,
-                                "data": base64_image,
-                            },
-                        }
-                    )
-
-    return content
 
 
 # Handle the app_mention event
@@ -526,23 +331,22 @@ def handle_mention(body: dict, say: Say):
     #     # Ignore messages from the bot itself
     #     return
 
+    thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
+
     channel = event["channel"]
 
     if ALLOWED_CHANNEL_IDS != "None":
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
-            # say("Sorry, I'm not allowed to respond in this channel.")
+            say(
+                text="Sorry, I'm not allowed to respond in this channel.",
+                thread_ts=thread_ts,
+            )
             return
-
-    thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
-    user = event["user"]
-    client_msg_id = event["client_msg_id"]
 
     prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
 
-    content = content_from_message(prompt, event)
-
-    conversation(say, thread_ts, content, channel, user, client_msg_id)
+    conversation(say, thread_ts, prompt, channel)
 
 
 # Handle the DM (direct message) event
@@ -557,15 +361,11 @@ def handle_message(body: dict, say: Say):
         return
 
     channel = event["channel"]
-    user = event["user"]
-    client_msg_id = event["client_msg_id"]
 
     prompt = event["text"].strip()
 
-    content = content_from_message(prompt, event)
-
     # Use thread_ts=None for regular messages, and user ID for DMs
-    conversation(say, None, content, channel, user, client_msg_id)
+    conversation(say, None, prompt, channel)
 
 
 # Handle the Lambda function
