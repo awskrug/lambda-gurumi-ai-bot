@@ -317,6 +317,9 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         "If you don't know the answer, just say that you don't know, don't try to make up an answer."
     )
 
+    if SYSTEM_MESSAGE != "None":
+        prompts.append(SYSTEM_MESSAGE)
+
     try:
         # Get the previous conversation contexts
         if thread_ts != None:
