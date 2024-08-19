@@ -57,10 +57,10 @@ resources:
       Properties:
         BucketName:
           Fn::Sub: ${self:provider.environment.BASE_NAME}-${AWS::AccountId}
-    KnowledgeBase:
-      Type: AWS::Bedrock::KnowledgeBase
-      Properties:
-        Name: ${self:provider.environment.BASE_NAME}-knowledge-base
+    # KnowledgeBase:
+    #   Type: AWS::Bedrock::KnowledgeBase
+    #   Properties:
+    #     Name: ${self:provider.environment.BASE_NAME}-knowledge-base
 
 plugins:
   - serverless-python-requirements
