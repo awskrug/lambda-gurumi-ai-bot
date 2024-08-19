@@ -10,7 +10,7 @@ env:
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
   DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
   ENABLE_IMAGE: ${{ vars.ENABLE_IMAGE }}
-  KB_ID: ${{ vars.KB_ID }}
+  KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
   MODEL_ID_IMAGE: ${{ vars.MODEL_ID_IMAGE }}
   MODEL_ID_TEXT: ${{ vars.MODEL_ID_TEXT }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
@@ -53,7 +53,7 @@ jobs:
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
           echo "ENABLE_IMAGE=${ENABLE_IMAGE}" >> .env
-          echo "KB_ID=${KB_ID}" >> .env
+          echo "KNOWLEDGE_BASE_ID=${KNOWLEDGE_BASE_ID}" >> .env
           echo "MODEL_ID_IMAGE=${MODEL_ID_IMAGE}" >> .env
           echo "MODEL_ID_TEXT=${MODEL_ID_TEXT}" >> .env
           echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> .env
