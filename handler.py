@@ -44,7 +44,8 @@ SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
-MSG_PREVIOUS = "지식 기반 검색 중... " + BOT_CURSOR
+MSG_KNOWLEDGE = "지식 기반 검색 중... " + BOT_CURSOR
+MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
 MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
 
 CONVERSION_ARRAY = [
@@ -165,6 +166,57 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
     return message, latest_ts
 
 
+# Get thread messages using conversations.replies API method
+def conversations_replies(channel, ts, client_msg_id):
+    contexts = []
+
+    try:
+        response = app.client.conversations_replies(channel=channel, ts=ts)
+
+        print("conversations_replies: {}".format(response))
+
+        if not response.get("ok"):
+            print(
+                "conversations_replies: {}".format(
+                    "Failed to retrieve thread messages."
+                )
+            )
+
+        messages = response.get("messages", [])
+        messages.reverse()
+        messages.pop(0)  # remove the first message
+
+        for message in messages:
+            if message.get("client_msg_id", "") == client_msg_id:
+                continue
+
+            role = "user"
+            if message.get("bot_id", "") != "":
+                role = "assistant"
+
+            contexts.append(
+                {
+                    "role": role,
+                    "content": message.get("text", ""),
+                }
+            )
+
+            # print("conversations_replies: messages size: {}".format(sys.getsizeof(messages)))
+
+            if sys.getsizeof(contexts) > MAX_LEN_BEDROCK:
+                contexts.pop(0)  # remove the oldest message
+                break
+
+        contexts.reverse()
+
+    except Exception as e:
+        print("conversations_replies: Error: {}".format(e))
+
+    print("conversations_replies: {}".format(contexts))
+
+    return contexts
+
+
 def invoke_knowledge_base(content):
     """
     Invokes the Amazon Bedrock Knowledge Base to retrieve information using the input
@@ -174,8 +226,10 @@ def invoke_knowledge_base(content):
     :return: The retrieved contexts from the knowledge base.
     """
 
+    contexts = []
+
     if KNOWLEDGE_BASE_ID == "None":
-        return ""
+        return contexts
 
     try:
         response = bedrock_agent_client.retrieve(
@@ -195,12 +249,12 @@ def invoke_knowledge_base(content):
         for result in results:
             contexts.append(result["content"]["text"])
 
-        return "\n".join(contexts)
-
     except Exception as e:
         print("invoke_knowledge_base: Error: {}".format(e))
 
-        raise e
+    print("invoke_knowledge_base: {}".format(contexts))
+
+    return contexts
 
 
 def invoke_claude_3(prompt):
@@ -247,60 +301,57 @@ def invoke_claude_3(prompt):
         raise e
 
 
-def gen_prompt(query, contexts):
-    if contexts == "":
-        prompt = f"""
-Human: You are a advisor AI system, and provides answers to questions by using fact based and statistical information when possible.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-{SYSTEM_MESSAGE}
-
-<question>
-{query}
-</question>
-
-The response should be specific and use statistics or numbers when possible.
-
-Assistant:"""
-
-    else:
-        prompt = f"""
-Human: You are a advisor AI system, and provides answers to questions by using fact based and statistical information when possible.
-Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-{SYSTEM_MESSAGE}
-<context>
-{contexts}
-</context>
-
-<question>
-{query}
-</question>
-
-The response should be specific and use statistics or numbers when possible.
-
-Assistant:"""
-
-    return prompt
-
-
 # Handle the chatgpt conversation
-def conversation(say: Say, thread_ts, query, channel):
+def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     print("conversation: query: {}".format(query))
 
     # Keep track of the latest message timestamp
     result = say(text=BOT_CURSOR, thread_ts=thread_ts)
     latest_ts = result["ts"]
 
+    prompts = []
+    prompts.append(
+        "Human: You are a advisor AI system, and provides answers to questions by using fact based and statistical information when possible."
+    )
+    prompts.append(
+        "If you don't know the answer, just say that you don't know, don't try to make up an answer."
+    )
+
     try:
-        chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
+        # Get the previous conversation contexts
+        if thread_ts != None:
+            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
+
+            contexts = conversations_replies(channel, thread_ts, client_msg_id)
+
+            prompts.append("<context>")
+            for reply in contexts:
+                prompts.append(reply["content"])
+            prompts.append("</context>")
 
         # Get the knowledge base contexts
-        contexts = invoke_knowledge_base(query)
+        if KNOWLEDGE_BASE_ID != "None":
+            chat_update(say, channel, thread_ts, latest_ts, MSG_KNOWLEDGE)
 
-        print("conversation: contexts: {}".format(contexts))
+            contexts = invoke_knowledge_base(query)
+
+            prompts.append(
+                "Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags."
+            )
+            prompts.append("<context>")
+            for reply in contexts:
+                prompts.append(reply["content"])
+            prompts.append("</context>")
 
         # Generate the prompt
-        prompt = gen_prompt(query, contexts)
+        prompts.append("<question>")
+        prompts.append(query)
+        prompts.append("</question>")
+
+        # prompts.append("The response should be specific and use statistics or numbers when possible.")
+        prompts.append("Assistant:")
+
+        prompt = "\n".join(prompts)
 
         # print("conversation: prompt: {}".format(prompt))
 
@@ -334,6 +385,7 @@ def handle_mention(body: dict, say: Say):
     thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
 
     channel = event["channel"]
+    client_msg_id = event["client_msg_id"]
 
     if ALLOWED_CHANNEL_IDS != "None":
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
@@ -346,7 +398,7 @@ def handle_mention(body: dict, say: Say):
 
     prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
 
-    conversation(say, thread_ts, prompt, channel)
+    conversation(say, thread_ts, prompt, channel, client_msg_id)
 
 
 # Handle the DM (direct message) event
@@ -361,11 +413,12 @@ def handle_message(body: dict, say: Say):
         return
 
     channel = event["channel"]
+    client_msg_id = event["client_msg_id"]
 
     prompt = event["text"].strip()
 
     # Use thread_ts=None for regular messages, and user ID for DMs
-    conversation(say, None, prompt, channel)
+    conversation(say, None, prompt, channel, client_msg_id)
 
 
 def success():
