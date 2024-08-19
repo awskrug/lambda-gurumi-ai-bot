@@ -9,7 +9,6 @@ env:
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
   DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
-  ENABLE_IMAGE: ${{ vars.ENABLE_IMAGE }}
   KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
   MODEL_ID_IMAGE: ${{ vars.MODEL_ID_IMAGE }}
   MODEL_ID_TEXT: ${{ vars.MODEL_ID_TEXT }}
@@ -52,7 +51,6 @@ jobs:
           echo "ALLOWED_CHANNEL_IDS=${ALLOWED_CHANNEL_IDS}" >> .env
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
-          echo "ENABLE_IMAGE=${ENABLE_IMAGE}" >> .env
           echo "KNOWLEDGE_BASE_ID=${KNOWLEDGE_BASE_ID}" >> .env
           echo "MODEL_ID_IMAGE=${MODEL_ID_IMAGE}" >> .env
           echo "MODEL_ID_TEXT=${MODEL_ID_TEXT}" >> .env
