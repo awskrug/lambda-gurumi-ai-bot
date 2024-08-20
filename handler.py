@@ -194,14 +194,7 @@ def conversations_replies(channel, ts, client_msg_id):
             if message.get("bot_id", "") != "":
                 role = "assistant"
 
-            contexts.append(
-                {
-                    "role": role,
-                    "content": message.get("text", ""),
-                }
-            )
-
-            # print("conversations_replies: messages size: {}".format(sys.getsizeof(messages)))
+            contexts.append("{}: {}".format(role, message.get("text", "")))
 
             if sys.getsizeof(contexts) > MAX_LEN_BEDROCK:
                 contexts.pop(0)  # remove the oldest message
@@ -332,8 +325,8 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
                 "Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags."
             )
             prompts.append("<context>")
-            for reply in contexts:
-                prompts.append(reply["content"])
+            for context in contexts:
+                prompts.append(context)
             prompts.append("</context>")
         else:
             # Get the previous conversation contexts
@@ -344,7 +337,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
                 prompts.append("<context>")
                 for context in contexts:
-                    prompts.append(context["content"])
+                    prompts.append(context)
                 prompts.append("</context>")
 
         # Add the question to the prompts
