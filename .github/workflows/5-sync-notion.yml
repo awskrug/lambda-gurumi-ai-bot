@@ -1,0 +1,68 @@
+name: sync-notion
+
+on:
+  push:
+    branches:
+      - main
+
+  schedule:
+    - cron: "0 20 * * 0-4"
+
+env:
+  ENABLE_NOTION_SYNC: ${{ vars.ENABLE_NOTION_SYNC }}
+
+  NOTION_PAGE_NAME: "nalbam"
+  NOTION_PAGE_ID: "7aace0412a82431996f61a29225a95ec"
+
+  AWS_DEST_PATH: ${{ vars.AWS_DEST_PATH }}
+
+  KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
+  DATA_SOURCE_ID: ${{ vars.DATA_SOURCE_ID }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.9 🐍
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+
+      - name: Setup Dependencies
+        run: pip install python-notion-exporter
+
+      - name: Run Notion Exporter
+        if: env.ENABLE_NOTION_SYNC == 'Yes'
+        env:
+          NOTION_TOKEN_V2: ${{ secrets.NOTION_TOKEN_V2 }}
+          NOTION_FILE_TOKEN: ${{ secrets.NOTION_FILE_TOKEN }}
+        run: |
+          python bin/notion_exporter.py
+
+      - name: Sync to AWS S3 Data Source
+        if: env.ENABLE_NOTION_SYNC == 'Yes'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: "us-east-1"
+        run: |
+          aws s3 sync --delete \
+            build/${{ env.NOTION_PAGE_NAME }}/ \
+            ${{ env.AWS_DEST_PATH }}/${{ env.NOTION_PAGE_NAME }}/
+
+      - name: Sync to AWS Bedrock Knowledge Base
+        if: env.ENABLE_NOTION_SYNC == 'Yes'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: "us-east-1"
+        run: |
+          aws bedrock-agent start-ingestion-job \
+            --knowledge-base-id ${{ env.KNOWLEDGE_BASE_ID }} \
+            --data-source-id ${{ env.DATA_SOURCE_ID }}

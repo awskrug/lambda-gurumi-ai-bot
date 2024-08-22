@@ -9,6 +9,8 @@ on:
     - cron: "0 21 * * 0-4"
 
 env:
+  ENABLE_NOTION_SYNC: ${{ vars.ENABLE_NOTION_SYNC }}
+
   KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
   DATA_SOURCE_ID: ${{ vars.DATA_SOURCE_ID }}
 
@@ -28,11 +30,12 @@ jobs:
           python-version: 3.9
 
       - name: Sync to AWS Bedrock Knowledge Base
-        run: |
-          aws bedrock-agent start-ingestion-job \
-            --knowledge-base-id ${{ env.KNOWLEDGE_BASE_ID }} \
-            --data-source-id ${{ env.DATA_SOURCE_ID }}
+        if: env.ENABLE_NOTION_SYNC == 'Yes'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: "us-east-1"
+        run: |
+          aws bedrock-agent start-ingestion-job \
+            --knowledge-base-id ${{ env.KNOWLEDGE_BASE_ID }} \
+            --data-source-id ${{ env.DATA_SOURCE_ID }}
