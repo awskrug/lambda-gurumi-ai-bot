@@ -32,11 +32,14 @@ dist/
 *.log
 *.tmp
 
+# serverless
+.env
+.serverless
+
 # python
 venv
 *.pyc
 staticfiles
-.env
 db.sqlite3
 __pycache__
 
