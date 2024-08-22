@@ -57,7 +57,7 @@ jobs:
             ${{ env.AWS_DEST_PATH }}/${{ env.NOTION_PAGE_NAME }}/
 
       - name: Sync to AWS Bedrock Knowledge Base
-        if: env.ENABLE_NOTION_SYNC == 'Yes'
+        if: env.ENABLE_NOTION_SYNC == 'Yes' && env.KNOWLEDGE_BASE_ID != 'None' && env.DATA_SOURCE_ID != 'None'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

@@ -1,8 +1,10 @@
+# org: nalbam
+app: lambda-gureumi-ai-bot
 service: lambda-gurumi-ai-bot
 provider:
   name: aws
   region: us-east-1
-  runtime: python3.9
+  runtime: python3.11
   # stage: prod
   # memorySize: 5120
   timeout: 600
