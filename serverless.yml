@@ -54,8 +54,8 @@ resources:
           AttributeName: expire_at
           Enabled: true
         Tags:
-          - Key: Name
-            Value: ${self:provider.environment.BASE_NAME}-context
+          - Key: Project
+            Value: ${self:provider.environment.BASE_NAME}
 
     S3Bucket:
       Type: AWS::S3::Bucket
@@ -63,8 +63,8 @@ resources:
         BucketName:
           Fn::Sub: ${self:provider.environment.BASE_NAME}-${AWS::AccountId}
         Tags:
-          - Key: Name
-            Value: ${self:provider.environment.BASE_NAME}-${AWS::AccountId}
+          - Key: Project
+            Value: ${self:provider.environment.BASE_NAME}
 
     # KnowledgeBase:
     #   Type: AWS::Bedrock::KnowledgeBase
