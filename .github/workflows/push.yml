@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+  repository_dispatch:
+    types:
+      - deploy
+
 env:
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}

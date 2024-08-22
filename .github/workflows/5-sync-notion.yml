@@ -1,9 +1,9 @@
 name: sync-notion
 
 on:
-  push:
-    branches:
-      - main
+  # push:
+  #   branches:
+  #     - main
 
   schedule:
     - cron: "0 20 * * 0-4"
@@ -11,13 +11,13 @@ on:
 env:
   ENABLE_NOTION_SYNC: ${{ vars.ENABLE_NOTION_SYNC }}
 
-  NOTION_PAGE_NAME: "nalbam"
-  NOTION_PAGE_ID: "7aace0412a82431996f61a29225a95ec"
+  KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
+  DATA_SOURCE_ID: ${{ vars.DATA_SOURCE_ID }}
 
   AWS_DEST_PATH: ${{ vars.AWS_DEST_PATH }}
 
-  KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
-  DATA_SOURCE_ID: ${{ vars.DATA_SOURCE_ID }}
+  NOTION_PAGE_NAME: "nalbam"
+  NOTION_PAGE_ID: "7aace0412a82431996f61a29225a95ec"
 
 jobs:
   sync:
