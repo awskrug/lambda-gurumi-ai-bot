@@ -34,6 +34,8 @@ functions:
       - http:
           method: post
           path: /slack/events
+    tags:
+      Project: ${self:provider.environment.BASE_NAME}
 
 resources:
   Resources:
