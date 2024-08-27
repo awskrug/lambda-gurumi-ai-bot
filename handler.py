@@ -325,8 +325,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
                 "Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags."
             )
             prompts.append("<context>")
-            for context in contexts:
-                prompts.append(context)
+            prompts.append("\n\n".join(contexts))
             prompts.append("</context>")
         else:
             # Get the previous conversation contexts
@@ -336,8 +335,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
                 contexts = conversations_replies(channel, thread_ts, client_msg_id)
 
                 prompts.append("<context>")
-                for context in contexts:
-                    prompts.append(context)
+                prompts.append("\n\n".join(contexts))
                 prompts.append("</context>")
 
         # Add the question to the prompts
