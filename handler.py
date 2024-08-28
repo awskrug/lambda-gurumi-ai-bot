@@ -39,6 +39,9 @@ MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
 # Set up System messages
+PERSONAL_MESSAGE = os.environ.get(
+    "PERSONAL_MESSAGE", "당신은 친절하고 전문적인 AI 비서 입니다."
+)
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
@@ -304,15 +307,13 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     latest_ts = result["ts"]
 
     prompts = []
-    prompts.append(
-        "Human: You are a advisor AI system, and provides answers to questions by using fact based and statistical information when possible."
-    )
-    prompts.append(
-        "If you don't know the answer, just say that you don't know, don't try to make up an answer."
-    )
+    prompts.append("Human: {}".format(PERSONAL_MESSAGE))
+    prompts.append("답변을 모르면 모른다고 하세요. 답을 지어내려고 하지 마세요.")
 
     if SYSTEM_MESSAGE != "None":
         prompts.append(SYSTEM_MESSAGE)
+
+    prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
     try:
         # Get the knowledge base contexts
@@ -322,7 +323,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
             contexts = invoke_knowledge_base(query)
 
             prompts.append(
-                "Use the following pieces of information to provide a concise answer to the question enclosed in <question> tags."
+                "<context> 에 정보가 제공 되면, 해당 정보를 사용하여 답변해 주세요."
             )
             prompts.append("<context>")
             prompts.append("\n\n".join(contexts))
@@ -334,9 +335,12 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
                 contexts = conversations_replies(channel, thread_ts, client_msg_id)
 
-                prompts.append("<context>")
+                prompts.append(
+                    "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
+                )
+                prompts.append("<history>")
                 prompts.append("\n\n".join(contexts))
-                prompts.append("</context>")
+                prompts.append("</history>")
 
         # Add the question to the prompts
         prompts.append("")
@@ -345,7 +349,6 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         prompts.append("</question>")
         prompts.append("")
 
-        # prompts.append("The response should be specific and use statistics or numbers when possible.")
         prompts.append("Assistant:")
 
         # Combine the prompts

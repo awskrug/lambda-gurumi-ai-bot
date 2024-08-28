@@ -14,8 +14,8 @@ env:
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
   DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
   KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
-  MODEL_ID_IMAGE: ${{ vars.MODEL_ID_IMAGE }}
   MODEL_ID_TEXT: ${{ vars.MODEL_ID_TEXT }}
+  PERSONAL_MESSAGE: ${{ vars.PERSONAL_MESSAGE }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -56,10 +56,10 @@ jobs:
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
           echo "KNOWLEDGE_BASE_ID=${KNOWLEDGE_BASE_ID}" >> .env
-          echo "MODEL_ID_IMAGE=${MODEL_ID_IMAGE}" >> .env
           echo "MODEL_ID_TEXT=${MODEL_ID_TEXT}" >> .env
           echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> .env
           echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
+          echo "PERSONAL_MESSAGE=${PERSONAL_MESSAGE}" >> .env
           echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
 
       - name: Deploy to AWS Lambda 🚀
