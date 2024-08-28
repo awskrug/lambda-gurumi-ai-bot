@@ -39,6 +39,9 @@ MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
 # Set up System messages
+PERSONAL_MESSAGE = os.environ.get(
+    "PERSONAL_MESSAGE", "당신은 친절하고 전문적인 AI 비서 입니다."
+)
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
@@ -304,7 +307,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     latest_ts = result["ts"]
 
     prompts = []
-    prompts.append("Human: 당신은 친절하고 전문적인 AI 비서 입니다.")
+    prompts.append("Human: {}".format(PERSONAL_MESSAGE))
     prompts.append("답변을 모르면 모른다고 하세요. 답을 지어내려고 하지 마세요.")
 
     if SYSTEM_MESSAGE != "None":
