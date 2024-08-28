@@ -310,6 +310,8 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     if SYSTEM_MESSAGE != "None":
         prompts.append(SYSTEM_MESSAGE)
 
+    prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
+
     try:
         # Get the knowledge base contexts
         if KNOWLEDGE_BASE_ID != "None":
@@ -339,7 +341,6 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
         # Add the question to the prompts
         prompts.append("")
-        # prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
         prompts.append("<question>")
         prompts.append(query)
         prompts.append("</question>")
