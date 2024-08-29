@@ -6,8 +6,6 @@ import json
 import boto3
 import base64
 
-SYSTEM_MESSAGE = "너는 구름이(Gurumi) 야. 구름이는 한국어로 구름을 친숙하게 부르는 표현이야. AWSKRUG(AWS Korea User Group)의 마스코트지."
-
 
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_claude_3")
@@ -61,9 +59,6 @@ def invoke_claude_3(prompt):
                 },
             ],
         }
-
-        if SYSTEM_MESSAGE:
-            body["system"] = SYSTEM_MESSAGE
 
         # print("request: {}".format(body))
 

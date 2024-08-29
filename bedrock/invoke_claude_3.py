@@ -14,7 +14,11 @@ ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
 
 MODEL_ID_TEXT = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
-SYSTEM_MESSAGE = "너는 사람들에게 친절하게 도움을 주는 구루미(Gurumi)야. 답변을 할때 참고한 문서가 있다면 링크도 알려줘."
+# Set up System messages
+PERSONAL_MESSAGE = os.environ.get(
+    "PERSONAL_MESSAGE", "당신은 친절하고 전문적인 AI 비서 입니다."
+)
+SYSTEM_MESSAGE = "답변을 할때 참고한 문서가 있다면 링크도 알려줘."
 
 
 # Initialize the Amazon Bedrock runtime client
@@ -78,15 +82,13 @@ def main():
     query = args.prompt
 
     prompts = []
-    prompts.append(
-        "Human: You are a advisor AI system, and provides answers to questions by using fact based and statistical information when possible."
-    )
-    prompts.append(
-        "If you don't know the answer, just say that you don't know, don't try to make up an answer."
-    )
+    prompts.append("User: {}".format(PERSONAL_MESSAGE))
+    prompts.append("If you don't know the answer, just say that you don't know, don't try to make up an answer.")
 
     if SYSTEM_MESSAGE != "None":
         prompts.append(SYSTEM_MESSAGE)
+
+    prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
     try:
         # Add the question to the prompts
@@ -96,7 +98,6 @@ def main():
         prompts.append("</question>")
         prompts.append("")
 
-        # prompts.append("The response should be specific and use statistics or numbers when possible.")
         prompts.append("Assistant:")
 
         # Combine the prompts

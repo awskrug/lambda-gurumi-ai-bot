@@ -12,8 +12,6 @@ from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
 
-BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
-
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 # Set up Slack API credentials
@@ -46,6 +44,8 @@ SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
+
+BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
 
 MSG_KNOWLEDGE = "지식 기반 검색 중... " + BOT_CURSOR
 MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
@@ -307,8 +307,8 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     latest_ts = result["ts"]
 
     prompts = []
-    prompts.append("Human: {}".format(PERSONAL_MESSAGE))
-    prompts.append("답변을 모르면 모른다고 하세요. 답을 지어내려고 하지 마세요.")
+    prompts.append("User: {}".format(PERSONAL_MESSAGE))
+    prompts.append("If you don't know the answer, just say that you don't know, don't try to make up an answer.")
 
     if SYSTEM_MESSAGE != "None":
         prompts.append(SYSTEM_MESSAGE)
