@@ -315,6 +315,8 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
     prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
+    prompts.append("<now>{}</now>".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
     try:
         # Get the knowledge base contexts
         if KNOWLEDGE_BASE_ID != "None":
