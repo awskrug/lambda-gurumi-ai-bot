@@ -9,6 +9,8 @@ on:
     - cron: "0 21 * * 0-4"
 
 env:
+  AWS_REGION: "us-east-1"
+
   ENABLE_NOTION_SYNC: ${{ vars.ENABLE_NOTION_SYNC }}
 
   KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
@@ -34,8 +36,8 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: "us-east-1"
         run: |
           aws bedrock-agent start-ingestion-job \
             --knowledge-base-id ${{ env.KNOWLEDGE_BASE_ID }} \
-            --data-source-id ${{ env.DATA_SOURCE_ID }}
+            --data-source-id ${{ env.DATA_SOURCE_ID }} \
+            --region ${{ env.AWS_REGION }}
