@@ -7,7 +7,7 @@ A serverless Slack bot using AWS Lambda, API Gateway, and DynamoDB.
 ## Install
 
 ```bash
-$ brew install python@3.9
+$ brew install python@3.11
 
 $ npm install -g serverless@3.38.0
 
