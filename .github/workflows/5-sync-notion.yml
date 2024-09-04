@@ -9,6 +9,8 @@ on:
     - cron: "0 20 * * 0-4"
 
 env:
+  AWS_REGION: "us-east-1"
+
   ENABLE_NOTION_SYNC: ${{ vars.ENABLE_NOTION_SYNC }}
 
   KNOWLEDGE_BASE_ID: ${{ vars.KNOWLEDGE_BASE_ID }}
@@ -29,10 +31,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python 3.9 🐍
+      - name: Setup Python 3.11 🐍
         uses: actions/setup-python@v4
         with:
-          python-version: 3.9
+          python-version: 3.11
 
       - name: Setup Dependencies
         run: pip install python-notion-exporter
@@ -50,9 +52,8 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: "us-east-1"
         run: |
-          aws s3 sync --delete \
+          aws s3 sync --delete --region ${{ env.AWS_REGION }} \
             build/${{ env.NOTION_PAGE_NAME }}/ \
             ${{ env.AWS_DEST_PATH }}/${{ env.NOTION_PAGE_NAME }}/
 
@@ -61,8 +62,8 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: "us-east-1"
         run: |
           aws bedrock-agent start-ingestion-job \
             --knowledge-base-id ${{ env.KNOWLEDGE_BASE_ID }} \
-            --data-source-id ${{ env.DATA_SOURCE_ID }}
+            --data-source-id ${{ env.DATA_SOURCE_ID }} \
+            --region ${{ env.AWS_REGION }}

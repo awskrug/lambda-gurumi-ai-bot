@@ -3,7 +3,7 @@
 ## Install
 
 ```bash
-$ brew install python@3.9
+$ brew install python@3.11
 
 $ python -m pip install --upgrade -r requirements.txt
 ```
