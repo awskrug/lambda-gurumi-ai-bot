@@ -38,7 +38,7 @@ ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
 # Set up System messages
 PERSONAL_MESSAGE = os.environ.get(
-    "PERSONAL_MESSAGE", "당신은 친절하고 전문적인 AI 비서 입니다."
+    "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
 )
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
@@ -308,14 +308,19 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
     prompts = []
     prompts.append("User: {}".format(PERSONAL_MESSAGE))
-    prompts.append("If you don't know the answer, just say that you don't know, don't try to make up an answer.")
+    prompts.append(
+        "If you don't know the answer, just say that you don't know, don't try to make up an answer."
+    )
 
     if SYSTEM_MESSAGE != "None":
         prompts.append(SYSTEM_MESSAGE)
 
     prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
-    prompts.append("<now>{}</now>".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    tz = datetime.timezone(datetime.timedelta(hours=9))
+    now = datetime.datetime.now(tz)
+
+    prompts.append("<now>{}</now>".format(now.isoformat()))
 
     try:
         # Get the knowledge base contexts
