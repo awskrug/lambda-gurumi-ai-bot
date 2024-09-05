@@ -426,7 +426,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         # Send the prompt to Bedrock
         message = invoke_claude_3(prompt)
 
-        print("conversation: message: {}".format(message))
+        # print("conversation: message: {}".format(message))
 
         # Update the message in Slack
         chat_update(say, channel, thread_ts, latest_ts, message)
