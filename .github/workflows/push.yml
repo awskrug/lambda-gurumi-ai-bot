@@ -17,6 +17,7 @@ env:
   MODEL_ID_TEXT: ${{ vars.MODEL_ID_TEXT }}
   PERSONAL_MESSAGE: ${{ vars.PERSONAL_MESSAGE }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
+  SLACK_SAY_INTERVAL: ${{ vars.SLACK_SAY_INTERVAL }}
 
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -61,6 +62,7 @@ jobs:
           echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
           echo "PERSONAL_MESSAGE=${PERSONAL_MESSAGE}" >> .env
           echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
+          echo "SLACK_SAY_INTERVAL=${SLACK_SAY_INTERVAL}" >> .env
 
       - name: Deploy to AWS Lambda 🚀
         run: npx serverless deploy --region us-east-1
