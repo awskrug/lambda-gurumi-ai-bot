@@ -124,47 +124,97 @@ def replace_text(text):
     return text
 
 
+def split_message(message, max_len):
+    split_parts = []
+
+    # 먼저 ``` 기준으로 분리
+    parts = message.split("```")
+
+    for i, part in enumerate(parts):
+        if i % 2 == 1:  # 코드 블록인 경우
+            # 코드 블록도 "\n\n" 기준으로 자름
+            split_parts.extend(split_code_block(part, max_len))
+        else:  # 일반 텍스트 부분
+            split_parts.extend(split_by_newline(part, max_len))
+
+    # 전체 블록을 합친 후 max_len을 넘지 않도록 추가로 자름
+    return finalize_split(split_parts, max_len)
+
+
+def split_code_block(code, max_len):
+    # 코드 블록을 "\n\n" 기준으로 분리 후, 다시 ```로 감쌈
+    code_parts = code.split("\n\n")
+    result = []
+    current_part = "```"
+
+    for part in code_parts:
+        if len(current_part) + len(part) + 2 < max_len - 6:  # 6은 ``` 앞뒤 길이
+            if current_part != "```":
+                current_part += "\n\n" + part
+            else:
+                current_part += part
+        else:
+            result.append(current_part + "\n```\n")  # ```로 감쌈
+            current_part = "```\n\n" + part
+
+    if current_part != "```":
+        result.append(current_part + "\n```\n")
+
+    return result
+
+
+def split_by_newline(text, max_len):
+    # "\n\n" 기준으로 분리
+    parts = text.split("\n\n")
+    result = []
+    current_part = ""
+
+    for part in parts:
+        if len(current_part) + len(part) + 2 < max_len:  # 2는 "\n\n"의 길이
+            if current_part:
+                current_part += "\n\n" + part
+            else:
+                current_part = part
+        else:
+            result.append(current_part)
+            current_part = part
+    if current_part:
+        result.append(current_part)
+
+    return result
+
+
+def finalize_split(parts, max_len):
+    # 각 파트를 max_len에 맞춰 추가로 자름
+    result = []
+    current_message = ""
+
+    for part in parts:
+        if len(current_message) + len(part) < max_len:
+            current_message += part
+        else:
+            result.append(current_message)
+            current_message = part
+    if current_message:
+        result.append(current_message)
+
+    return result
+
+
 # Update the message in Slack
 def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=False):
     # print("chat_update: {}".format(message))
 
-    if sys.getsizeof(message) > MAX_LEN_SLACK:
-        split_key = "\n\n"
-        if "```" in message:
-            split_key = "```"
+    split_messages = split_message(message, MAX_LEN_SLACK)
 
-        parts = message.split(split_key)
-
-        last_one = parts.pop()
-
-        if len(parts) % 2 == 0:
-            text = split_key.join(parts) + split_key
-            message = last_one
+    for i, text in enumerate(split_messages):
+        if i == 0:
+            # Update the message
+            app.client.chat_update(channel=channel, ts=latest_ts, text=text)
         else:
-            text = split_key.join(parts)
-            message = split_key + last_one
-
-        text = replace_text(text)
-
-        # Update the message
-        app.client.chat_update(channel=channel, ts=latest_ts, text=text)
-
-        if continue_thread:
-            text = replace_text(message) + " " + BOT_CURSOR
-        else:
-            text = replace_text(message)
-
-        # New message
-        result = say(text=text, thread_ts=thread_ts)
-        latest_ts = result["ts"]
-    else:
-        if continue_thread:
-            text = replace_text(message) + " " + BOT_CURSOR
-        else:
-            text = replace_text(message)
-
-        # Update the message
-        app.client.chat_update(channel=channel, ts=latest_ts, text=text)
+            # New message
+            result = say(text=text, thread_ts=thread_ts)
+            latest_ts = result["ts"]
 
     return message, latest_ts
 
