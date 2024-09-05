@@ -29,13 +29,13 @@ def split_code_block(code, max_len):
             if current_part != "```":
                 current_part += "\n\n" + part
             else:
-                current_part += part
+                current_part += "\n" + part
         else:
-            result.append(current_part + "\n```\n")  # ```로 감쌈
+            result.append(current_part + "\n```")  # ```로 감쌈
             current_part = "```\n\n" + part
 
     if current_part != "```":
-        result.append(current_part + "\n```\n")
+        result.append(current_part + "\n```")
 
     return result
 
@@ -51,7 +51,7 @@ def split_by_newline(text, max_len):
             if current_part:
                 current_part += "\n\n" + part
             else:
-                current_part = part
+                current_part = "\n" + part
         else:
             result.append(current_part)
             current_part = part
@@ -113,10 +113,11 @@ print(sorted_json_str)
 
 이와 같은 방법으로 JSON 데이터를 정렬할 수 있습니다. 다른 프로그래밍 언어에서도 유사한 방법으로 JSON 데이터를 정렬할 수 있으니, 사용하는 언어의 JSON 라이브러리를 참고하세요.
 """
+
 split_messages = split_message(message, MAX_LEN_SLACK)
 
 # 나누어진 메시지 출력
-for idx, msg in enumerate(split_messages):
-    print(f"파트 {idx + 1}:")
-    print(msg)
-    print("\n")
+for i, part in enumerate(split_messages, 1):
+    print(f"Part {i}:")
+    print(part)
+    print("-" * 20)

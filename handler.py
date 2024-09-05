@@ -152,13 +152,13 @@ def split_code_block(code, max_len):
             if current_part != "```":
                 current_part += "\n\n" + part
             else:
-                current_part += part
+                current_part += "\n" + part
         else:
-            result.append(current_part + "\n```\n")  # ```로 감쌈
+            result.append(current_part + "\n```")  # ```로 감쌈
             current_part = "```\n\n" + part
 
     if current_part != "```":
-        result.append(current_part + "\n```\n")
+        result.append(current_part + "\n```")
 
     return result
 
@@ -174,7 +174,7 @@ def split_by_newline(text, max_len):
             if current_part:
                 current_part += "\n\n" + part
             else:
-                current_part = part
+                current_part = "\n" + part
         else:
             result.append(current_part)
             current_part = part
