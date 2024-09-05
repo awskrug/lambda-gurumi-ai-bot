@@ -1,6 +1,3 @@
-MAX_LEN_SLACK = 400  # 슬랙 최대 메시지 길이 설정
-
-
 def split_message(message, max_len):
     split_parts = []
 
@@ -22,19 +19,19 @@ def split_code_block(code, max_len):
     # 코드 블록을 "\n\n" 기준으로 분리 후, 다시 ```로 감쌈
     code_parts = code.split("\n\n")
     result = []
-    current_part = "```"
+    current_part = "```\n"
 
     for part in code_parts:
         if len(current_part) + len(part) + 2 < max_len - 6:  # 6은 ``` 앞뒤 길이
-            if current_part != "```":
+            if current_part != "```\n":
                 current_part += "\n\n" + part
             else:
-                current_part += "\n" + part
+                current_part += part
         else:
             result.append(current_part + "\n```")  # ```로 감쌈
-            current_part = "```\n\n" + part
+            current_part = "```\n" + part
 
-    if current_part != "```":
+    if current_part != "```\n":
         result.append(current_part + "\n```")
 
     return result
@@ -48,14 +45,14 @@ def split_by_newline(text, max_len):
 
     for part in parts:
         if len(current_part) + len(part) + 2 < max_len:  # 2는 "\n\n"의 길이
-            if current_part:
+            if current_part != "":
                 current_part += "\n\n" + part
             else:
-                current_part = "\n" + part
+                current_part = part
         else:
             result.append(current_part)
             current_part = part
-    if current_part:
+    if current_part != "":
         result.append(current_part)
 
     return result
@@ -68,11 +65,11 @@ def finalize_split(parts, max_len):
 
     for part in parts:
         if len(current_message) + len(part) < max_len:
-            current_message += part
+            current_message += "\n\n" + part
         else:
             result.append(current_message)
             current_message = part
-    if current_message:
+    if current_message != "":
         result.append(current_message)
 
     return result
@@ -106,7 +103,9 @@ data = {
 
 # JSON 데이터를 정렬하여 문자열로 변환
 sorted_json_str = json.dumps(data, indent=4, sort_keys=True)
+```
 
+```python
 # 정렬된 JSON 출력
 print(sorted_json_str)
 ```
@@ -114,10 +113,12 @@ print(sorted_json_str)
 이와 같은 방법으로 JSON 데이터를 정렬할 수 있습니다. 다른 프로그래밍 언어에서도 유사한 방법으로 JSON 데이터를 정렬할 수 있으니, 사용하는 언어의 JSON 라이브러리를 참고하세요.
 """
 
+MAX_LEN_SLACK = 400  # 슬랙 최대 메시지 길이 설정
+
 split_messages = split_message(message, MAX_LEN_SLACK)
 
 # 나누어진 메시지 출력
 for i, part in enumerate(split_messages, 1):
     print(f"Part {i}:")
     print(part)
-    print("-" * 20)
+    print("-" * 40)
