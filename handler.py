@@ -214,9 +214,12 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
         else:
             time.sleep(1)
 
-            # New message
-            result = say(text=text, thread_ts=thread_ts)
-            latest_ts = result["ts"]
+            try:
+                # Send a new message
+                result = say(text=text, thread_ts=thread_ts)
+                latest_ts = result["ts"]
+            except Exception as e:
+                print("chat_update: Error: {}".format(e))
 
     return message, latest_ts
 
