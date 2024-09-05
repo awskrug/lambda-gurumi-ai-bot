@@ -45,6 +45,8 @@ SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 2500))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
+SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", 0))
+
 BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
 
 MSG_KNOWLEDGE = "지식 기반 검색 중... " + BOT_CURSOR
@@ -212,7 +214,8 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
             # Update the message
             app.client.chat_update(channel=channel, ts=latest_ts, text=text)
         else:
-            time.sleep(1)
+            if SLACK_SAY_INTERVAL > 0:
+                time.sleep(SLACK_SAY_INTERVAL)
 
             try:
                 # Send a new message
