@@ -42,7 +42,7 @@ PERSONAL_MESSAGE = os.environ.get(
 )
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
-MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
+MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 2500))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
 BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
