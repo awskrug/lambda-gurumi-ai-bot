@@ -212,7 +212,7 @@ def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=
             # Update the message
             app.client.chat_update(channel=channel, ts=latest_ts, text=text)
         else:
-            time.sleep(0.3)
+            time.sleep(1)
 
             # New message
             result = say(text=text, thread_ts=thread_ts)
