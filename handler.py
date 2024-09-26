@@ -28,7 +28,7 @@ KB_RETRIEVE_COUNT = int(os.environ.get("KB_RETRIEVE_COUNT", 5))
 
 # Amazon Bedrock Model ID
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
-ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 1024))
+ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 2000))
 
 MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
 MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
@@ -42,7 +42,7 @@ PERSONAL_MESSAGE = os.environ.get(
 )
 SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
-MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 2500))
+MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
 
 SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", 0))
@@ -426,7 +426,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         # Send the prompt to Bedrock
         message = invoke_claude_3(prompt)
 
-        print("conversation: message: {}".format(message))
+        # print("conversation: message: {}".format(message))
 
         # Update the message in Slack
         chat_update(say, channel, thread_ts, latest_ts, message)
