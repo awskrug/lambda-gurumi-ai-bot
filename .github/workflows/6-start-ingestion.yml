@@ -26,10 +26,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python 3.11 🐍
+      - name: Setup Python 3.9 🐍
         uses: actions/setup-python@v4
         with:
-          python-version: 3.11
+          python-version: 3.9
 
       - name: Sync to AWS Bedrock Knowledge Base
         if: env.ENABLE_NOTION_SYNC == 'Yes' && env.KNOWLEDGE_BASE_ID != 'None' && env.DATA_SOURCE_ID != 'None'
