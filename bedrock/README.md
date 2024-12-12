@@ -11,7 +11,7 @@ $ python -m pip install --upgrade -r requirements.txt
 ## Test
 
 ```bash
-python invoke_agent.py
+python invoke_agent.py -p "AWS DeepRacer 설명해줘"
 
 python invoke_claude_3.py -p "구름이가 누구?"
 

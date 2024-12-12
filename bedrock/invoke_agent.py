@@ -14,7 +14,7 @@ from botocore.exceptions import ClientError
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 AGENT_ID = "LIKTFQ14NA"
-AGENT_ALIAS_ID = "gurumi"
+AGENT_ALIAS_ID = "Y1M3VE0PR4"
 
 
 # Initialize the Amazon Bedrock agent runtime client
@@ -28,7 +28,7 @@ def parse_args():
     return p.parse_args()
 
 
-async def invoke_agent(prompt):
+def invoke_agent(prompt):
     """
     Sends a prompt for the agent to process and respond to.
 
@@ -53,23 +53,17 @@ async def invoke_agent(prompt):
             inputText=prompt,
         )
 
-        print(response)
-
-        # completion = ""
+        completion = ""
 
         for event in response.get("completion"):
-            print(event)
-
-            yield event
-
-            # chunk = event["chunk"]
-            # completion = completion + chunk["bytes"].decode()
+            chunk = event["chunk"]
+            completion = completion + chunk["bytes"].decode()
 
     except ClientError as e:
         print(f"Couldn't invoke agent. {e}")
         raise
 
-    # return completion
+    return completion
 
 
 async def main():
@@ -77,12 +71,9 @@ async def main():
 
     try:
         # Send the prompt to Bedrock Agent
-        # message = invoke_agent(args.prompt)
+        message = invoke_agent(args.prompt)
 
-        async for event in invoke_agent(args.prompt):
-            print(f"Received event: {event}")
-
-        # print(message)
+        print(message)
 
     except Exception as e:
         print(f"error: {e}")
