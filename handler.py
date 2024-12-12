@@ -329,7 +329,7 @@ def invoke_agent(prompt):
     """
 
     now = datetime.datetime.now()
-    session_id = int(now.timestamp() * 1000)
+    session_id = str(int(now.timestamp() * 1000))
 
     try:
         # Note: The execution time depends on the foundation model, complexity of the agent,
