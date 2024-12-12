@@ -11,6 +11,8 @@ $ python -m pip install --upgrade -r requirements.txt
 ## Test
 
 ```bash
+python invoke_agent.py
+
 python invoke_claude_3.py -p "구름이가 누구?"
 
 python invoke_claude_3_image.py
