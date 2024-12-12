@@ -80,7 +80,7 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
 # Initialize the Amazon Bedrock runtime client
-bedrock = boto3.client(service_name="bedrock-runtime", region_name=AWS_REGION)
+bedrock_client = boto3.client(service_name="bedrock-runtime", region_name=AWS_REGION)
 
 bedrock_config = Config(
     connect_timeout=120, read_timeout=120, retries={"max_attempts": 0}
@@ -335,7 +335,7 @@ def invoke_agent(prompt):
         # Note: The execution time depends on the foundation model, complexity of the agent,
         # and the length of the prompt. In some cases, it can take up to a minute or more to
         # generate a response.
-        response = bedrock.invoke_agent(
+        response = bedrock_agent_client.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
             sessionId=session_id,
@@ -376,7 +376,7 @@ def invoke_agent(prompt):
 #             ],
 #         }
 
-#         response = bedrock.invoke_model(
+#         response = bedrock_client.invoke_model(
 #             modelId=MODEL_ID_TEXT,
 #             body=json.dumps(body),
 #         )
