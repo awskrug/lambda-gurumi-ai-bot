@@ -25,17 +25,17 @@ DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context"
 AGENT_ID = os.environ.get("AGENT_ID", "None")
 AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 
-# Amazon Bedrock Knowledge Base ID
-KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
+# # Amazon Bedrock Knowledge Base ID
+# KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
 
-KB_RETRIEVE_COUNT = int(os.environ.get("KB_RETRIEVE_COUNT", 5))
+# KB_RETRIEVE_COUNT = int(os.environ.get("KB_RETRIEVE_COUNT", 5))
 
-# Amazon Bedrock Model ID
-ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
-ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 2000))
+# # Amazon Bedrock Model ID
+# ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
+# ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 2000))
 
-MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
-MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
+# MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
+# MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
 
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
@@ -276,44 +276,44 @@ def conversations_replies(channel, ts, client_msg_id):
     return contexts
 
 
-def invoke_knowledge_base(content):
-    """
-    Invokes the Amazon Bedrock Knowledge Base to retrieve information using the input
-    provided in the request body.
+# def invoke_knowledge_base(content):
+#     """
+#     Invokes the Amazon Bedrock Knowledge Base to retrieve information using the input
+#     provided in the request body.
 
-    :param content: The content that you want to use for retrieval.
-    :return: The retrieved contexts from the knowledge base.
-    """
+#     :param content: The content that you want to use for retrieval.
+#     :return: The retrieved contexts from the knowledge base.
+#     """
 
-    contexts = []
+#     contexts = []
 
-    if KNOWLEDGE_BASE_ID == "None":
-        return contexts
+#     if KNOWLEDGE_BASE_ID == "None":
+#         return contexts
 
-    try:
-        response = bedrock_agent_client.retrieve(
-            retrievalQuery={"text": content},
-            knowledgeBaseId=KNOWLEDGE_BASE_ID,
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {
-                    "numberOfResults": KB_RETRIEVE_COUNT,
-                    # "overrideSearchType": "HYBRID",  # optional
-                }
-            },
-        )
+#     try:
+#         response = bedrock_agent_client.retrieve(
+#             retrievalQuery={"text": content},
+#             knowledgeBaseId=KNOWLEDGE_BASE_ID,
+#             retrievalConfiguration={
+#                 "vectorSearchConfiguration": {
+#                     "numberOfResults": KB_RETRIEVE_COUNT,
+#                     # "overrideSearchType": "HYBRID",  # optional
+#                 }
+#             },
+#         )
 
-        results = response["retrievalResults"]
+#         results = response["retrievalResults"]
 
-        contexts = []
-        for result in results:
-            contexts.append(result["content"]["text"])
+#         contexts = []
+#         for result in results:
+#             contexts.append(result["content"]["text"])
 
-    except Exception as e:
-        print("invoke_knowledge_base: Error: {}".format(e))
+#     except Exception as e:
+#         print("invoke_knowledge_base: Error: {}".format(e))
 
-    print("invoke_knowledge_base: {}".format(contexts))
+#     print("invoke_knowledge_base: {}".format(contexts))
 
-    return contexts
+#     return contexts
 
 
 def invoke_agent(prompt):
@@ -355,47 +355,47 @@ def invoke_agent(prompt):
     return completion
 
 
-def invoke_claude_3(prompt):
-    """
-    Invokes Anthropic Claude 3 Sonnet to run an inference using the input
-    provided in the request body.
+# def invoke_claude_3(prompt):
+#     """
+#     Invokes Anthropic Claude 3 Sonnet to run an inference using the input
+#     provided in the request body.
 
-    :param prompt: The prompt that you want Claude 3 to complete.
-    :return: Inference response from the model.
-    """
+#     :param prompt: The prompt that you want Claude 3 to complete.
+#     :return: Inference response from the model.
+#     """
 
-    try:
-        body = {
-            "anthropic_version": ANTHROPIC_VERSION,
-            "max_tokens": ANTHROPIC_TOKENS,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                },
-            ],
-        }
+#     try:
+#         body = {
+#             "anthropic_version": ANTHROPIC_VERSION,
+#             "max_tokens": ANTHROPIC_TOKENS,
+#             "messages": [
+#                 {
+#                     "role": "user",
+#                     "content": [{"type": "text", "text": prompt}],
+#                 },
+#             ],
+#         }
 
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID_TEXT,
-            body=json.dumps(body),
-        )
+#         response = bedrock.invoke_model(
+#             modelId=MODEL_ID_TEXT,
+#             body=json.dumps(body),
+#         )
 
-        # Process and print the response
-        body = json.loads(response.get("body").read())
+#         # Process and print the response
+#         body = json.loads(response.get("body").read())
 
-        print("response: {}".format(body))
+#         print("response: {}".format(body))
 
-        result = body.get("content", [])
+#         result = body.get("content", [])
 
-        for output in result:
-            text = output["text"]
+#         for output in result:
+#             text = output["text"]
 
-        return text
+#         return text
 
-    except Exception as e:
-        print("invoke_claude_3: Error: {}".format(e))
-        raise e
+#     except Exception as e:
+#         print("invoke_claude_3: Error: {}".format(e))
+#         raise e
 
 
 # Handle the chatgpt conversation
@@ -423,31 +423,32 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     prompts.append("<now>{}</now>".format(now.isoformat()))
 
     try:
-        # Get the knowledge base contexts
-        if KNOWLEDGE_BASE_ID != "None":
-            chat_update(say, channel, thread_ts, latest_ts, MSG_KNOWLEDGE)
+        # # Get the knowledge base contexts
+        # if KNOWLEDGE_BASE_ID != "None":
+        #     chat_update(say, channel, thread_ts, latest_ts, MSG_KNOWLEDGE)
 
-            contexts = invoke_knowledge_base(query)
+        #     contexts = invoke_knowledge_base(query)
+
+        #     prompts.append(
+        #         "<context> 에 정보가 제공 되면, 해당 정보를 사용하여 답변해 주세요."
+        #     )
+        #     prompts.append("<context>")
+        #     prompts.append("\n\n".join(contexts))
+        #     prompts.append("</context>")
+        # else:
+
+        # Get the previous conversation contexts
+        if thread_ts != None:
+            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
+
+            contexts = conversations_replies(channel, thread_ts, client_msg_id)
 
             prompts.append(
-                "<context> 에 정보가 제공 되면, 해당 정보를 사용하여 답변해 주세요."
+                "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
             )
-            prompts.append("<context>")
+            prompts.append("<history>")
             prompts.append("\n\n".join(contexts))
-            prompts.append("</context>")
-        else:
-            # Get the previous conversation contexts
-            if thread_ts != None:
-                chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
-
-                contexts = conversations_replies(channel, thread_ts, client_msg_id)
-
-                prompts.append(
-                    "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
-                )
-                prompts.append("<history>")
-                prompts.append("\n\n".join(contexts))
-                prompts.append("</history>")
+            prompts.append("</history>")
 
         # Add the question to the prompts
         prompts.append("")
@@ -466,10 +467,12 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
         # Send the prompt to Bedrock
-        if AGENT_ID != "None":
-            message = invoke_agent(prompt)
-        else:
-            message = invoke_claude_3(prompt)
+        message = invoke_agent(prompt)
+
+        # if AGENT_ID != "None":
+        #     message = invoke_agent(prompt)
+        # else:
+        #     message = invoke_claude_3(prompt)
 
         # print("conversation: message: {}".format(message))
 
