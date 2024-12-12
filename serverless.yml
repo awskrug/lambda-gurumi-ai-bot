@@ -20,7 +20,7 @@ provider:
       Action:
         - bedrock:InvokeAgent
       Resource:
-        - "arn:aws:bedrock:*:*:agent/*"
+        - "arn:aws:bedrock:*:*:agent-alias/*"
     - Effect: Allow
       Action:
         - bedrock:Retrieve
