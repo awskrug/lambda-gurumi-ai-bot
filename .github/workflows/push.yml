@@ -10,6 +10,8 @@ on:
       - deploy
 
 env:
+  AGENT_ALIAS_ID: ${{ vars.AGENT_ALIAS_ID }}
+  AGENT_ID: ${{ vars.AGENT_ID }}
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
   DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
@@ -54,6 +56,8 @@ jobs:
 
       - name: Set up environment variables 📝
         run: |
+          echo "AGENT_ALIAS_ID=${AGENT_ALIAS_ID}" >> .env
+          echo "AGENT_ID=${AGENT_ID}" >> .env
           echo "ALLOWED_CHANNEL_IDS=${ALLOWED_CHANNEL_IDS}" >> .env
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env

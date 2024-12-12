@@ -21,6 +21,10 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 # Keep track of conversation history by thread and user
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context")
 
+# Amazon Bedrock Agent ID
+AGENT_ID = os.environ.get("AGENT_ID", "None")
+AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
+
 # Amazon Bedrock Knowledge Base ID
 KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
 
@@ -312,6 +316,45 @@ def invoke_knowledge_base(content):
     return contexts
 
 
+def invoke_agent(prompt):
+    """
+    Sends a prompt for the agent to process and respond to.
+
+    :param agent_id: The unique identifier of the agent to use.
+    :param agent_alias_id: The alias of the agent to use.
+    :param session_id: The unique identifier of the session. Use the same value across requests
+                        to continue the same conversation.
+    :param prompt: The prompt that you want Claude to complete.
+    :return: Inference response from the model.
+    """
+
+    now = datetime.datetime.now()
+    session_id = int(now.timestamp() * 1000)
+
+    try:
+        # Note: The execution time depends on the foundation model, complexity of the agent,
+        # and the length of the prompt. In some cases, it can take up to a minute or more to
+        # generate a response.
+        response = bedrock.invoke_agent(
+            agentId=AGENT_ID,
+            agentAliasId=AGENT_ALIAS_ID,
+            sessionId=session_id,
+            inputText=prompt,
+        )
+
+        completion = ""
+
+        for event in response.get("completion"):
+            chunk = event["chunk"]
+            completion = completion + chunk["bytes"].decode()
+
+    except Exception as e:
+        print("invoke_agent: Error: {}".format(e))
+        raise e
+
+    return completion
+
+
 def invoke_claude_3(prompt):
     """
     Invokes Anthropic Claude 3 Sonnet to run an inference using the input
@@ -352,7 +395,6 @@ def invoke_claude_3(prompt):
 
     except Exception as e:
         print("invoke_claude_3: Error: {}".format(e))
-
         raise e
 
 
@@ -424,7 +466,10 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
         # Send the prompt to Bedrock
-        message = invoke_claude_3(prompt)
+        if AGENT_ID != "None":
+            message = invoke_agent(prompt)
+        else:
+            message = invoke_claude_3(prompt)
 
         # print("conversation: message: {}".format(message))
 
