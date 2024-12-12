@@ -18,6 +18,7 @@ provider:
         - "arn:aws:dynamodb:*:*:table/${self:provider.environment.BASE_NAME}-*"
     - Effect: Allow
       Action:
+        - bedrock:InvokeAgent
         - bedrock:Retrieve
       Resource:
         # - "arn:aws:bedrock:*:*:knowledge-base/${self:provider.environment.BASE_NAME}-*"
