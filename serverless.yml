@@ -18,6 +18,11 @@ provider:
         - "arn:aws:dynamodb:*:*:table/${self:provider.environment.BASE_NAME}-*"
     - Effect: Allow
       Action:
+        - bedrock:InvokeAgent
+      Resource:
+        - "arn:aws:bedrock:*:*:agent/*"
+    - Effect: Allow
+      Action:
         - bedrock:Retrieve
       Resource:
         - "arn:aws:bedrock:*:*:knowledge-base/*"
@@ -27,11 +32,6 @@ provider:
       Resource:
         - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
         - "arn:aws:bedrock:*::foundation-model/stability.stable-diffusion-*"
-    - Effect: Allow
-      Action:
-        - bedrock:InvokeAgent
-      Resource:
-        - "arn:aws:bedrock:*:*:agent/*"
 
 functions:
   mention:
