@@ -41,11 +41,11 @@ AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
-# Set up System messages
-PERSONAL_MESSAGE = os.environ.get(
-    "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
-)
-SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
+# # Set up System messages
+# PERSONAL_MESSAGE = os.environ.get(
+#     "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
+# )
+# SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
