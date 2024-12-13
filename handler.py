@@ -26,20 +26,6 @@ DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context"
 AGENT_ID = os.environ.get("AGENT_ID", "None")
 AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 
-AGENT_ARN = os.environ.get("AGENT_ARN", "None")
-
-# # Amazon Bedrock Knowledge Base ID
-# KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
-
-# KB_RETRIEVE_COUNT = int(os.environ.get("KB_RETRIEVE_COUNT", 5))
-
-# # Amazon Bedrock Model ID
-# ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
-# ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 2000))
-
-# MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
-# MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
-
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
@@ -60,14 +46,6 @@ MSG_KNOWLEDGE = "지식 기반 검색 중... " + BOT_CURSOR
 MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
 MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
 
-CONVERSION_ARRAY = [
-    ["**", "*"],
-    # ["#### ", "🔸 "],
-    # ["### ", "🔶 "],
-    # ["## ", "🟠 "],
-    # ["# ", "🟡 "],
-]
-
 
 # Initialize Slack app
 app = App(
@@ -82,15 +60,8 @@ bot_id = app.client.api_call("auth.test")["user_id"]
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-# Initialize the Amazon Bedrock runtime client
-bedrock_client = boto3.client(service_name="bedrock-runtime", region_name=AWS_REGION)
-
-bedrock_config = Config(
-    connect_timeout=120, read_timeout=120, retries={"max_attempts": 0}
-)
-bedrock_agent_client = boto3.client(
-    "bedrock-agent-runtime", region_name=AWS_REGION, config=bedrock_config
-)
+# Initialize the Amazon Bedrock agent client
+bedrock_agent_client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
 
 
 # Get the context from DynamoDB
@@ -124,13 +95,6 @@ def put_context(thread_ts, user, conversation=""):
                 "expire_at": expire_at,
             }
         )
-
-
-# Replace text
-def replace_text(text):
-    for old, new in CONVERSION_ARRAY:
-        text = text.replace(old, new)
-    return text
 
 
 def split_message(message, max_len):
@@ -279,89 +243,6 @@ def conversations_replies(channel, ts, client_msg_id):
     return contexts
 
 
-# def invoke_knowledge_base(content):
-#     """
-#     Invokes the Amazon Bedrock Knowledge Base to retrieve information using the input
-#     provided in the request body.
-
-#     :param content: The content that you want to use for retrieval.
-#     :return: The retrieved contexts from the knowledge base.
-#     """
-
-#     contexts = []
-
-#     if KNOWLEDGE_BASE_ID == "None":
-#         return contexts
-
-#     try:
-#         response = bedrock_agent_client.retrieve(
-#             retrievalQuery={"text": content},
-#             knowledgeBaseId=KNOWLEDGE_BASE_ID,
-#             retrievalConfiguration={
-#                 "vectorSearchConfiguration": {
-#                     "numberOfResults": KB_RETRIEVE_COUNT,
-#                     # "overrideSearchType": "HYBRID",  # optional
-#                 }
-#             },
-#         )
-
-#         results = response["retrievalResults"]
-
-#         contexts = []
-#         for result in results:
-#             contexts.append(result["content"]["text"])
-
-#     except Exception as e:
-#         print("invoke_knowledge_base: Error: {}".format(e))
-
-#     print("invoke_knowledge_base: {}".format(contexts))
-
-#     return contexts
-
-
-# def invoke_claude_3(prompt):
-#     """
-#     Invokes Anthropic Claude 3 Sonnet to run an inference using the input
-#     provided in the request body.
-
-#     :param prompt: The prompt that you want Claude 3 to complete.
-#     :return: Inference response from the model.
-#     """
-
-#     try:
-#         body = {
-#             "anthropic_version": ANTHROPIC_VERSION,
-#             "max_tokens": ANTHROPIC_TOKENS,
-#             "messages": [
-#                 {
-#                     "role": "user",
-#                     "content": [{"type": "text", "text": prompt}],
-#                 },
-#             ],
-#         }
-
-#         response = bedrock_client.invoke_model(
-#             modelId=MODEL_ID_TEXT,
-#             body=json.dumps(body),
-#         )
-
-#         # Process and print the response
-#         body = json.loads(response.get("body").read())
-
-#         print("response: {}".format(body))
-
-#         result = body.get("content", [])
-
-#         for output in result:
-#             text = output["text"]
-
-#         return text
-
-#     except Exception as e:
-#         print("invoke_claude_3: Error: {}".format(e))
-#         raise e
-
-
 def invoke_agent(prompt):
     """
     Sends a prompt for the agent to process and respond to.
@@ -422,20 +303,6 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
     try:
-        # # Get the knowledge base contexts
-        # if KNOWLEDGE_BASE_ID != "None":
-        #     chat_update(say, channel, thread_ts, latest_ts, MSG_KNOWLEDGE)
-
-        #     contexts = invoke_knowledge_base(query)
-
-        #     prompts.append(
-        #         "<context> 에 정보가 제공 되면, 해당 정보를 사용하여 답변해 주세요."
-        #     )
-        #     prompts.append("<context>")
-        #     prompts.append("\n\n".join(contexts))
-        #     prompts.append("</context>")
-        # else:
-
         # Get the previous conversation contexts
         if thread_ts != None:
             chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
@@ -467,11 +334,6 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
         # Send the prompt to Bedrock
         message = invoke_agent(prompt)
-
-        # if AGENT_ID != "None":
-        #     message = invoke_agent(prompt)
-        # else:
-        #     message = invoke_claude_3(prompt)
 
         # print("conversation: message: {}".format(message))
 
