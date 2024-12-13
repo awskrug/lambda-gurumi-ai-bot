@@ -378,9 +378,9 @@ def invoke_agent(prompt):
     session_id = str(int(now.timestamp() * 1000))
 
     try:
-        bedrock_agent_client.tag_resource(
-            ResourceArn=AGENT_ARN, Tags={"Name": "GurumiBot"}
-        )
+        # bedrock_agent_client.tag_resource(
+        #     ResourceArn=AGENT_ARN, Tags={"Name": "GurumiBot"}
+        # )
 
         # Note: The execution time depends on the foundation model, complexity of the agent,
         # and the length of the prompt. In some cases, it can take up to a minute or more to
