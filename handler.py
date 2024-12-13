@@ -319,47 +319,6 @@ def conversations_replies(channel, ts, client_msg_id):
 #     return contexts
 
 
-def invoke_agent(prompt):
-    """
-    Sends a prompt for the agent to process and respond to.
-
-    :param agent_id: The unique identifier of the agent to use.
-    :param agent_alias_id: The alias of the agent to use.
-    :param session_id: The unique identifier of the session. Use the same value across requests
-                        to continue the same conversation.
-    :param prompt: The prompt that you want Claude to complete.
-    :return: Inference response from the model.
-    """
-
-    now = datetime.now()
-    session_id = str(int(now.timestamp() * 1000))
-
-    try:
-        bedrock_agent_client.tag_resource(ResourceArn=AGENT_ARN, Tags={"Name": "GurumiBot"})
-
-        # Note: The execution time depends on the foundation model, complexity of the agent,
-        # and the length of the prompt. In some cases, it can take up to a minute or more to
-        # generate a response.
-        response = bedrock_agent_client.invoke_agent(
-            agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
-            sessionId=session_id,
-            inputText=prompt,
-        )
-
-        completion = ""
-
-        for event in response.get("completion"):
-            chunk = event["chunk"]
-            completion = completion + chunk["bytes"].decode()
-
-    except Exception as e:
-        print("invoke_agent: Error: {}".format(e))
-        raise e
-
-    return completion
-
-
 # def invoke_claude_3(prompt):
 #     """
 #     Invokes Anthropic Claude 3 Sonnet to run an inference using the input
@@ -401,6 +360,49 @@ def invoke_agent(prompt):
 #     except Exception as e:
 #         print("invoke_claude_3: Error: {}".format(e))
 #         raise e
+
+
+def invoke_agent(prompt):
+    """
+    Sends a prompt for the agent to process and respond to.
+
+    :param agent_id: The unique identifier of the agent to use.
+    :param agent_alias_id: The alias of the agent to use.
+    :param session_id: The unique identifier of the session. Use the same value across requests
+                        to continue the same conversation.
+    :param prompt: The prompt that you want Claude to complete.
+    :return: Inference response from the model.
+    """
+
+    now = datetime.now()
+    session_id = str(int(now.timestamp() * 1000))
+
+    try:
+        bedrock_agent_client.tag_resource(
+            ResourceArn=AGENT_ARN, Tags={"Name": "GurumiBot"}
+        )
+
+        # Note: The execution time depends on the foundation model, complexity of the agent,
+        # and the length of the prompt. In some cases, it can take up to a minute or more to
+        # generate a response.
+        response = bedrock_agent_client.invoke_agent(
+            agentId=AGENT_ID,
+            agentAliasId=AGENT_ALIAS_ID,
+            sessionId=session_id,
+            inputText=prompt,
+        )
+
+        completion = ""
+
+        for event in response.get("completion"):
+            chunk = event["chunk"]
+            completion = completion + chunk["bytes"].decode()
+
+    except Exception as e:
+        print("invoke_agent: Error: {}".format(e))
+        raise e
+
+    return completion
 
 
 # Handle the chatgpt conversation
