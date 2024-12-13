@@ -4,7 +4,7 @@ service: lambda-gurumi-ai-bot
 provider:
   name: aws
   region: us-east-1
-  runtime: python3.11
+  runtime: python3.9
   # stage: prod
   # memorySize: 5120
   timeout: 600
@@ -18,9 +18,13 @@ provider:
         - "arn:aws:dynamodb:*:*:table/${self:provider.environment.BASE_NAME}-*"
     - Effect: Allow
       Action:
+        - bedrock:InvokeAgent
+      Resource:
+        - "arn:aws:bedrock:*:*:agent-alias/*"
+    - Effect: Allow
+      Action:
         - bedrock:Retrieve
       Resource:
-        # - "arn:aws:bedrock:*:*:knowledge-base/${self:provider.environment.BASE_NAME}-*"
         - "arn:aws:bedrock:*:*:knowledge-base/*"
     - Effect: Allow
       Action:

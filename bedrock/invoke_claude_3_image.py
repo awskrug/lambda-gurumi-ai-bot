@@ -10,7 +10,6 @@ import base64
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_claude_3")
     p.add_argument("-p", "--prompt", default="사진 설명 해줘", help="prompt")
-    p.add_argument("-d", "--debug", default="False", help="debug")
     return p.parse_args()
 
 

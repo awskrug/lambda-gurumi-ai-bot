@@ -10,6 +10,8 @@ on:
       - deploy
 
 env:
+  AGENT_ALIAS_ID: ${{ vars.AGENT_ALIAS_ID }}
+  AGENT_ID: ${{ vars.AGENT_ID }}
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
   DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
@@ -20,6 +22,7 @@ env:
   SLACK_SAY_INTERVAL: ${{ vars.SLACK_SAY_INTERVAL }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
+  AGENT_ARN: ${{ secrets.AGENT_ARN }}
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -35,10 +38,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python 3.11 🐍
+      - name: Setup Python 3.9 🐍
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.9'
 
       - name: Install dependencies
         run: npm install
@@ -54,6 +57,9 @@ jobs:
 
       - name: Set up environment variables 📝
         run: |
+          echo "AGENT_ALIAS_ID=${AGENT_ALIAS_ID}" >> .env
+          echo "AGENT_ARN=${AGENT_ARN}" >> .env
+          echo "AGENT_ID=${AGENT_ID}" >> .env
           echo "ALLOWED_CHANNEL_IDS=${ALLOWED_CHANNEL_IDS}" >> .env
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env

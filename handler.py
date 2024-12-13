@@ -1,12 +1,11 @@
 import boto3
-import datetime
 import json
 import os
 import re
 import sys
 import time
 
-from botocore.client import Config
+from datetime import datetime
 
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
@@ -21,17 +20,9 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 # Keep track of conversation history by thread and user
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context")
 
-# Amazon Bedrock Knowledge Base ID
-KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
-
-KB_RETRIEVE_COUNT = int(os.environ.get("KB_RETRIEVE_COUNT", 5))
-
-# Amazon Bedrock Model ID
-ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "bedrock-2023-05-31")
-ANTHROPIC_TOKENS = int(os.environ.get("ANTHROPIC_TOKENS", 2000))
-
-MODEL_ID_TEXT = os.environ.get("MODEL_ID_TEXT", "anthropic.claude-3")
-MODEL_ID_IMAGE = os.environ.get("MODEL_ID_IMAGE", "stability.stable-diffusion-xl")
+# Amazon Bedrock Agent ID
+AGENT_ID = os.environ.get("AGENT_ID", "None")
+AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
@@ -49,17 +40,8 @@ SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", 0))
 
 BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
 
-MSG_KNOWLEDGE = "지식 기반 검색 중... " + BOT_CURSOR
 MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
 MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
-
-CONVERSION_ARRAY = [
-    ["**", "*"],
-    # ["#### ", "🔸 "],
-    # ["### ", "🔶 "],
-    # ["## ", "🟠 "],
-    # ["# ", "🟡 "],
-]
 
 
 # Initialize Slack app
@@ -75,15 +57,8 @@ bot_id = app.client.api_call("auth.test")["user_id"]
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-# Initialize the Amazon Bedrock runtime client
-bedrock = boto3.client(service_name="bedrock-runtime", region_name=AWS_REGION)
-
-bedrock_config = Config(
-    connect_timeout=120, read_timeout=120, retries={"max_attempts": 0}
-)
-bedrock_agent_client = boto3.client(
-    "bedrock-agent-runtime", region_name=AWS_REGION, config=bedrock_config
-)
+# Initialize the Amazon Bedrock agent client
+bedrock_agent_client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
 
 
 # Get the context from DynamoDB
@@ -98,7 +73,7 @@ def get_context(thread_ts, user, default=""):
 # Put the context in DynamoDB
 def put_context(thread_ts, user, conversation=""):
     expire_at = int(time.time()) + 3600  # 1h
-    expire_dt = datetime.datetime.fromtimestamp(expire_at).isoformat()
+    expire_dt = datetime.fromtimestamp(expire_at).isoformat()
     if thread_ts is None:
         table.put_item(
             Item={
@@ -117,13 +92,6 @@ def put_context(thread_ts, user, conversation=""):
                 "expire_at": expire_at,
             }
         )
-
-
-# Replace text
-def replace_text(text):
-    for old, new in CONVERSION_ARRAY:
-        text = text.replace(old, new)
-    return text
 
 
 def split_message(message, max_len):
@@ -272,88 +240,43 @@ def conversations_replies(channel, ts, client_msg_id):
     return contexts
 
 
-def invoke_knowledge_base(content):
+def invoke_agent(prompt):
     """
-    Invokes the Amazon Bedrock Knowledge Base to retrieve information using the input
-    provided in the request body.
+    Sends a prompt for the agent to process and respond to.
 
-    :param content: The content that you want to use for retrieval.
-    :return: The retrieved contexts from the knowledge base.
-    """
-
-    contexts = []
-
-    if KNOWLEDGE_BASE_ID == "None":
-        return contexts
-
-    try:
-        response = bedrock_agent_client.retrieve(
-            retrievalQuery={"text": content},
-            knowledgeBaseId=KNOWLEDGE_BASE_ID,
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {
-                    "numberOfResults": KB_RETRIEVE_COUNT,
-                    # "overrideSearchType": "HYBRID",  # optional
-                }
-            },
-        )
-
-        results = response["retrievalResults"]
-
-        contexts = []
-        for result in results:
-            contexts.append(result["content"]["text"])
-
-    except Exception as e:
-        print("invoke_knowledge_base: Error: {}".format(e))
-
-    print("invoke_knowledge_base: {}".format(contexts))
-
-    return contexts
-
-
-def invoke_claude_3(prompt):
-    """
-    Invokes Anthropic Claude 3 Sonnet to run an inference using the input
-    provided in the request body.
-
-    :param prompt: The prompt that you want Claude 3 to complete.
+    :param agent_id: The unique identifier of the agent to use.
+    :param agent_alias_id: The alias of the agent to use.
+    :param session_id: The unique identifier of the session. Use the same value across requests
+                        to continue the same conversation.
+    :param prompt: The prompt that you want Claude to complete.
     :return: Inference response from the model.
     """
 
-    try:
-        body = {
-            "anthropic_version": ANTHROPIC_VERSION,
-            "max_tokens": ANTHROPIC_TOKENS,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                },
-            ],
-        }
+    now = datetime.now()
+    session_id = str(int(now.timestamp() * 1000))
 
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID_TEXT,
-            body=json.dumps(body),
+    try:
+        # Note: The execution time depends on the foundation model, complexity of the agent,
+        # and the length of the prompt. In some cases, it can take up to a minute or more to
+        # generate a response.
+        response = bedrock_agent_client.invoke_agent(
+            agentId=AGENT_ID,
+            agentAliasId=AGENT_ALIAS_ID,
+            sessionId=session_id,
+            inputText=prompt,
         )
 
-        # Process and print the response
-        body = json.loads(response.get("body").read())
+        completion = ""
 
-        print("response: {}".format(body))
-
-        result = body.get("content", [])
-
-        for output in result:
-            text = output["text"]
-
-        return text
+        for event in response.get("completion"):
+            chunk = event["chunk"]
+            completion = completion + chunk["bytes"].decode()
 
     except Exception as e:
-        print("invoke_claude_3: Error: {}".format(e))
-
+        print("invoke_agent: Error: {}".format(e))
         raise e
+
+    return completion
 
 
 # Handle the chatgpt conversation
@@ -366,46 +289,25 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
     prompts = []
     prompts.append("User: {}".format(PERSONAL_MESSAGE))
-    prompts.append(
-        "If you don't know the answer, just say that you don't know, don't try to make up an answer."
-    )
 
     if SYSTEM_MESSAGE != "None":
         prompts.append(SYSTEM_MESSAGE)
 
     prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
-    tz = datetime.timezone(datetime.timedelta(hours=9))
-    now = datetime.datetime.now(tz)
-
-    prompts.append("<now>{}</now>".format(now.isoformat()))
-
     try:
-        # Get the knowledge base contexts
-        if KNOWLEDGE_BASE_ID != "None":
-            chat_update(say, channel, thread_ts, latest_ts, MSG_KNOWLEDGE)
+        # Get the previous conversation contexts
+        if thread_ts != None:
+            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
 
-            contexts = invoke_knowledge_base(query)
+            contexts = conversations_replies(channel, thread_ts, client_msg_id)
 
             prompts.append(
-                "<context> 에 정보가 제공 되면, 해당 정보를 사용하여 답변해 주세요."
+                "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
             )
-            prompts.append("<context>")
+            prompts.append("<history>")
             prompts.append("\n\n".join(contexts))
-            prompts.append("</context>")
-        else:
-            # Get the previous conversation contexts
-            if thread_ts != None:
-                chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
-
-                contexts = conversations_replies(channel, thread_ts, client_msg_id)
-
-                prompts.append(
-                    "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
-                )
-                prompts.append("<history>")
-                prompts.append("\n\n".join(contexts))
-                prompts.append("</history>")
+            prompts.append("</history>")
 
         # Add the question to the prompts
         prompts.append("")
@@ -424,7 +326,7 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
         # Send the prompt to Bedrock
-        message = invoke_claude_3(prompt)
+        message = invoke_agent(prompt)
 
         # print("conversation: message: {}".format(message))
 
