@@ -41,11 +41,11 @@ AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
 
-# # Set up System messages
-# PERSONAL_MESSAGE = os.environ.get(
-#     "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
-# )
-# SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
+# Set up System messages
+PERSONAL_MESSAGE = os.environ.get(
+    "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
+)
+SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
@@ -408,15 +408,12 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
     latest_ts = result["ts"]
 
     prompts = []
-    # prompts.append("User: {}".format(PERSONAL_MESSAGE))
-    # prompts.append(
-    #     "If you don't know the answer, just say that you don't know, don't try to make up an answer."
-    # )
+    prompts.append("User: {}".format(PERSONAL_MESSAGE))
 
-    # if SYSTEM_MESSAGE != "None":
-    #     prompts.append(SYSTEM_MESSAGE)
+    if SYSTEM_MESSAGE != "None":
+        prompts.append(SYSTEM_MESSAGE)
 
-    # prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
+    prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
     try:
         # # Get the knowledge base contexts
@@ -439,21 +436,21 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
             contexts = conversations_replies(channel, thread_ts, client_msg_id)
 
-            # prompts.append(
-            #     "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
-            # )
+            prompts.append(
+                "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
+            )
             prompts.append("<history>")
             prompts.append("\n\n".join(contexts))
             prompts.append("</history>")
 
         # Add the question to the prompts
-        # prompts.append("")
+        prompts.append("")
         prompts.append("<question>")
         prompts.append(query)
         prompts.append("</question>")
-        # prompts.append("")
+        prompts.append("")
 
-        # prompts.append("Assistant:")
+        prompts.append("Assistant:")
 
         # Combine the prompts
         prompt = "\n".join(prompts)
