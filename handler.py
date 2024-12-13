@@ -5,9 +5,7 @@ import re
 import sys
 import time
 
-from datetime import datetime, timezone, timedelta
-
-from botocore.client import Config
+from datetime import datetime
 
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
@@ -42,7 +40,6 @@ SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", 0))
 
 BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
 
-MSG_KNOWLEDGE = "지식 기반 검색 중... " + BOT_CURSOR
 MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
 MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
 
@@ -259,10 +256,6 @@ def invoke_agent(prompt):
     session_id = str(int(now.timestamp() * 1000))
 
     try:
-        # bedrock_agent_client.tag_resource(
-        #     ResourceArn=AGENT_ARN, Tags={"Name": "GurumiBot"}
-        # )
-
         # Note: The execution time depends on the foundation model, complexity of the agent,
         # and the length of the prompt. In some cases, it can take up to a minute or more to
         # generate a response.
