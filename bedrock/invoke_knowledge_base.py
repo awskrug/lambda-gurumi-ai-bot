@@ -43,7 +43,6 @@ bedrock_agent_client = boto3.client(
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_claude_3")
     p.add_argument("-p", "--prompt", default="안녕", help="prompt")
-    p.add_argument("-d", "--debug", default="False", help="debug")
     return p.parse_args()
 
 

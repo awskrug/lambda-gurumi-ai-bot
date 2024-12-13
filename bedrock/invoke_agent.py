@@ -24,7 +24,6 @@ bedrock = boto3.client(service_name="bedrock-agent-runtime", region_name=AWS_REG
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_agent")
     p.add_argument("-p", "--prompt", default="안녕", help="prompt")
-    p.add_argument("-d", "--debug", default="False", help="debug")
     return p.parse_args()
 
 

@@ -13,7 +13,6 @@ from PIL import Image
 def parse_args():
     p = argparse.ArgumentParser(description="invoke_stable_diffusion")
     p.add_argument("-p", "--prompt", default="Hello", help="prompt", required=True)
-    p.add_argument("-d", "--debug", default="False", help="debug")
     return p.parse_args()
 
 
