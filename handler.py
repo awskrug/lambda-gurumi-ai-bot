@@ -1,10 +1,11 @@
 import boto3
-import datetime
 import json
 import os
 import re
 import sys
 import time
+
+from datetime import datetime, timezone, timedelta
 
 from botocore.client import Config
 
@@ -102,7 +103,7 @@ def get_context(thread_ts, user, default=""):
 # Put the context in DynamoDB
 def put_context(thread_ts, user, conversation=""):
     expire_at = int(time.time()) + 3600  # 1h
-    expire_dt = datetime.datetime.fromtimestamp(expire_at).isoformat()
+    expire_dt = datetime.fromtimestamp(expire_at).isoformat()
     if thread_ts is None:
         table.put_item(
             Item={
@@ -328,7 +329,7 @@ def invoke_agent(prompt):
     :return: Inference response from the model.
     """
 
-    now = datetime.datetime.now()
+    now = datetime.now()
     session_id = str(int(now.timestamp() * 1000))
 
     try:
@@ -417,8 +418,8 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
 
     prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
 
-    tz = datetime.timezone(datetime.timedelta(hours=9))
-    now = datetime.datetime.now(tz)
+    tz = timezone(timedelta(hours=9))
+    now = datetime.now(tz)
 
     prompts.append("<now>{}</now>".format(now.isoformat()))
 
