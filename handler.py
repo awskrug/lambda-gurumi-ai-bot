@@ -26,6 +26,8 @@ DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context"
 AGENT_ID = os.environ.get("AGENT_ID", "None")
 AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 
+AGENT_ARN = os.environ.get("AGENT_ARN", "None")
+
 # # Amazon Bedrock Knowledge Base ID
 # KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "None")
 
@@ -333,6 +335,8 @@ def invoke_agent(prompt):
     session_id = str(int(now.timestamp() * 1000))
 
     try:
+        bedrock_agent_client.tag_resource(ResourceArn=AGENT_ARN, Tags={"Name": "GurumiBot"})
+
         # Note: The execution time depends on the foundation model, complexity of the agent,
         # and the length of the prompt. In some cases, it can take up to a minute or more to
         # generate a response.
