@@ -72,14 +72,11 @@ def converse_stream(prompt):
             inferenceConfig={"maxTokens": 4096, "temperature": 0.5, "topP": 0.9},
         )
 
-        completion = ""
-
         # Extract and print the streamed response text in real-time.
         for chunk in streaming_response["stream"]:
             if "contentBlockDelta" in chunk:
-                completion = completion + chunk["contentBlockDelta"]["delta"]["text"]
-
-        return completion
+                text = chunk["contentBlockDelta"]["delta"]["text"]
+                print(text, end="")
 
     except Exception as e:
         print("converse_stream: Error: {}".format(e))
@@ -117,9 +114,7 @@ def main():
         prompt = "\n".join(prompts)
 
         # Send the prompt to Bedrock
-        message = converse_stream(prompt)
-
-        print("conversation: message: {}".format(message))
+        converse_stream(prompt)
 
     except Exception as e:
         print("conversation: error: {}".format(e))
