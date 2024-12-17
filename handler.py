@@ -87,6 +87,7 @@ def put_context(thread_ts, user, conversation=""):
         table.put_item(
             Item={
                 "id": thread_ts,
+                "user": user,
                 "conversation": conversation,
                 "expire_dt": expire_dt,
                 "expire_at": expire_at,
