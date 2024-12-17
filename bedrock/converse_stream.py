@@ -38,7 +38,7 @@ def create_inference_profile():
     )
 
     tags = [
-        {"key": "Nmae", "value": "gurumi-ai-bot"},
+        {"key": "Name", "value": "gurumi-ai-bot"},
         {"key": "dept", "value": "sre"},
     ]
 
