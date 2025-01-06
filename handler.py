@@ -10,6 +10,8 @@ from datetime import datetime
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
+from boto3.dynamodb.conditions import Key
+
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
@@ -35,6 +37,8 @@ SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
 
 MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
 MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
+
+MAX_THROTTLE_COUNT = int(os.environ.get("MAX_THROTTLE_COUNT", 100))
 
 SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", 0))
 
@@ -87,11 +91,18 @@ def put_context(thread_ts, user, conversation=""):
         table.put_item(
             Item={
                 "id": thread_ts,
+                "user": user,
                 "conversation": conversation,
                 "expire_dt": expire_dt,
                 "expire_at": expire_at,
             }
         )
+
+
+# Count the number of context
+def count_context(user):
+    res = table.scan(FilterExpression=Key("user").eq(user))
+    return len(res["Items"])
 
 
 def split_message(message, max_len):
@@ -415,15 +426,23 @@ def lambda_handler(event, context):
     if "event" not in body or "client_msg_id" not in body["event"]:
         return success()
 
-    # Get the context from DynamoDB
     token = body["event"]["client_msg_id"]
-    prompt = get_context(token, body["event"]["user"])
+    user = body["event"]["user"]
+
+    # Get the context from DynamoDB
+    prompt = get_context(token, user)
 
     if prompt != "":
         return success()
 
+    # Count the number of context
+    count = count_context(user)
+
+    if count >= MAX_THROTTLE_COUNT:
+        return success()
+
     # Put the context in DynamoDB
-    put_context(token, body["event"]["user"], body["event"]["text"])
+    put_context(token, user, body["event"]["text"])
 
     # Handle the event
     slack_handler = SlackRequestHandler(app=app)

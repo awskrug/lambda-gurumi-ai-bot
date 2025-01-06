@@ -1,0 +1,56 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:ValidateTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:*"
+      ],
+      "Resource": "arn:aws:cloudformation:*:*:stack/lambda-gurumi-ai-bot-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:*"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:lambda-gurumi-ai-bot-*",
+        "arn:aws:lambda:*:*:function:gurumi-ai-bot-*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:*"
+      ],
+      "Resource": "arn:aws:iam::*:role/lambda-gurumi-ai-bot-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::lambda-gurumi-ai-bot-*",
+        "arn:aws:s3:::gurumi-ai-bot-*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:*"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:*:table/lambda-gurumi-ai-bot-*",
+        "arn:aws:dynamodb:*:*:table/gurumi-ai-bot-*"
+      ]
+    }
+  ]
+}
