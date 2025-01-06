@@ -12,7 +12,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:nalbam/lambda-gurumi-ai-bot:*"
+          "token.actions.githubusercontent.com:sub": "repo:awskrug/lambda-gurumi-ai-bot:*"
         }
       }
     }
