@@ -10,6 +10,9 @@ on:
       - deploy
 
 env:
+  AWS_REGION: "us-east-1"
+  AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
+
   AGENT_ALIAS_ID: ${{ vars.AGENT_ALIAS_ID }}
   AGENT_ID: ${{ vars.AGENT_ID }}
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
@@ -21,10 +24,14 @@ env:
   SLACK_SAY_INTERVAL: ${{ vars.SLACK_SAY_INTERVAL }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
   SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
   SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+
+# Permission can be added at job level or workflow level
+permissions:
+  id-token: write   # This is required for requesting the JWT
+  contents: read    # This is required for actions/checkout
 
 jobs:
   deploy:
@@ -68,5 +75,12 @@ jobs:
           echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
           echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
 
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE_NAME }}"
+          role-session-name: github-actions-ci-bot
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Deploy to AWS Lambda 🚀
-        run: npx serverless deploy --region us-east-1
+        run: npx serverless deploy --region ${{ env.AWS_REGION }}
