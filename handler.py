@@ -28,6 +28,9 @@ AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
+ALLOWED_CHANNEL_MESSAGE = os.environ.get(
+    "ALLOWED_CHANNEL_MESSAGE", "Sorry, I'm not allowed to respond in this channel."
+)
 
 # Set up System messages
 PERSONAL_MESSAGE = os.environ.get(
@@ -370,7 +373,7 @@ def handle_mention(body: dict, say: Say):
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
             say(
-                text="Sorry, I'm not allowed to respond in this channel.",
+                text=ALLOWED_CHANNEL_MESSAGE,
                 thread_ts=thread_ts,
             )
             return
