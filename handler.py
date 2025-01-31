@@ -428,6 +428,7 @@ def lambda_handler(event, context):
 
     # Duplicate execution prevention
     if "event" not in body or "client_msg_id" not in body["event"]:
+        print("lambda_handler: client_msg_id not found")
         return success()
 
     token = body["event"]["client_msg_id"]
@@ -437,12 +438,14 @@ def lambda_handler(event, context):
     prompt = get_context(token, user)
 
     if prompt != "":
+        print("lambda_handler: prompt found")
         return success()
 
     # Count the number of context
     count = count_context(user)
 
     if count >= MAX_THROTTLE_COUNT:
+        print("lambda_handler: count >= MAX_THROTTLE_COUNT")
         return success()
 
     # Put the context in DynamoDB
