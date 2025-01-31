@@ -372,6 +372,7 @@ def handle_mention(body: dict, say: Say):
     if ALLOWED_CHANNEL_IDS != "None":
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
+            print("handle_mention: {}".format(ALLOWED_CHANNEL_MESSAGE))
             say(
                 text=ALLOWED_CHANNEL_MESSAGE,
                 thread_ts=thread_ts,
