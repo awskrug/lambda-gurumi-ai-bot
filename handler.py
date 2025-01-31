@@ -28,6 +28,9 @@ AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
 
 # Set up the allowed channel ID
 ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
+ALLOWED_CHANNEL_MESSAGE = os.environ.get(
+    "ALLOWED_CHANNEL_MESSAGE", "Sorry, I'm not allowed to respond in this channel."
+)
 
 # Set up System messages
 PERSONAL_MESSAGE = os.environ.get(
@@ -369,10 +372,13 @@ def handle_mention(body: dict, say: Say):
     if ALLOWED_CHANNEL_IDS != "None":
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
+            first_channel = "<#{}>".format(allowed_channel_ids[0])
+            message = ALLOWED_CHANNEL_MESSAGE.format(first_channel)
             say(
-                text="Sorry, I'm not allowed to respond in this channel.",
+                text=message,
                 thread_ts=thread_ts,
             )
+            print("handle_mention: {}".format(message))
             return
 
     prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
@@ -424,6 +430,7 @@ def lambda_handler(event, context):
 
     # Duplicate execution prevention
     if "event" not in body or "client_msg_id" not in body["event"]:
+        print("lambda_handler: client_msg_id not found")
         return success()
 
     token = body["event"]["client_msg_id"]
@@ -433,12 +440,14 @@ def lambda_handler(event, context):
     prompt = get_context(token, user)
 
     if prompt != "":
+        print("lambda_handler: prompt found")
         return success()
 
     # Count the number of context
     count = count_context(user)
 
     if count >= MAX_THROTTLE_COUNT:
+        print("lambda_handler: {} >= {}".format(count, MAX_THROTTLE_COUNT))
         return success()
 
     # Put the context in DynamoDB
