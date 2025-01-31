@@ -373,8 +373,10 @@ def handle_mention(body: dict, say: Say):
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
             print("handle_mention: {}".format(ALLOWED_CHANNEL_MESSAGE))
+            first_channel = ALLOWED_CHANNEL_IDS[0]
+            message = ALLOWED_CHANNEL_MESSAGE.format("#<{}>".format(first_channel))
             say(
-                text=ALLOWED_CHANNEL_MESSAGE,
+                text=message,
                 thread_ts=thread_ts,
             )
             return
