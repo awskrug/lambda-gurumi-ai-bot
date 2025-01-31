@@ -372,13 +372,13 @@ def handle_mention(body: dict, say: Say):
     if ALLOWED_CHANNEL_IDS != "None":
         allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
-            print("handle_mention: {}".format(ALLOWED_CHANNEL_MESSAGE))
             first_channel = "#<{}>".format(allowed_channel_ids[0])
             message = ALLOWED_CHANNEL_MESSAGE.format(first_channel)
             say(
                 text=message,
                 thread_ts=thread_ts,
             )
+            print("handle_mention: {}".format(message))
             return
 
     prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
