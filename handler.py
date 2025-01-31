@@ -445,7 +445,7 @@ def lambda_handler(event, context):
     count = count_context(user)
 
     if count >= MAX_THROTTLE_COUNT:
-        print("lambda_handler: count >= MAX_THROTTLE_COUNT")
+        print("lambda_handler: {} >= {}".format(count, MAX_THROTTLE_COUNT))
         return success()
 
     # Put the context in DynamoDB
