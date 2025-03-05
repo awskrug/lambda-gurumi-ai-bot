@@ -464,14 +464,17 @@ def kakao_handler(event, context):
     print("kakao_handler: {}".format(event))
 
     if "Authorization" not in event["headers"]:
+        print("kakao_handler: Authorization not found")
         return success()
 
     if event["headers"]["Authorization"] != "Bearer " + KAKAO_BOT_TOKEN:
+        print("kakao_handler: Authorization not matched")
         return success()
 
     body = json.loads(event["body"])
 
     if "query" not in body:
+        print("kakao_handler: query not found")
         return success()
 
     query = body["query"]
