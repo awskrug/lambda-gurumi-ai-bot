@@ -463,18 +463,18 @@ def lambda_handler(event, context):
 def kakao_handler(event, context):
     print("kakao_handler: {}".format(event))
 
+    if "Authorization" not in event["headers"]:
+        return success()
+
+    if event["headers"]["Authorization"] != "Bearer " + KAKAO_BOT_TOKEN:
+        return success()
+
     body = json.loads(event["body"])
 
-    if "token" not in body:
+    if "query" not in body:
         return success()
 
-    if body["token"] != KAKAO_BOT_TOKEN:
-        return success()
-
-    if "content" not in body:
-        return success()
-
-    query = body["content"]
+    query = body["query"]
 
     print("kakao_handler: query: {}".format(query))
 
