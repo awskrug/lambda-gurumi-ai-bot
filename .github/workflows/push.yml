@@ -26,6 +26,7 @@ env:
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
   AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  KAKAO_BOT_TOKEN: ${{ secrets.KAKAO_BOT_TOKEN }}
   SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
   SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
 
@@ -69,6 +70,7 @@ jobs:
           echo "ALLOWED_CHANNEL_MESSAGE=${ALLOWED_CHANNEL_MESSAGE}" >> .env
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
+          echo "KAKAO_BOT_TOKEN=${KAKAO_BOT_TOKEN}" >> .env
           echo "MAX_LEN_SLACK=${MAX_LEN_SLACK}" >> .env
           echo "MAX_THROTTLE_COUNT=${MAX_THROTTLE_COUNT}" >> .env
           echo "PERSONAL_MESSAGE=${PERSONAL_MESSAGE}" >> .env

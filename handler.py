@@ -467,9 +467,6 @@ def kakao_handler(event, context):
         return success()
 
     if event["headers"]["Authorization"] != "Bearer {}".format(KAKAO_BOT_TOKEN):
-        print("kakao_handler: Authorization not matched")
-        print("kakao_handler: 1: {}".format(event["headers"]["Authorization"]))
-        print("kakao_handler: 2: Bearer {}".format(KAKAO_BOT_TOKEN))
         return success()
 
     body = json.loads(event["body"])
