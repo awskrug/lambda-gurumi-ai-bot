@@ -22,6 +22,9 @@ SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
 # Keep track of conversation history by thread and user
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context")
 
+# Kakao Bot token
+KAKAO_BOT_TOKEN = os.environ.get("KAKAO_BOT_TOKEN", "None")
+
 # Amazon Bedrock Agent ID
 AGENT_ID = os.environ.get("AGENT_ID", "None")
 AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
@@ -293,14 +296,9 @@ def invoke_agent(prompt):
     return completion
 
 
-# Handle the chatgpt conversation
-def conversation(say: Say, thread_ts, query, channel, client_msg_id):
-    print("conversation: query: {}".format(query))
-
-    # Keep track of the latest message timestamp
-    result = say(text=BOT_CURSOR, thread_ts=thread_ts)
-    latest_ts = result["ts"]
-
+def make_prompt(
+    say: Say, query, thread_ts=None, channel=None, client_msg_id=None, latest_ts=None
+):
     prompts = []
     prompts.append("User: {}".format(PERSONAL_MESSAGE))
 
@@ -335,22 +333,26 @@ def conversation(say: Say, thread_ts, query, channel, client_msg_id):
         # Combine the prompts
         prompt = "\n".join(prompts)
 
-        # print("conversation: prompt: {}".format(prompt))
-
-        chat_update(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
-
-        # Send the prompt to Bedrock
-        message = invoke_agent(prompt)
-
-        # print("conversation: message: {}".format(message))
-
-        # Update the message in Slack
-        chat_update(say, channel, thread_ts, latest_ts, message)
+        return prompt
 
     except Exception as e:
-        print("conversation: error: {}".format(e))
+        print("make_prompt: error: {}".format(e))
+        raise e
 
-        chat_update(say, channel, thread_ts, latest_ts, f"```{e}```")
+
+# Handle the chatgpt conversation
+def conversation(say: Say, query, thread_ts=None, channel=None, client_msg_id=None):
+    print("conversation: query: {}".format(query))
+
+    # Keep track of the latest message timestamp
+    result = say(text=BOT_CURSOR, thread_ts=thread_ts)
+    latest_ts = result["ts"]
+
+    prompt = make_prompt(say, query, thread_ts, channel, client_msg_id, latest_ts)
+
+    message = invoke_agent(prompt)
+
+    chat_update(say, channel, thread_ts, latest_ts, message)
 
 
 # Handle the app_mention event
@@ -383,7 +385,7 @@ def handle_mention(body: dict, say: Say):
 
     prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
 
-    conversation(say, thread_ts, prompt, channel, client_msg_id)
+    conversation(say, prompt, thread_ts, channel, client_msg_id)
 
 
 # Handle the DM (direct message) event
@@ -403,14 +405,14 @@ def handle_message(body: dict, say: Say):
     prompt = event["text"].strip()
 
     # Use thread_ts=None for regular messages, and user ID for DMs
-    conversation(say, None, prompt, channel, client_msg_id)
+    conversation(say, prompt, None, channel, client_msg_id)
 
 
-def success():
+def success(message=""):
     return {
         "statusCode": 200,
         "headers": {"Content-type": "application/json"},
-        "body": json.dumps({"status": "Success"}),
+        "body": json.dumps({"status": "Success", "message": message}),
     }
 
 
@@ -456,3 +458,28 @@ def lambda_handler(event, context):
     # Handle the event
     slack_handler = SlackRequestHandler(app=app)
     return slack_handler.handle(event, context)
+
+
+def kakao_handler(event, context):
+    print("kakao_handler: {}".format(event))
+
+    if "Authorization" not in event["headers"]:
+        return success()
+
+    if event["headers"]["Authorization"] != "Bearer {}".format(KAKAO_BOT_TOKEN):
+        return success()
+
+    body = json.loads(event["body"])
+
+    if "query" not in body:
+        return success()
+
+    query = body["query"]
+
+    print("kakao_handler: query: {}".format(query))
+
+    prompt = make_prompt(None, query)
+
+    message = invoke_agent(prompt)
+
+    return success(message)
