@@ -7,7 +7,7 @@ provider:
   runtime: python3.9
   # stage: prod
   # memorySize: 5120
-  timeout: 600
+  timeout: 60 # seconds
   environment:
     BASE_NAME: gurumi-ai-bot
   iamRoleStatements:
@@ -40,8 +40,13 @@ functions:
       - http:
           method: post
           path: /slack/events
-    tags:
-      Project: ${self:provider.environment.BASE_NAME}
+
+  kakao:
+    handler: handler.kakao_handler
+    events:
+      - http:
+          method: post
+          path: /kakao/events
 
 resources:
   Resources:
