@@ -2,10 +2,9 @@ import boto3
 import json
 import os
 import re
-import sys
 import time
-
 from datetime import datetime
+from typing import List, Optional, Dict, Any, Union
 
 from slack_bolt import App, Say
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
@@ -13,402 +12,426 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from boto3.dynamodb.conditions import Key
 
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+# Environment configuration
+class Config:
+    """Configuration settings loaded from environment variables"""
+    AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+    SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+    SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+    DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context")
+    KAKAO_BOT_TOKEN = os.environ.get("KAKAO_BOT_TOKEN", "None")
+    AGENT_ID = os.environ.get("AGENT_ID", "None")
+    AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
+    ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
+    ALLOWED_CHANNEL_MESSAGE = os.environ.get(
+        "ALLOWED_CHANNEL_MESSAGE", "Sorry, I'm not allowed to respond in this channel."
+    )
+    PERSONAL_MESSAGE = os.environ.get(
+        "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
+    )
+    SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
+    MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", "2000"))
+    MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", "4000"))
+    MAX_THROTTLE_COUNT = int(os.environ.get("MAX_THROTTLE_COUNT", "100"))
+    SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", "0"))
+    BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
 
-# Set up Slack API credentials
-SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-SLACK_SIGNING_SECRET = os.environ["SLACK_SIGNING_SECRET"]
+    @classmethod
+    def validate(cls) -> bool:
+        """Validate required configuration settings"""
+        required_vars = ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"]
+        missing = [var for var in required_vars if not getattr(cls, var)]
+        if missing:
+            print(f"Missing required environment variables: {', '.join(missing)}")
+            return False
+        return True
 
-# Keep track of conversation history by thread and user
-DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-bot-context")
 
-# Kakao Bot token
-KAKAO_BOT_TOKEN = os.environ.get("KAKAO_BOT_TOKEN", "None")
-
-# Amazon Bedrock Agent ID
-AGENT_ID = os.environ.get("AGENT_ID", "None")
-AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
-
-# Set up the allowed channel ID
-ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
-ALLOWED_CHANNEL_MESSAGE = os.environ.get(
-    "ALLOWED_CHANNEL_MESSAGE", "Sorry, I'm not allowed to respond in this channel."
-)
-
-# Set up System messages
-PERSONAL_MESSAGE = os.environ.get(
-    "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
-)
-SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
-
-MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", 3000))
-MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", 4000))
-
-MAX_THROTTLE_COUNT = int(os.environ.get("MAX_THROTTLE_COUNT", 100))
-
-SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", 0))
-
-BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
-
-MSG_PREVIOUS = "이전 대화 내용 확인 중... " + BOT_CURSOR
-MSG_RESPONSE = "응답 기다리는 중... " + BOT_CURSOR
-
+# Initialize AWS clients
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table(Config.DYNAMODB_TABLE_NAME)
+bedrock_agent_client = boto3.client("bedrock-agent-runtime", region_name=Config.AWS_REGION)
 
 # Initialize Slack app
 app = App(
-    token=SLACK_BOT_TOKEN,
-    signing_secret=SLACK_SIGNING_SECRET,
+    token=Config.SLACK_BOT_TOKEN,
+    signing_secret=Config.SLACK_SIGNING_SECRET,
     process_before_response=True,
 )
 
+# Get Slack bot ID
 bot_id = app.client.api_call("auth.test")["user_id"]
 
-# Initialize DynamoDB
-dynamodb = boto3.resource("dynamodb")
-table = dynamodb.Table(DYNAMODB_TABLE_NAME)
-
-# Initialize the Amazon Bedrock agent client
-bedrock_agent_client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
+# Status messages
+MSG_PREVIOUS = f"이전 대화 내용 확인 중... {Config.BOT_CURSOR}"
+MSG_RESPONSE = f"응답 기다리는 중... {Config.BOT_CURSOR}"
+MSG_ERROR = f"오류가 발생했습니다. 잠시 후 다시 시도해주세요. {Config.BOT_CURSOR}"
 
 
-# Get the context from DynamoDB
-def get_context(thread_ts, user, default=""):
-    if thread_ts is None:
-        item = table.get_item(Key={"id": user}).get("Item")
-    else:
-        item = table.get_item(Key={"id": thread_ts}).get("Item")
-    return (item["conversation"]) if item else (default)
+class DynamoDBManager:
+    """Handles DynamoDB operations for conversation context"""
 
+    @staticmethod
+    def get_context(thread_ts: Optional[str], user: str, default: str = "") -> str:
+        """Retrieve conversation context from DynamoDB"""
+        try:
+            key = {"id": thread_ts if thread_ts else user}
+            item = table.get_item(Key=key).get("Item")
+            return item["conversation"] if item else default
+        except Exception as e:
+            print(f"Error retrieving context: {e}")
+            return default
 
-# Put the context in DynamoDB
-def put_context(thread_ts, user, conversation=""):
-    expire_at = int(time.time()) + 3600  # 1h
-    expire_dt = datetime.fromtimestamp(expire_at).isoformat()
-    if thread_ts is None:
-        table.put_item(
-            Item={
-                "id": user,
+    @staticmethod
+    def put_context(thread_ts: Optional[str], user: str, conversation: str = "") -> None:
+        """Store conversation context in DynamoDB with TTL"""
+        try:
+            expire_at = int(time.time()) + 3600  # 1 hour TTL
+            expire_dt = datetime.fromtimestamp(expire_at).isoformat()
+
+            item = {
+                "id": thread_ts if thread_ts else user,
                 "conversation": conversation,
                 "expire_dt": expire_dt,
                 "expire_at": expire_at,
             }
-        )
-    else:
-        table.put_item(
-            Item={
-                "id": thread_ts,
-                "user": user,
-                "conversation": conversation,
-                "expire_dt": expire_dt,
-                "expire_at": expire_at,
-            }
-        )
+
+            if thread_ts:
+                item["user"] = user
+
+            table.put_item(Item=item)
+        except Exception as e:
+            print(f"Error storing context: {e}")
+
+    @staticmethod
+    def count_user_contexts(user: str) -> int:
+        """Count contexts belonging to a specific user"""
+        try:
+            # Using query with a GSI would be more efficient, but for now we use scan with filter
+            response = table.scan(FilterExpression=Key("user").eq(user))
+            return len(response.get("Items", []))
+        except Exception as e:
+            print(f"Error counting contexts: {e}")
+            return 0
 
 
-# Count the number of context
-def count_context(user):
-    res = table.scan(FilterExpression=Key("user").eq(user))
-    return len(res["Items"])
+class MessageFormatter:
+    """Handles message formatting and splitting for Slack"""
 
+    @staticmethod
+    def split_message(message: str, max_len: int) -> List[str]:
+        """Split a message into chunks that fit within max_len"""
+        # If message is empty or smaller than max_len, return as is
+        if not message or len(message) <= max_len:
+            return [message]
 
-def split_message(message, max_len):
-    split_parts = []
+        # First split by code blocks
+        parts = []
+        segments = message.split("```")
 
-    # 먼저 ``` 기준으로 분리
-    parts = message.split("```")
-
-    for i, part in enumerate(parts):
-        if i % 2 == 1:  # 코드 블록인 경우
-            # 코드 블록도 "\n\n" 기준으로 자름
-            split_parts.extend(split_code_block(part, max_len))
-        else:  # 일반 텍스트 부분
-            split_parts.extend(split_by_newline(part, max_len))
-
-    # 전체 블록을 합친 후 max_len을 넘지 않도록 추가로 자름
-    return finalize_split(split_parts, max_len)
-
-
-def split_code_block(code, max_len):
-    # 코드 블록을 "\n\n" 기준으로 분리 후, 다시 ```로 감쌈
-    code_parts = code.split("\n\n")
-    result = []
-    current_part = "```\n"
-
-    for part in code_parts:
-        if len(current_part) + len(part) + 2 < max_len - 6:  # 6은 ``` 앞뒤 길이
-            if current_part != "```\n":
-                current_part += "\n\n" + part
-            else:
-                current_part += part
-        else:
-            result.append(current_part + "\n```")  # ```로 감쌈
-            current_part = "```\n" + part
-
-    if current_part != "```\n":
-        result.append(current_part + "\n```")
-
-    return result
-
-
-def split_by_newline(text, max_len):
-    # "\n\n" 기준으로 분리
-    parts = text.split("\n\n")
-    result = []
-    current_part = ""
-
-    for part in parts:
-        if len(current_part) + len(part) + 2 < max_len:  # 2는 "\n\n"의 길이
-            if current_part != "":
-                current_part += "\n\n" + part
-            else:
-                current_part = part
-        else:
-            result.append(current_part)
-            current_part = part
-    if current_part != "":
-        result.append(current_part)
-
-    return result
-
-
-def finalize_split(parts, max_len):
-    # 각 파트를 max_len에 맞춰 추가로 자름
-    result = []
-    current_message = ""
-
-    for part in parts:
-        if len(current_message) + len(part) < max_len:
-            current_message += "\n\n" + part
-        else:
-            result.append(current_message)
-            current_message = part
-    if current_message != "":
-        result.append(current_message)
-
-    return result
-
-
-# Update the message in Slack
-def chat_update(say, channel, thread_ts, latest_ts, message="", continue_thread=False):
-    # print("chat_update: {}".format(message))
-
-    split_messages = split_message(message, MAX_LEN_SLACK)
-
-    for i, text in enumerate(split_messages):
-        if i == 0:
-            # Update the message
-            app.client.chat_update(channel=channel, ts=latest_ts, text=text)
-        else:
-            if SLACK_SAY_INTERVAL > 0:
-                time.sleep(SLACK_SAY_INTERVAL)
-
-            try:
-                # Send a new message
-                result = say(text=text, thread_ts=thread_ts)
-                latest_ts = result["ts"]
-            except Exception as e:
-                print("chat_update: Error: {}".format(e))
-
-    return message, latest_ts
-
-
-# Get thread messages using conversations.replies API method
-def conversations_replies(channel, ts, client_msg_id):
-    contexts = []
-
-    try:
-        response = app.client.conversations_replies(channel=channel, ts=ts)
-
-        print("conversations_replies: {}".format(response))
-
-        if not response.get("ok"):
-            print(
-                "conversations_replies: {}".format(
-                    "Failed to retrieve thread messages."
-                )
-            )
-
-        messages = response.get("messages", [])
-        messages.reverse()
-        messages.pop(0)  # remove the first message
-
-        for message in messages:
-            if message.get("client_msg_id", "") == client_msg_id:
+        for i, segment in enumerate(segments):
+            if not segment:  # Skip empty segments
                 continue
 
-            role = "user"
-            if message.get("bot_id", "") != "":
-                role = "assistant"
+            if i % 2 == 1:  # This is a code block
+                # Preserve the code block formatting
+                code_parts = MessageFormatter._split_text(f"```{segment}```", max_len)
+                parts.extend(code_parts)
+            else:
+                # Regular text - split by paragraphs
+                text_parts = MessageFormatter._split_text(segment, max_len)
+                parts.extend(text_parts)
 
-            contexts.append("{}: {}".format(role, message.get("text", "")))
+        # Final cleanup to ensure no part exceeds max_len
+        result = []
+        current = ""
 
-            if sys.getsizeof(contexts) > MAX_LEN_BEDROCK:
-                contexts.pop(0)  # remove the oldest message
-                break
+        for part in parts:
+            if len(current) + len(part) + 2 <= max_len:
+                if current:
+                    current += "\n\n" + part
+                else:
+                    current = part
+            else:
+                if current:
+                    result.append(current)
+                current = part
 
-        contexts.reverse()
+        if current:
+            result.append(current)
 
-    except Exception as e:
-        print("conversations_replies: Error: {}".format(e))
+        return result
 
-    print("conversations_replies: getsizeof: {}".format(sys.getsizeof(contexts)))
-    # print("conversations_replies: {}".format(contexts))
+    @staticmethod
+    def _split_text(text: str, max_len: int) -> List[str]:
+        """Helper method to split text by paragraphs"""
+        if len(text) <= max_len:
+            return [text]
 
-    return contexts
+        parts = text.split("\n\n")
+        result = []
+        current = ""
+
+        for part in parts:
+            # If a single part is longer than max_len, split it by sentences
+            if len(part) > max_len:
+                sentences = re.split(r'(?<=[.!?])\s+', part)
+                for sentence in sentences:
+                    if len(current) + len(sentence) + 2 <= max_len:
+                        if current:
+                            current += " " + sentence
+                        else:
+                            current = sentence
+                    else:
+                        if current:
+                            result.append(current)
+                        current = sentence
+            elif len(current) + len(part) + 2 <= max_len:
+                if current:
+                    current += "\n\n" + part
+                else:
+                    current = part
+            else:
+                if current:
+                    result.append(current)
+                current = part
+
+        if current:
+            result.append(current)
+
+        return result
 
 
-def invoke_agent(prompt):
-    """
-    Sends a prompt for the agent to process and respond to.
+class SlackManager:
+    """Handles Slack messaging operations"""
 
-    :param agent_id: The unique identifier of the agent to use.
-    :param agent_alias_id: The alias of the agent to use.
-    :param session_id: The unique identifier of the session. Use the same value across requests
-                        to continue the same conversation.
-    :param prompt: The prompt that you want Claude to complete.
-    :return: Inference response from the model.
-    """
+    @staticmethod
+    def update_message(say: Say, channel: str, thread_ts: Optional[str],
+                      latest_ts: str, message: str) -> tuple:
+        """Update existing message and send additional messages if needed"""
+        try:
+            split_messages = MessageFormatter.split_message(message, Config.MAX_LEN_SLACK)
 
-    now = datetime.now()
-    session_id = str(int(now.timestamp() * 1000))
+            for i, text in enumerate(split_messages):
+                if i == 0:
+                    # Update the initial message
+                    app.client.chat_update(channel=channel, ts=latest_ts, text=text)
+                else:
+                    # Add delay if configured
+                    if Config.SLACK_SAY_INTERVAL > 0:
+                        time.sleep(Config.SLACK_SAY_INTERVAL)
+
+                    # Send additional messages in thread
+                    result = say(text=text, thread_ts=thread_ts)
+                    latest_ts = result["ts"]
+
+            return message, latest_ts
+        except Exception as e:
+            print(f"Error updating message: {e}")
+            # Update with error message
+            app.client.chat_update(channel=channel, ts=latest_ts, text=MSG_ERROR)
+            return MSG_ERROR, latest_ts
+
+    @staticmethod
+    def get_thread_history(channel: str, thread_ts: str, client_msg_id: str) -> List[str]:
+        """Retrieve conversation history from a Slack thread"""
+        contexts = []
+
+        try:
+            response = app.client.conversations_replies(channel=channel, ts=thread_ts)
+
+            if not response.get("ok"):
+                print("Failed to retrieve thread messages")
+                return contexts
+
+            messages = response.get("messages", [])
+            messages.reverse()
+
+            # Skip the thread parent message
+            if messages:
+                messages.pop(0)
+
+            # Process each message in the thread
+            for message in messages:
+                # Skip the current message being processed
+                if message.get("client_msg_id") == client_msg_id:
+                    continue
+
+                # Determine role based on whether it's from a bot or user
+                role = "assistant" if message.get("bot_id") else "user"
+                contexts.append(f"{role}: {message.get('text', '')}")
+
+                # Check if we've reached the context length limit
+                context_text = "\n".join(contexts)
+                if len(context_text) > Config.MAX_LEN_BEDROCK:
+                    contexts.pop(0)  # Remove oldest message
+                    break
+
+            contexts.reverse()
+
+        except Exception as e:
+            print(f"Error retrieving thread history: {e}")
+
+        return contexts
+
+
+class BedrockManager:
+    """Handles Amazon Bedrock operations"""
+
+    @staticmethod
+    def invoke_agent(prompt: str) -> str:
+        """Invoke Amazon Bedrock Agent with prompt and return response"""
+        try:
+            # Create a unique session ID
+            now = datetime.now()
+            session_id = str(int(now.timestamp() * 1000))
+
+            # Call Bedrock Agent
+            response = bedrock_agent_client.invoke_agent(
+                agentId=Config.AGENT_ID,
+                agentAliasId=Config.AGENT_ALIAS_ID,
+                sessionId=session_id,
+                inputText=prompt,
+            )
+
+            # Process streaming response
+            completion = ""
+            for event in response.get("completion"):
+                chunk = event["chunk"]
+                completion += chunk["bytes"].decode()
+
+            return completion
+
+        except Exception as e:
+            print(f"Error invoking Bedrock Agent: {e}")
+            return f"죄송합니다. 응답을 생성하는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요. (오류: {type(e).__name__})"
+
+    @staticmethod
+    def create_prompt(say: Optional[Say], query: str, thread_ts: Optional[str] = None,
+                    channel: Optional[str] = None, client_msg_id: Optional[str] = None,
+                    latest_ts: Optional[str] = None) -> str:
+        """Create a prompt for the AI model with context and query"""
+        prompts = []
+        prompts.append(f"User: {Config.PERSONAL_MESSAGE}")
+
+        if Config.SYSTEM_MESSAGE != "None":
+            prompts.append(Config.SYSTEM_MESSAGE)
+
+        prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
+
+        try:
+            # Add conversation history if in a thread
+            if thread_ts and say and channel and client_msg_id and latest_ts:
+                # Update status message
+                SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
+
+                # Get thread history
+                contexts = SlackManager.get_thread_history(channel, thread_ts, client_msg_id)
+
+                if contexts:
+                    prompts.append("<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요.")
+                    prompts.append("<history>")
+                    prompts.append("\n\n".join(contexts))
+                    prompts.append("</history>")
+
+            # Add the current query
+            prompts.append("")
+            prompts.append("<question>")
+            prompts.append(query)
+            prompts.append("</question>")
+            prompts.append("")
+
+            prompts.append("Assistant:")
+
+            return "\n".join(prompts)
+
+        except Exception as e:
+            print(f"Error creating prompt: {e}")
+            raise e
+
+
+def conversation(say: Say, query: str, thread_ts: Optional[str] = None,
+               channel: Optional[str] = None, client_msg_id: Optional[str] = None) -> None:
+    """Main conversation handler that processes queries and returns AI responses"""
+    print(f"conversation: query: {query}")
 
     try:
-        # Note: The execution time depends on the foundation model, complexity of the agent,
-        # and the length of the prompt. In some cases, it can take up to a minute or more to
-        # generate a response.
-        response = bedrock_agent_client.invoke_agent(
-            agentId=AGENT_ID,
-            agentAliasId=AGENT_ALIAS_ID,
-            sessionId=session_id,
-            inputText=prompt,
+        # Send initial status message
+        result = say(text=Config.BOT_CURSOR, thread_ts=thread_ts)
+        latest_ts = result["ts"]
+
+        # Create prompt with context and query
+        prompt = BedrockManager.create_prompt(
+            say, query, thread_ts, channel, client_msg_id, latest_ts
         )
 
-        completion = ""
+        # Update status while waiting for response
+        SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
-        for event in response.get("completion"):
-            chunk = event["chunk"]
-            completion = completion + chunk["bytes"].decode()
+        # Get response from AI
+        message = BedrockManager.invoke_agent(prompt)
 
-    except Exception as e:
-        print("invoke_agent: Error: {}".format(e))
-        raise e
-
-    return completion
-
-
-def make_prompt(
-    say: Say, query, thread_ts=None, channel=None, client_msg_id=None, latest_ts=None
-):
-    prompts = []
-    prompts.append("User: {}".format(PERSONAL_MESSAGE))
-
-    if SYSTEM_MESSAGE != "None":
-        prompts.append(SYSTEM_MESSAGE)
-
-    prompts.append("<question> 태그로 감싸진 질문에 답변을 제공하세요.")
-
-    try:
-        # Get the previous conversation contexts
-        if thread_ts != None:
-            chat_update(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
-
-            contexts = conversations_replies(channel, thread_ts, client_msg_id)
-
-            prompts.append(
-                "<history> 에 정보가 제공 되면, 대화 기록을 참고하여 답변해 주세요."
-            )
-            prompts.append("<history>")
-            prompts.append("\n\n".join(contexts))
-            prompts.append("</history>")
-
-        # Add the question to the prompts
-        prompts.append("")
-        prompts.append("<question>")
-        prompts.append(query)
-        prompts.append("</question>")
-        prompts.append("")
-
-        prompts.append("Assistant:")
-
-        # Combine the prompts
-        prompt = "\n".join(prompts)
-
-        return prompt
+        # Send final response
+        SlackManager.update_message(say, channel, thread_ts, latest_ts, message)
 
     except Exception as e:
-        print("make_prompt: error: {}".format(e))
-        raise e
+        print(f"Error in conversation handler: {e}")
+        # Update with error message if possible
+        try:
+            if latest_ts:
+                SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_ERROR)
+        except:
+            pass
 
 
-# Handle the chatgpt conversation
-def conversation(say: Say, query, thread_ts=None, channel=None, client_msg_id=None):
-    print("conversation: query: {}".format(query))
-
-    # Keep track of the latest message timestamp
-    result = say(text=BOT_CURSOR, thread_ts=thread_ts)
-    latest_ts = result["ts"]
-
-    prompt = make_prompt(say, query, thread_ts, channel, client_msg_id, latest_ts)
-
-    message = invoke_agent(prompt)
-
-    chat_update(say, channel, thread_ts, latest_ts, message)
-
-
-# Handle the app_mention event
 @app.event("app_mention")
-def handle_mention(body: dict, say: Say):
-    print("handle_mention: {}".format(body))
+def handle_mention(body: Dict[str, Any], say: Say) -> None:
+    """Handle mentions of the bot in channels"""
+    print(f"handle_mention: {body}")
 
     event = body["event"]
+    thread_ts = event.get("thread_ts", event.get("ts"))
+    channel = event.get("channel")
+    client_msg_id = event.get("client_msg_id")
 
-    # if "bot_id" in event and event["bot_id"] == bot_id:
-    #     # Ignore messages from the bot itself
-    #     return
-
-    thread_ts = event["thread_ts"] if "thread_ts" in event else event["ts"]
-
-    channel = event["channel"]
-    client_msg_id = event["client_msg_id"]
-
-    if ALLOWED_CHANNEL_IDS != "None":
-        allowed_channel_ids = ALLOWED_CHANNEL_IDS.split(",")
+    # Check if the channel is allowed
+    if Config.ALLOWED_CHANNEL_IDS != "None":
+        allowed_channel_ids = Config.ALLOWED_CHANNEL_IDS.split(",")
         if channel not in allowed_channel_ids:
-            first_channel = "<#{}>".format(allowed_channel_ids[0])
-            message = ALLOWED_CHANNEL_MESSAGE.format(first_channel)
-            say(
-                text=message,
-                thread_ts=thread_ts,
-            )
-            print("handle_mention: {}".format(message))
+            first_channel = f"<#{allowed_channel_ids[0]}>"
+            message = Config.ALLOWED_CHANNEL_MESSAGE.format(first_channel)
+            say(text=message, thread_ts=thread_ts)
+            print(f"handle_mention: {message}")
             return
 
+    # Extract query text (remove the bot mention)
     prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
 
+    # Process the conversation
     conversation(say, prompt, thread_ts, channel, client_msg_id)
 
 
-# Handle the DM (direct message) event
 @app.event("message")
-def handle_message(body: dict, say: Say):
-    print("handle_message: {}".format(body))
+def handle_message(body: Dict[str, Any], say: Say) -> None:
+    """Handle direct messages to the bot"""
+    print(f"handle_message: {body}")
 
     event = body["event"]
 
-    if "bot_id" in event:
-        # Ignore messages from the bot itself
+    # Ignore messages from bots (including this bot)
+    if event.get("bot_id"):
         return
 
     channel = event["channel"]
     client_msg_id = event["client_msg_id"]
-
     prompt = event["text"].strip()
 
-    # Use thread_ts=None for regular messages, and user ID for DMs
+    # Process the conversation (thread_ts=None for DMs)
     conversation(say, prompt, None, channel, client_msg_id)
 
 
-def success(message=""):
+def success(message: str = "") -> Dict[str, Any]:
+    """Return a success response for Lambda"""
     return {
         "statusCode": 200,
         "headers": {"Content-type": "application/json"},
@@ -416,70 +439,90 @@ def success(message=""):
     }
 
 
-# Handle the Lambda function
-def lambda_handler(event, context):
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Main Lambda handler for Slack events"""
+    # Validate required configuration
+    if not Config.validate():
+        return {
+            "statusCode": 500,
+            "headers": {"Content-type": "application/json"},
+            "body": json.dumps({"status": "Error", "message": "Missing required configuration"}),
+        }
+
+    # Parse request body
     body = json.loads(event["body"])
 
+    # Handle Slack verification challenge
     if "challenge" in body:
-        # Respond to the Slack Event Subscription Challenge
         return {
             "statusCode": 200,
             "headers": {"Content-type": "application/json"},
             "body": json.dumps({"challenge": body["challenge"]}),
         }
 
-    print("lambda_handler: {}".format(body))
+    print(f"lambda_handler: {body}")
 
-    # Duplicate execution prevention
+    # Check for valid event structure
     if "event" not in body or "client_msg_id" not in body["event"]:
         print("lambda_handler: client_msg_id not found")
         return success()
 
+    # Extract message identifiers
     token = body["event"]["client_msg_id"]
     user = body["event"]["user"]
 
-    # Get the context from DynamoDB
-    prompt = get_context(token, user)
-
-    if prompt != "":
-        print("lambda_handler: prompt found")
+    # Check for duplicate events (idempotency)
+    if DynamoDBManager.get_context(token, user) != "":
+        print("lambda_handler: duplicate event detected")
         return success()
 
-    # Count the number of context
-    count = count_context(user)
-
-    if count >= MAX_THROTTLE_COUNT:
-        print("lambda_handler: {} >= {}".format(count, MAX_THROTTLE_COUNT))
+    # Check user throttling
+    count = DynamoDBManager.count_user_contexts(user)
+    if count >= Config.MAX_THROTTLE_COUNT:
+        print(f"lambda_handler: throttle limit reached: {count} >= {Config.MAX_THROTTLE_COUNT}")
         return success()
 
-    # Put the context in DynamoDB
-    put_context(token, user, body["event"]["text"])
+    # Store context to prevent duplicate processing
+    DynamoDBManager.put_context(token, user, body["event"]["text"])
 
-    # Handle the event
+    # Handle the Slack event
     slack_handler = SlackRequestHandler(app=app)
     return slack_handler.handle(event, context)
 
 
-def kakao_handler(event, context):
-    print("kakao_handler: {}".format(event))
+def kakao_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Handle Kakao bot events"""
+    print(f"kakao_handler: {event}")
 
-    if "Authorization" not in event["headers"]:
+    # Validate authentication
+    headers = event.get("headers", {})
+    auth_header = headers.get("Authorization", "")
+
+    # Check for Authorization header and validate token
+    if not auth_header or auth_header != f"Bearer {Config.KAKAO_BOT_TOKEN}":
+        print("kakao_handler: unauthorized request")
         return success()
 
-    if event["headers"]["Authorization"] != "Bearer {}".format(KAKAO_BOT_TOKEN):
+    # Parse request body
+    try:
+        body = json.loads(event["body"])
+    except Exception as e:
+        print(f"kakao_handler: error parsing body: {e}")
         return success()
 
-    body = json.loads(event["body"])
-
+    # Check if query exists
     if "query" not in body:
+        print("kakao_handler: no query found")
         return success()
 
     query = body["query"]
+    print(f"kakao_handler: query: {query}")
 
-    print("kakao_handler: query: {}".format(query))
-
-    prompt = make_prompt(None, query)
-
-    message = invoke_agent(prompt)
-
-    return success(message)
+    # Create prompt and get response
+    try:
+        prompt = BedrockManager.create_prompt(None, query)
+        message = BedrockManager.invoke_agent(prompt)
+        return success(message)
+    except Exception as e:
+        print(f"kakao_handler: error processing query: {e}")
+        return success("죄송합니다. 응답을 생성하는 중 오류가 발생했습니다.")
