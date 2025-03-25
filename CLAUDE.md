@@ -34,6 +34,25 @@ sls deploy --region us-east-1      # Deploy to AWS Lambda
 
 ## Tech Stack
 - **AWS Lambda** with Serverless Framework
-- **Amazon Bedrock** for AI capabilities (Claude 3, Stable Diffusion)
+- **Amazon Bedrock** for AI capabilities (Claude 3 models via Agent)
 - **DynamoDB** for context storage
 - **Slack** and **Kakao** messaging integration
+
+## Application Structure
+
+### Core Components
+- **Config**: Centralized environment variable management with validation
+- **DynamoDBManager**: Handles conversation persistence and throttling
+- **MessageFormatter**: Manages message splitting and formatting for platforms
+- **SlackManager**: Interface for Slack-specific API operations
+- **BedrockManager**: Interface for Amazon Bedrock interactions
+- **Event Handlers**: Process platform-specific events (Slack mentions, DMs, Kakao requests)
+
+### Key Features
+- Conversation threading in Slack channels
+- Threaded conversation history retrieval and context management
+- Channel-based access control for Slack
+- User throttling to prevent abuse
+- Message streaming and chunking for better UX
+- Proper error handling with user-friendly messages
+- Token-based authentication for Kakao bot integration
