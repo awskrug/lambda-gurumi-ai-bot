@@ -72,7 +72,7 @@ SLACK_SIGNING_SECRET="xxxx"
 AWS_REGION="us-east-1"
 AGENT_ID="xxxxx"
 AGENT_ALIAS_ID="xxxxx"
-DYNAMODB_TABLE_NAME="gurumi-bot-context"
+DYNAMODB_TABLE_NAME="gurumi-ai-bot-context"
 
 # Optional Configuration
 # KAKAO_BOT_TOKEN="xxxx"
