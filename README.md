@@ -124,7 +124,7 @@ https://xxxx.execute-api.us-east-1.amazonaws.com/dev/kakao/chat
 
 ## Architecture
 
-For a detailed architectural overview of this application, see [architecture.md](architecture.md).
+For a detailed architectural overview of this application, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## References
 
