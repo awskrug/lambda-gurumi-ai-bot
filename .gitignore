@@ -33,7 +33,6 @@ dist/
 *.tmp
 
 # serverless
-.env
 .serverless
 
 # python
@@ -45,3 +44,8 @@ __pycache__
 
 # node
 node_modules
+
+.env
+.env*.development
+.env*.local
+.env*.production
