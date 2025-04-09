@@ -1,0 +1,22 @@
+# Project Guidelines
+
+## Core Guidelines
+
+- Focus on solving the specific problem - avoid unnecessary complexity or scope creep.
+- Use standard libraries and documented patterns first before creating custom solutions.
+- Write clean, well-structured code with meaningful names and clear organization.
+- Handle errors and edge cases properly to ensure code robustness.
+- Include helpful comments for complex logic while keeping code self-documenting.
+
+## Documentation Standards
+
+- Maintain up-to-date documentation in README.md and ARCHITECTURE.md
+- README.md should include project overview, setup instructions, and usage examples
+- ARCHITECTURE.md should document system design, component relationships, and data flow
+
+## Testing Strategy
+
+- Write comprehensive unit tests for individual functions and modules
+- Implement integration tests to verify component interactions
+- Ensure adequate test coverage for critical code paths
+- Set up automated testing as part of the development workflow

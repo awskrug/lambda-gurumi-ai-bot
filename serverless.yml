@@ -4,7 +4,7 @@ service: lambda-gurumi-ai-bot
 provider:
   name: aws
   region: us-east-1
-  runtime: python3.9
+  runtime: python3.12
   # stage: prod
   # memorySize: 5120
   timeout: 60 # seconds
