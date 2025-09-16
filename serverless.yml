@@ -31,7 +31,7 @@ provider:
         - bedrock:InvokeModel
       Resource:
         - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
-        - "arn:aws:bedrock:*::foundation-model/stability.stable-diffusion-*"
+        - "arn:aws:bedrock:*::foundation-model/stability.stable-*"
 
 functions:
   mention:
