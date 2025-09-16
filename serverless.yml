@@ -5,9 +5,9 @@ provider:
   name: aws
   region: us-east-1
   runtime: python3.12
-  # stage: prod
-  # memorySize: 5120
-  timeout: 60 # seconds
+  stage: ${opt:stage, 'dev'}
+  memorySize: 5120
+  timeout: 60
   environment:
     BASE_NAME: gurumi-ai-bot
   iamRoleStatements:
@@ -31,7 +31,7 @@ provider:
         - bedrock:InvokeModel
       Resource:
         - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
-        - "arn:aws:bedrock:*::foundation-model/stability.stable-diffusion-*"
+        - "arn:aws:bedrock:*::foundation-model/stability.stable-*"
 
 functions:
   mention:
@@ -53,7 +53,7 @@ resources:
     DynamoDBTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: ${self:provider.environment.BASE_NAME}-context
+        TableName: ${self:provider.environment.BASE_NAME}-${self:provider.stage}
         AttributeDefinitions:
           - AttributeName: id
             AttributeType: S

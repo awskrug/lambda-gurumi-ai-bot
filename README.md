@@ -18,7 +18,7 @@ A serverless chatbot using AWS Lambda, API Gateway, DynamoDB, and Amazon Bedrock
 ## Install
 
 ```bash
-$ brew install python@3.9
+$ brew install python@3.12
 
 $ npm install -g serverless@3.38.0
 

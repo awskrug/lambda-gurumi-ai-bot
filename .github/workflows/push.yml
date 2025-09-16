@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   repository_dispatch:
     types:
       - deploy
@@ -13,12 +12,13 @@ env:
   AWS_REGION: "us-east-1"
   AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
 
+  STAGE: "dev"
+
   AGENT_ALIAS_ID: ${{ vars.AGENT_ALIAS_ID }}
   AGENT_ID: ${{ vars.AGENT_ID }}
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
   ALLOWED_CHANNEL_MESSAGE: ${{ vars.ALLOWED_CHANNEL_MESSAGE }}
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
-  DYNAMODB_TABLE_NAME: ${{ vars.DYNAMODB_TABLE_NAME }}
   MAX_LEN_SLACK: ${{ vars.MAX_LEN_SLACK }}
   MAX_THROTTLE_COUNT: ${{ vars.MAX_THROTTLE_COUNT }}
   PERSONAL_MESSAGE: ${{ vars.PERSONAL_MESSAGE }}
@@ -69,7 +69,6 @@ jobs:
           echo "ALLOWED_CHANNEL_IDS=${ALLOWED_CHANNEL_IDS}" >> .env
           echo "ALLOWED_CHANNEL_MESSAGE=${ALLOWED_CHANNEL_MESSAGE}" >> .env
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
-          echo "DYNAMODB_TABLE_NAME=${DYNAMODB_TABLE_NAME}" >> .env
           echo "KAKAO_BOT_TOKEN=${KAKAO_BOT_TOKEN}" >> .env
           echo "MAX_LEN_SLACK=${MAX_LEN_SLACK}" >> .env
           echo "MAX_THROTTLE_COUNT=${MAX_THROTTLE_COUNT}" >> .env
@@ -87,4 +86,4 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Deploy to AWS Lambda 🚀
-        run: npx serverless deploy --region ${{ env.AWS_REGION }}
+        run: npx serverless deploy --stage ${{ env.STAGE }} --region ${{ env.AWS_REGION }}
