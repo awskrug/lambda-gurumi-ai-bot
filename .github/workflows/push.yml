@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   repository_dispatch:
     types:
       - deploy
@@ -12,6 +11,8 @@ on:
 env:
   AWS_REGION: "us-east-1"
   AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
+
+  STAGE: "dev"
 
   AGENT_ALIAS_ID: ${{ vars.AGENT_ALIAS_ID }}
   AGENT_ID: ${{ vars.AGENT_ID }}
