@@ -18,7 +18,7 @@ class Config:
     AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
     SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
     SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
-    DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-context")
+    DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-dev")
     KAKAO_BOT_TOKEN = os.environ.get("KAKAO_BOT_TOKEN", "None")
     AGENT_ID = os.environ.get("AGENT_ID", "None")
     AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")

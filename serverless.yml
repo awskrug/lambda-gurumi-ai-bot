@@ -53,7 +53,7 @@ resources:
     DynamoDBTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: ${self:provider.environment.BASE_NAME}-context
+        TableName: ${self:provider.environment.BASE_NAME}-${self:provider.stage}
         AttributeDefinitions:
           - AttributeName: id
             AttributeType: S
