@@ -5,9 +5,9 @@ provider:
   name: aws
   region: us-east-1
   runtime: python3.12
-  # stage: prod
-  # memorySize: 5120
-  timeout: 60 # seconds
+  stage: ${opt:stage, 'dev'}
+  memorySize: 5120
+  timeout: 60
   environment:
     BASE_NAME: gurumi-ai-bot
   iamRoleStatements:
