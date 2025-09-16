@@ -72,7 +72,7 @@ SLACK_SIGNING_SECRET="xxxx"
 AWS_REGION="us-east-1"
 AGENT_ID="xxxxx"
 AGENT_ALIAS_ID="xxxxx"
-DYNAMODB_TABLE_NAME="gurumi-ai-bot-context"
+DYNAMODB_TABLE_NAME="gurumi-ai-bot-dev"
 
 # Optional Configuration
 # KAKAO_BOT_TOKEN="xxxx"
@@ -121,10 +121,6 @@ curl -X POST -H "Content-Type: application/json" \
 }" \
 https://xxxx.execute-api.us-east-1.amazonaws.com/dev/kakao/chat
 ```
-
-## Architecture
-
-For a detailed architectural overview of this application, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## References
 
