@@ -2,6 +2,6 @@
   "name": "lambda-gurumi-ai-bot",
   "devDependencies": {
     "serverless-dotenv-plugin": "^6.0.0",
-    "serverless-python-requirements": "^6.1.1"
+    "serverless-python-requirements": "^6.1.2"
   }
 }
