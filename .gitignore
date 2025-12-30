@@ -45,7 +45,6 @@ __pycache__
 # node
 node_modules
 
+# local env files
+.env.local
 .env
-.env*.development
-.env*.local
-.env*.production
