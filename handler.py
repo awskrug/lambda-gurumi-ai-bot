@@ -3,7 +3,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any, Union
 
 from slack_bolt import App, Say
@@ -491,7 +491,9 @@ def process_refund_done(channel: str, message_ts: str, user: str) -> None:
         # Process blocks to mask account number and add refund timestamp
         updated_blocks = []
         refund_time_added = False
-        current_time = datetime.now().strftime("%Y. %m. %d. %p %I:%M:%S").replace("AM", "오전").replace("PM", "오후")
+        # Convert to KST (UTC+9)
+        kst = timezone(timedelta(hours=9))
+        current_time = datetime.now(kst).strftime("%Y. %m. %d. %p %I:%M:%S").replace("AM", "오전").replace("PM", "오후")
 
         for block in blocks:
             if block.get("type") == "section" and block.get("fields"):
