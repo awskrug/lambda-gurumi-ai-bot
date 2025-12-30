@@ -82,6 +82,9 @@ curl -X POST \
 | `conversation` | 대화 처리 및 AI 응답 생성 |
 | `handle_mention` | 앱 멘션 이벤트 핸들러 |
 | `handle_message` | 다이렉트 메시지 이벤트 핸들러 |
+| `handle_reaction_added` | 이모지 리액션 이벤트 핸들러 |
+| `process_refund_done` | 환불 완료 처리 (계좌 마스킹, 환불일시 추가) |
+| `mask_account_number` | 계좌번호 마스킹 (앞 4자리, 뒤 2자리만 표시) |
 
 #### 2. 주요 클래스
 
@@ -161,6 +164,7 @@ curl -X POST \
 | `MAX_THROTTLE_COUNT` | `100` | 사용자별 요청 제한 수 |
 | `SLACK_SAY_INTERVAL` | `0` | 메시지 전송 간격 (초) |
 | `BOT_CURSOR` | `:robot_face:` | 로딩 표시 이모지 |
+| `REACTION_EMOJIS` | `refund-done` | 허용 이모지 리액션 (쉼표 구분) |
 
 ### 배포 파이프라인
 
@@ -184,6 +188,8 @@ GitHub Actions 워크플로우 (`.github/workflows/push.yml`):
 | 응답 분할 | 코드 블록과 문단 단위로 긴 응답 분할 |
 | 채널 필터링 | 허용된 채널 화이트리스트 지원 |
 | 컨텍스트 영속성 | DynamoDB TTL 기반 1시간 자동 정리 |
+| 이모지 리액션 처리 | `reaction_added` 이벤트로 특정 동작 트리거 |
+| 환불 완료 처리 | `:refund-done:` 이모지로 계좌 마스킹 및 환불일시 추가 |
 
 ## 프로젝트 구조
 

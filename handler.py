@@ -35,6 +35,14 @@ class Config:
     MAX_THROTTLE_COUNT = int(os.environ.get("MAX_THROTTLE_COUNT", "100"))
     SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", "0"))
     BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
+    REACTION_EMOJIS = os.environ.get("REACTION_EMOJIS", "refund-done")
+
+    @classmethod
+    def get_reaction_emojis(cls) -> List[str]:
+        """Parse comma-separated reaction emojis into a list"""
+        if not cls.REACTION_EMOJIS or cls.REACTION_EMOJIS == "None":
+            return []
+        return [emoji.strip() for emoji in cls.REACTION_EMOJIS.split(",") if emoji.strip()]
 
     @classmethod
     def validate(cls) -> bool:
@@ -428,6 +436,148 @@ def handle_message(body: Dict[str, Any], say: Say) -> None:
 
     # Process the conversation (thread_ts=None for DMs)
     conversation(say, prompt, None, channel, client_msg_id)
+
+
+def mask_account_number(account: str) -> str:
+    """Mask account number, showing only first 4 and last 2 digits"""
+    # Remove any non-digit characters for processing
+    digits_only = re.sub(r'\D', '', account)
+
+    if len(digits_only) <= 6:
+        # If too short, mask middle portion
+        return digits_only[:2] + '*' * (len(digits_only) - 2)
+
+    # Show first 4 and last 2 digits
+    return digits_only[:4] + '*' * (len(digits_only) - 6) + digits_only[-2:]
+
+
+def process_refund_done(channel: str, message_ts: str, user: str) -> None:
+    """Process refund-done emoji reaction: mask account number and add refund timestamp"""
+    print(f"process_refund_done: channel={channel}, message_ts={message_ts}, user={user}")
+
+    try:
+        # Get the original message
+        result = app.client.conversations_history(
+            channel=channel,
+            latest=message_ts,
+            limit=1,
+            inclusive=True
+        )
+
+        if not result.get("ok") or not result.get("messages"):
+            print("Failed to retrieve message")
+            return
+
+        message = result["messages"][0]
+        blocks = message.get("blocks", [])
+
+        if not blocks:
+            print("No blocks found in message")
+            return
+
+        # Check if this is a refund request message (has the header)
+        is_refund_message = False
+        for block in blocks:
+            if block.get("type") == "header":
+                header_text = block.get("text", {}).get("text", "")
+                if "환불 신청" in header_text:
+                    is_refund_message = True
+                    break
+
+        if not is_refund_message:
+            print("Not a refund request message")
+            return
+
+        # Process blocks to mask account number and add refund timestamp
+        updated_blocks = []
+        refund_time_added = False
+        current_time = datetime.now().strftime("%Y. %m. %d. %p %I:%M:%S").replace("AM", "오전").replace("PM", "오후")
+
+        for block in blocks:
+            if block.get("type") == "section" and block.get("fields"):
+                new_fields = []
+                for field in block["fields"]:
+                    field_text = field.get("text", "")
+
+                    # Mask account number
+                    if "*계좌번호:*" in field_text:
+                        lines = field_text.split("\n")
+                        if len(lines) >= 2:
+                            account = lines[1]
+                            masked = mask_account_number(account)
+                            field = {
+                                "type": "mrkdwn",
+                                "text": f"*계좌번호:*\n{masked}"
+                            }
+
+                    new_fields.append(field)
+
+                # Add refund timestamp if not already present
+                has_refund_time = any("*환불일시:*" in f.get("text", "") for f in new_fields)
+                if not has_refund_time and not refund_time_added:
+                    new_fields.append({
+                        "type": "mrkdwn",
+                        "text": f"*환불일시:*\n{current_time}"
+                    })
+                    refund_time_added = True
+
+                block = dict(block)
+                block["fields"] = new_fields
+
+            updated_blocks.append(block)
+
+        # Update the message
+        app.client.chat_update(
+            channel=channel,
+            ts=message_ts,
+            blocks=updated_blocks,
+            text=message.get("text", "환불 신청이 처리되었습니다.")
+        )
+
+        print(f"Refund message updated successfully")
+
+    except Exception as e:
+        print(f"Error processing refund done: {e}")
+
+
+# Reaction handlers mapping: emoji name -> handler function
+REACTION_HANDLERS = {
+    "refund-done": lambda channel, ts, user: process_refund_done(channel, ts, user),
+}
+
+
+@app.event("reaction_added")
+def handle_reaction_added(body: Dict[str, Any]) -> None:
+    """Handle emoji reaction added events"""
+    print(f"handle_reaction_added: {body}")
+
+    event = body["event"]
+    reaction = event.get("reaction", "")
+    user = event.get("user", "")
+    item = event.get("item", {})
+
+    # Check if this reaction is in the allowed list
+    allowed_emojis = Config.get_reaction_emojis()
+    if reaction not in allowed_emojis:
+        return
+
+    # Get message details
+    item_type = item.get("type", "")
+    if item_type != "message":
+        return
+
+    channel = item.get("channel", "")
+    message_ts = item.get("ts", "")
+
+    if not channel or not message_ts:
+        return
+
+    # Dispatch to the appropriate handler
+    handler = REACTION_HANDLERS.get(reaction)
+    if handler:
+        handler(channel, message_ts, user)
+    else:
+        print(f"No handler found for reaction: {reaction}")
 
 
 def success(message: str = "") -> Dict[str, Any]:
