@@ -613,7 +613,19 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     print(f"lambda_handler: {body}")
 
     # Check for valid event structure
-    if "event" not in body or "client_msg_id" not in body["event"]:
+    if "event" not in body:
+        print("lambda_handler: event not found")
+        return success()
+
+    event_type = body["event"].get("type", "")
+
+    # Handle reaction events directly (no client_msg_id, no deduplication needed)
+    if event_type == "reaction_added":
+        slack_handler = SlackRequestHandler(app=app)
+        return slack_handler.handle(event, context)
+
+    # For message events, check client_msg_id
+    if "client_msg_id" not in body["event"]:
         print("lambda_handler: client_msg_id not found")
         return success()
 
