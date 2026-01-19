@@ -382,7 +382,7 @@ class BedrockManager:
     @staticmethod
     def create_prompt(say: Optional[Say], query: str, thread_ts: Optional[str] = None,
                     channel: Optional[str] = None, client_msg_id: Optional[str] = None,
-                    latest_ts: Optional[str] = None) -> str:
+                    latest_ts: Optional[str] = None, user_id: Optional[str] = None) -> str:
         """Create a prompt for the AI model with context and query"""
         prompts = []
         prompts.append(f"User: {Config.PERSONAL_MESSAGE}")
@@ -407,9 +407,12 @@ class BedrockManager:
                     prompts.append("\n\n".join(contexts))
                     prompts.append("</history>")
 
-            # Add the current query
+            # Add the current query with user_id (Slack mention format)
             prompts.append("")
-            prompts.append("<question>")
+            if user_id:
+                prompts.append(f"<question user=\"<@{user_id}>\">")
+            else:
+                prompts.append("<question>")
             prompts.append(query)
             prompts.append("</question>")
             prompts.append("")
@@ -424,9 +427,10 @@ class BedrockManager:
 
 
 def conversation(say: Say, query: str, thread_ts: Optional[str] = None,
-               channel: Optional[str] = None, client_msg_id: Optional[str] = None) -> None:
+               channel: Optional[str] = None, client_msg_id: Optional[str] = None,
+               user_id: Optional[str] = None) -> None:
     """Main conversation handler that processes queries and returns AI responses"""
-    print(f"conversation: query: {query}")
+    print(f"conversation: query: {query}, user_id: {user_id}")
 
     try:
         # Send initial status message
@@ -435,7 +439,7 @@ def conversation(say: Say, query: str, thread_ts: Optional[str] = None,
 
         # Create prompt with context and query
         prompt = BedrockManager.create_prompt(
-            say, query, thread_ts, channel, client_msg_id, latest_ts
+            say, query, thread_ts, channel, client_msg_id, latest_ts, user_id
         )
 
         # Update status while waiting for response
@@ -466,6 +470,7 @@ def handle_mention(body: Dict[str, Any], say: Say) -> None:
     thread_ts = event.get("thread_ts", event.get("ts"))
     channel = event.get("channel")
     client_msg_id = event.get("client_msg_id")
+    user_id = event.get("user")
 
     # Check if the channel is allowed
     if Config.ALLOWED_CHANNEL_IDS != "None":
@@ -481,7 +486,7 @@ def handle_mention(body: Dict[str, Any], say: Say) -> None:
     prompt = re.sub(f"<@{get_bot_id()}>", "", event["text"]).strip()
 
     # Process the conversation
-    conversation(say, prompt, thread_ts, channel, client_msg_id)
+    conversation(say, prompt, thread_ts, channel, client_msg_id, user_id)
 
 
 @app.event("message")
@@ -497,10 +502,11 @@ def handle_message(body: Dict[str, Any], say: Say) -> None:
 
     channel = event["channel"]
     client_msg_id = event["client_msg_id"]
+    user_id = event.get("user")
     prompt = event["text"].strip()
 
     # Process the conversation (thread_ts=None for DMs)
-    conversation(say, prompt, None, channel, client_msg_id)
+    conversation(say, prompt, None, channel, client_msg_id, user_id)
 
 
 def mask_account_number(account: str) -> str:
