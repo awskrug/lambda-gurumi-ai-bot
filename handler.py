@@ -12,30 +12,49 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from boto3.dynamodb.conditions import Key
 
 
+# Helper functions for environment variable parsing
+def get_env_int(key: str, default: int) -> int:
+    """Get environment variable as integer, with fallback for empty strings"""
+    value = os.environ.get(key, "")
+    return int(value) if value else default
+
+
+def get_env_float(key: str, default: float) -> float:
+    """Get environment variable as float, with fallback for empty strings"""
+    value = os.environ.get(key, "")
+    return float(value) if value else default
+
+
+def get_env_str(key: str, default: str) -> str:
+    """Get environment variable as string, with fallback for empty strings"""
+    value = os.environ.get(key, "")
+    return value if value else default
+
+
 # Environment configuration
 class Config:
     """Configuration settings loaded from environment variables"""
-    AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+    AWS_REGION = get_env_str("AWS_REGION", "us-east-1")
     SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
     SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
-    DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-dev")
-    KAKAO_BOT_TOKEN = os.environ.get("KAKAO_BOT_TOKEN", "None")
-    AGENT_ID = os.environ.get("AGENT_ID", "None")
-    AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
-    ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
-    ALLOWED_CHANNEL_MESSAGE = os.environ.get(
+    DYNAMODB_TABLE_NAME = get_env_str("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-dev")
+    KAKAO_BOT_TOKEN = get_env_str("KAKAO_BOT_TOKEN", "None")
+    AGENT_ID = get_env_str("AGENT_ID", "None")
+    AGENT_ALIAS_ID = get_env_str("AGENT_ALIAS_ID", "None")
+    ALLOWED_CHANNEL_IDS = get_env_str("ALLOWED_CHANNEL_IDS", "None")
+    ALLOWED_CHANNEL_MESSAGE = get_env_str(
         "ALLOWED_CHANNEL_MESSAGE", "Sorry, I'm not allowed to respond in this channel."
     )
-    PERSONAL_MESSAGE = os.environ.get(
+    PERSONAL_MESSAGE = get_env_str(
         "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
     )
-    SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
-    MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", "2000"))
-    MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", "4000"))
-    MAX_THROTTLE_COUNT = int(os.environ.get("MAX_THROTTLE_COUNT", "100"))
-    SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", "0"))
-    BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
-    REACTION_EMOJIS = os.environ.get("REACTION_EMOJIS", "refund-done")
+    SYSTEM_MESSAGE = get_env_str("SYSTEM_MESSAGE", "None")
+    MAX_LEN_SLACK = get_env_int("MAX_LEN_SLACK", 2000)
+    MAX_LEN_BEDROCK = get_env_int("MAX_LEN_BEDROCK", 4000)
+    MAX_THROTTLE_COUNT = get_env_int("MAX_THROTTLE_COUNT", 100)
+    SLACK_SAY_INTERVAL = get_env_float("SLACK_SAY_INTERVAL", 0)
+    BOT_CURSOR = get_env_str("BOT_CURSOR", ":robot_face:")
+    REACTION_EMOJIS = get_env_str("REACTION_EMOJIS", "refund-done")
 
     @classmethod
     def get_reaction_emojis(cls) -> List[str]:
@@ -67,8 +86,16 @@ app = App(
     process_before_response=True,
 )
 
-# Get Slack bot ID
-bot_id = app.client.api_call("auth.test")["user_id"]
+# Lazy initialization for bot_id to avoid API call at module load time
+_bot_id: Optional[str] = None
+
+
+def get_bot_id() -> str:
+    """Get Slack bot ID with lazy initialization"""
+    global _bot_id
+    if _bot_id is None:
+        _bot_id = app.client.api_call("auth.test")["user_id"]
+    return _bot_id
 
 # Status messages
 MSG_PREVIOUS = f"이전 대화 내용 확인 중... {Config.BOT_CURSOR}"
@@ -83,7 +110,7 @@ class DynamoDBManager:
     def get_context(thread_ts: Optional[str], user: str, default: str = "") -> str:
         """Retrieve conversation context from DynamoDB"""
         try:
-            key = {"id": thread_ts if thread_ts else user}
+            key = {"id": thread_ts or user}
             item = table.get_item(Key=key).get("Item")
             return item["conversation"] if item else default
         except Exception as e:
@@ -98,7 +125,7 @@ class DynamoDBManager:
             expire_dt = datetime.fromtimestamp(expire_at).isoformat()
 
             item = {
-                "id": thread_ts if thread_ts else user,
+                "id": thread_ts or user,
                 "conversation": conversation,
                 "expire_dt": expire_dt,
                 "expire_at": expire_at,
@@ -113,11 +140,14 @@ class DynamoDBManager:
 
     @staticmethod
     def count_user_contexts(user: str) -> int:
-        """Count contexts belonging to a specific user"""
+        """Count contexts belonging to a specific user using GSI"""
         try:
-            # Using query with a GSI would be more efficient, but for now we use scan with filter
-            response = table.scan(FilterExpression=Key("user").eq(user))
-            return len(response.get("Items", []))
+            response = table.query(
+                IndexName="user-index",
+                KeyConditionExpression=Key("user").eq(user),
+                Select="COUNT"
+            )
+            return response.get("Count", 0)
         except Exception as e:
             print(f"Error counting contexts: {e}")
             return 0
@@ -213,6 +243,33 @@ class MessageFormatter:
 class SlackManager:
     """Handles Slack messaging operations"""
 
+    # Cache for user display names to avoid repeated API calls
+    _user_name_cache: Dict[str, str] = {}
+
+    @classmethod
+    def get_user_display_name(cls, user_id: str) -> str:
+        """Get user display name from Slack API with caching"""
+        if user_id in cls._user_name_cache:
+            return cls._user_name_cache[user_id]
+
+        try:
+            response = app.client.users_info(user=user_id)
+            if response.get("ok"):
+                user_info = response.get("user", {})
+                profile = user_info.get("profile", {})
+                # Prefer display_name, fall back to real_name, then user_id
+                display_name = (
+                    profile.get("display_name")
+                    or profile.get("real_name")
+                    or user_id
+                )
+                cls._user_name_cache[user_id] = display_name
+                return display_name
+        except Exception as e:
+            print(f"Error fetching user info for {user_id}: {e}")
+
+        return user_id
+
     @staticmethod
     def update_message(say: Say, channel: str, thread_ts: Optional[str],
                       latest_ts: str, message: str) -> tuple:
@@ -240,8 +297,8 @@ class SlackManager:
             app.client.chat_update(channel=channel, ts=latest_ts, text=MSG_ERROR)
             return MSG_ERROR, latest_ts
 
-    @staticmethod
-    def get_thread_history(channel: str, thread_ts: str, client_msg_id: str) -> List[str]:
+    @classmethod
+    def get_thread_history(cls, channel: str, thread_ts: str, client_msg_id: str) -> List[str]:
         """Retrieve conversation history from a Slack thread"""
         contexts = []
 
@@ -253,28 +310,38 @@ class SlackManager:
                 return contexts
 
             messages = response.get("messages", [])
-            messages.reverse()
 
-            # Skip the thread parent message
-            if messages:
-                messages.pop(0)
+            # Slack API returns messages in chronological order (oldest first)
+            # First message is the thread parent, skip it by slicing from index 1
+            # Process from newest to oldest to prioritize recent context
+            thread_messages = messages[1:]  # Exclude thread parent
+            thread_messages.reverse()  # Now newest first
 
-            # Process each message in the thread
-            for message in messages:
+            for message in thread_messages:
                 # Skip the current message being processed
                 if message.get("client_msg_id") == client_msg_id:
                     continue
 
-                # Determine role based on whether it's from a bot or user
-                role = "assistant" if message.get("bot_id") else "user"
-                contexts.append(f"{role}: {message.get('text', '')}")
+                # Determine role and author info (Slack mention format)
+                if message.get("bot_id"):
+                    role = "assistant"
+                    author = "assistant"
+                else:
+                    role = "user"
+                    user_id = message.get("user", "")
+                    display_name = cls.get_user_display_name(user_id) if user_id else "unknown"
+                    # Use Slack mention format so AI learns the pattern
+                    author = f"<@{user_id}>({display_name})" if user_id else "unknown"
+
+                contexts.append(f"{role}({author}): {message.get('text', '')}")
 
                 # Check if we've reached the context length limit
                 context_text = "\n".join(contexts)
                 if len(context_text) > Config.MAX_LEN_BEDROCK:
-                    contexts.pop(0)  # Remove oldest message
+                    contexts.pop(0)  # Remove oldest (first added) message
                     break
 
+            # Reverse back to chronological order for the prompt
             contexts.reverse()
 
         except Exception as e:
@@ -388,7 +455,7 @@ def conversation(say: Say, query: str, thread_ts: Optional[str] = None,
         try:
             if latest_ts:
                 SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_ERROR)
-        except:
+        except Exception:
             pass
 
 
@@ -413,7 +480,7 @@ def handle_mention(body: Dict[str, Any], say: Say) -> None:
             return
 
     # Extract query text (remove the bot mention)
-    prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
+    prompt = re.sub(f"<@{get_bot_id()}>", "", event["text"]).strip()
 
     # Process the conversation
     conversation(say, prompt, thread_ts, channel, client_msg_id)
@@ -591,6 +658,15 @@ def success(message: str = "") -> Dict[str, Any]:
     }
 
 
+def unauthorized() -> Dict[str, Any]:
+    """Return an unauthorized response for Lambda"""
+    return {
+        "statusCode": 401,
+        "headers": {"Content-type": "application/json"},
+        "body": json.dumps({"status": "Error", "message": "Unauthorized"}),
+    }
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Main Lambda handler for Slack events"""
     # Validate required configuration
@@ -665,7 +741,7 @@ def kakao_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # Check for Authorization header and validate token
     if not auth_header or auth_header != f"Bearer {Config.KAKAO_BOT_TOKEN}":
         print("kakao_handler: unauthorized request")
-        return success()
+        return unauthorized()
 
     # Parse request body
     try:

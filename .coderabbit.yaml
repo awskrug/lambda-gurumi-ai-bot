@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: 'ko-KR'
+early_access: false
+reviews:
+  profile: 'chill'
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters: ['!cassettes/**']
+  path_instructions:
+    - path: 'src/usecases/**/*.ts'
+      instructions: 'Clean Architecture 원칙과 ServiceResult 패턴을 따르는지 확인'
+    - path: '**/*.test.ts'
+      instructions: 'AAA 패턴(Arrange-Act-Assert)과 한국어 테스트 설명을 확인'
+    - path: 'src/domains/**/*.ts'
+      instructions: '도메인 모델이 순수하고 외부 의존성이 없는지 확인'
+chat:
+  auto_reply: true

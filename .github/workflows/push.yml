@@ -19,9 +19,11 @@ env:
   ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
   ALLOWED_CHANNEL_MESSAGE: ${{ vars.ALLOWED_CHANNEL_MESSAGE }}
   BOT_CURSOR: ${{ vars.BOT_CURSOR }}
+  MAX_LEN_BEDROCK: ${{ vars.MAX_LEN_BEDROCK }}
   MAX_LEN_SLACK: ${{ vars.MAX_LEN_SLACK }}
   MAX_THROTTLE_COUNT: ${{ vars.MAX_THROTTLE_COUNT }}
   PERSONAL_MESSAGE: ${{ vars.PERSONAL_MESSAGE }}
+  REACTION_EMOJIS: ${{ vars.REACTION_EMOJIS }}
   SLACK_SAY_INTERVAL: ${{ vars.SLACK_SAY_INTERVAL }}
   SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
 
@@ -70,9 +72,11 @@ jobs:
           echo "ALLOWED_CHANNEL_MESSAGE=${ALLOWED_CHANNEL_MESSAGE}" >> .env
           echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
           echo "KAKAO_BOT_TOKEN=${KAKAO_BOT_TOKEN}" >> .env
+          echo "MAX_LEN_BEDROCK=${MAX_LEN_BEDROCK}" >> .env
           echo "MAX_LEN_SLACK=${MAX_LEN_SLACK}" >> .env
           echo "MAX_THROTTLE_COUNT=${MAX_THROTTLE_COUNT}" >> .env
           echo "PERSONAL_MESSAGE=${PERSONAL_MESSAGE}" >> .env
+          echo "REACTION_EMOJIS=${REACTION_EMOJIS}" >> .env
           echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> .env
           echo "SLACK_SAY_INTERVAL=${SLACK_SAY_INTERVAL}" >> .env
           echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env

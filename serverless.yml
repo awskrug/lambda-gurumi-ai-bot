@@ -7,31 +7,36 @@ provider:
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
   memorySize: 5120
-  timeout: 60
+  timeout: 90
   environment:
     BASE_NAME: gurumi-ai-bot
   iamRoleStatements:
     - Effect: Allow
       Action:
-        - dynamodb:*
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:DeleteItem
       Resource:
-        - "arn:aws:dynamodb:*:*:table/${self:provider.environment.BASE_NAME}-*"
+        - "arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BASE_NAME}-*"
+        - "arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BASE_NAME}-*/index/*"
     - Effect: Allow
       Action:
         - bedrock:InvokeAgent
       Resource:
-        - "arn:aws:bedrock:*:*:agent-alias/*"
+        - "arn:aws:bedrock:${self:provider.region}:*:agent-alias/*"
     - Effect: Allow
       Action:
         - bedrock:Retrieve
       Resource:
-        - "arn:aws:bedrock:*:*:knowledge-base/*"
+        - "arn:aws:bedrock:${self:provider.region}:*:knowledge-base/*"
     - Effect: Allow
       Action:
         - bedrock:InvokeModel
       Resource:
-        - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
-        - "arn:aws:bedrock:*::foundation-model/stability.stable-*"
+        - "arn:aws:bedrock:${self:provider.region}::foundation-model/anthropic.claude-*"
+        - "arn:aws:bedrock:${self:provider.region}::foundation-model/stability.stable-*"
 
 functions:
   mention:
@@ -57,9 +62,21 @@ resources:
         AttributeDefinitions:
           - AttributeName: id
             AttributeType: S
+          - AttributeName: user
+            AttributeType: S
         KeySchema:
           - AttributeName: id
             KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: user-index
+            KeySchema:
+              - AttributeName: user
+                KeyType: HASH
+            Projection:
+              ProjectionType: KEYS_ONLY
+            ProvisionedThroughput:
+              ReadCapacityUnits: 5
+              WriteCapacityUnits: 5
         ProvisionedThroughput:
           ReadCapacityUnits: 5
           WriteCapacityUnits: 5

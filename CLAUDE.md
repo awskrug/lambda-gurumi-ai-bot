@@ -44,8 +44,8 @@ sls remove --region us-east-1
 ### Bedrock 통합 테스트
 
 ```bash
-# bin/bedrock/ 디렉토리의 테스트 스크립트 사용
-cd bin/bedrock
+# examples/bedrock/ 디렉토리의 예제 스크립트 사용
+cd examples/bedrock
 python invoke_agent.py -p "프롬프트 입력"
 python invoke_claude_3.py -p "프롬프트 입력"
 python invoke_stable_diffusion.py -p "이미지 생성 프롬프트"
@@ -90,7 +90,7 @@ curl -X POST \
 
 | 클래스 | 역할 |
 |--------|------|
-| `Config` | 환경 변수 기반 설정 관리 (18개 설정 항목) |
+| `Config` | 환경 변수 기반 설정 관리 (17개 설정 항목) |
 | `DynamoDBManager` | 대화 컨텍스트 저장/조회, 사용자별 쓰로틀링 카운트 |
 | `MessageFormatter` | 메시지 분할 (코드 블록, 문단 단위) |
 | `SlackManager` | Slack 메시지 업데이트, 스레드 히스토리 조회 |
@@ -200,14 +200,18 @@ GitHub Actions 워크플로우 (`.github/workflows/push.yml`):
 ├── requirements.txt        # Python 의존성
 ├── .env.example            # 환경 변수 예시
 ├── .env.local              # 환경 변수 (gitignore)
-├── bin/
-│   └── bedrock/            # Bedrock 테스트 스크립트
-│       ├── invoke_agent.py
-│       ├── invoke_claude_3.py
-│       ├── invoke_claude_3_image.py
-│       ├── invoke_knowledge_base.py
-│       ├── invoke_stable_diffusion.py
-│       └── converse_stream.py
+├── examples/
+│   ├── bedrock/            # Bedrock 예제 스크립트
+│   │   ├── invoke_agent.py
+│   │   ├── invoke_claude_3.py
+│   │   ├── invoke_claude_3_image.py
+│   │   ├── invoke_knowledge_base.py
+│   │   ├── invoke_stable_diffusion.py
+│   │   └── converse_stream.py
+│   ├── notion/             # Notion 예제 스크립트
+│   │   ├── notion_exporter.py
+│   │   └── python_notion_exporter.py
+│   └── split.py            # 텍스트 분할 예제
 └── .github/
     └── workflows/
         └── push.yml        # CI/CD 파이프라인
