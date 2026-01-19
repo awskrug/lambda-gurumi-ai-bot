@@ -50,6 +50,7 @@ files:read
 files:write
 im:read
 im:write
+reactions:read
 ```
 
 #### Event Subscriptions - Subscribe to bot events
@@ -57,6 +58,7 @@ im:write
 ```text
 app_mention
 message.im
+reaction_added
 ```
 
 ### 환경 변수 설정
@@ -90,6 +92,7 @@ cp .env.example .env.local
 | `MAX_THROTTLE_COUNT` | `100` | 사용자별 요청 제한 수 |
 | `SLACK_SAY_INTERVAL` | `0` | 메시지 전송 간격 (초) |
 | `BOT_CURSOR` | `:robot_face:` | 로딩 표시 이모지 |
+| `REACTION_EMOJIS` | `refund-done` | 허용 이모지 리액션 (쉼표 구분) |
 
 ## 배포
 
@@ -134,7 +137,7 @@ curl -X POST \
 ### Bedrock 직접 테스트
 
 ```bash
-cd bin/bedrock
+cd examples/bedrock
 
 # Bedrock Agent 테스트
 python invoke_agent.py -p "프롬프트 입력"
@@ -177,14 +180,18 @@ python invoke_knowledge_base.py -p "지식 베이스 쿼리"
 ├── .env.local              # 환경 변수 (gitignore)
 ├── images/
 │   └── gurumi-bot.png      # 프로젝트 이미지
-├── bin/
-│   └── bedrock/            # Bedrock 테스트 스크립트
-│       ├── invoke_agent.py
-│       ├── invoke_claude_3.py
-│       ├── invoke_claude_3_image.py
-│       ├── invoke_knowledge_base.py
-│       ├── invoke_stable_diffusion.py
-│       └── converse_stream.py
+├── examples/
+│   ├── bedrock/            # Bedrock 예제 스크립트
+│   │   ├── invoke_agent.py
+│   │   ├── invoke_claude_3.py
+│   │   ├── invoke_claude_3_image.py
+│   │   ├── invoke_knowledge_base.py
+│   │   ├── invoke_stable_diffusion.py
+│   │   └── converse_stream.py
+│   ├── notion/             # Notion 예제 스크립트
+│   │   ├── notion_exporter.py
+│   │   └── python_notion_exporter.py
+│   └── split.py            # 텍스트 분할 예제
 └── .github/
     └── workflows/
         └── push.yml        # CI/CD 파이프라인
