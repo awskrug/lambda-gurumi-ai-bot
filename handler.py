@@ -12,30 +12,49 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from boto3.dynamodb.conditions import Key
 
 
+# Helper functions for environment variable parsing
+def get_env_int(key: str, default: int) -> int:
+    """Get environment variable as integer, with fallback for empty strings"""
+    value = os.environ.get(key, "")
+    return int(value) if value else default
+
+
+def get_env_float(key: str, default: float) -> float:
+    """Get environment variable as float, with fallback for empty strings"""
+    value = os.environ.get(key, "")
+    return float(value) if value else default
+
+
+def get_env_str(key: str, default: str) -> str:
+    """Get environment variable as string, with fallback for empty strings"""
+    value = os.environ.get(key, "")
+    return value if value else default
+
+
 # Environment configuration
 class Config:
     """Configuration settings loaded from environment variables"""
-    AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+    AWS_REGION = get_env_str("AWS_REGION", "us-east-1")
     SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
     SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
-    DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-dev")
-    KAKAO_BOT_TOKEN = os.environ.get("KAKAO_BOT_TOKEN", "None")
-    AGENT_ID = os.environ.get("AGENT_ID", "None")
-    AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "None")
-    ALLOWED_CHANNEL_IDS = os.environ.get("ALLOWED_CHANNEL_IDS", "None")
-    ALLOWED_CHANNEL_MESSAGE = os.environ.get(
+    DYNAMODB_TABLE_NAME = get_env_str("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-dev")
+    KAKAO_BOT_TOKEN = get_env_str("KAKAO_BOT_TOKEN", "None")
+    AGENT_ID = get_env_str("AGENT_ID", "None")
+    AGENT_ALIAS_ID = get_env_str("AGENT_ALIAS_ID", "None")
+    ALLOWED_CHANNEL_IDS = get_env_str("ALLOWED_CHANNEL_IDS", "None")
+    ALLOWED_CHANNEL_MESSAGE = get_env_str(
         "ALLOWED_CHANNEL_MESSAGE", "Sorry, I'm not allowed to respond in this channel."
     )
-    PERSONAL_MESSAGE = os.environ.get(
+    PERSONAL_MESSAGE = get_env_str(
         "PERSONAL_MESSAGE", "You are a friendly and professional AI assistant."
     )
-    SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "None")
-    MAX_LEN_SLACK = int(os.environ.get("MAX_LEN_SLACK", "2000"))
-    MAX_LEN_BEDROCK = int(os.environ.get("MAX_LEN_BEDROCK", "4000"))
-    MAX_THROTTLE_COUNT = int(os.environ.get("MAX_THROTTLE_COUNT", "100"))
-    SLACK_SAY_INTERVAL = float(os.environ.get("SLACK_SAY_INTERVAL", "0"))
-    BOT_CURSOR = os.environ.get("BOT_CURSOR", ":robot_face:")
-    REACTION_EMOJIS = os.environ.get("REACTION_EMOJIS", "refund-done")
+    SYSTEM_MESSAGE = get_env_str("SYSTEM_MESSAGE", "None")
+    MAX_LEN_SLACK = get_env_int("MAX_LEN_SLACK", 2000)
+    MAX_LEN_BEDROCK = get_env_int("MAX_LEN_BEDROCK", 4000)
+    MAX_THROTTLE_COUNT = get_env_int("MAX_THROTTLE_COUNT", 100)
+    SLACK_SAY_INTERVAL = get_env_float("SLACK_SAY_INTERVAL", 0)
+    BOT_CURSOR = get_env_str("BOT_CURSOR", ":robot_face:")
+    REACTION_EMOJIS = get_env_str("REACTION_EMOJIS", "refund-done")
 
     @classmethod
     def get_reaction_emojis(cls) -> List[str]:
