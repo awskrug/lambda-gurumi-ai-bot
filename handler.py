@@ -391,7 +391,7 @@ def conversation(say: Say, query: str, thread_ts: Optional[str] = None,
         try:
             if latest_ts:
                 SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_ERROR)
-        except:
+        except Exception:
             pass
 
 
@@ -594,6 +594,15 @@ def success(message: str = "") -> Dict[str, Any]:
     }
 
 
+def unauthorized() -> Dict[str, Any]:
+    """Return an unauthorized response for Lambda"""
+    return {
+        "statusCode": 401,
+        "headers": {"Content-type": "application/json"},
+        "body": json.dumps({"status": "Error", "message": "Unauthorized"}),
+    }
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Main Lambda handler for Slack events"""
     # Validate required configuration
@@ -668,7 +677,7 @@ def kakao_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # Check for Authorization header and validate token
     if not auth_header or auth_header != f"Bearer {Config.KAKAO_BOT_TOKEN}":
         print("kakao_handler: unauthorized request")
-        return success()
+        return unauthorized()
 
     # Parse request body
     try:
