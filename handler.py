@@ -67,8 +67,16 @@ app = App(
     process_before_response=True,
 )
 
-# Get Slack bot ID
-bot_id = app.client.api_call("auth.test")["user_id"]
+# Lazy initialization for bot_id to avoid API call at module load time
+_bot_id: Optional[str] = None
+
+
+def get_bot_id() -> str:
+    """Get Slack bot ID with lazy initialization"""
+    global _bot_id
+    if _bot_id is None:
+        _bot_id = app.client.api_call("auth.test")["user_id"]
+    return _bot_id
 
 # Status messages
 MSG_PREVIOUS = f"이전 대화 내용 확인 중... {Config.BOT_CURSOR}"
@@ -83,7 +91,7 @@ class DynamoDBManager:
     def get_context(thread_ts: Optional[str], user: str, default: str = "") -> str:
         """Retrieve conversation context from DynamoDB"""
         try:
-            key = {"id": thread_ts if thread_ts else user}
+            key = {"id": thread_ts or user}
             item = table.get_item(Key=key).get("Item")
             return item["conversation"] if item else default
         except Exception as e:
@@ -98,7 +106,7 @@ class DynamoDBManager:
             expire_dt = datetime.fromtimestamp(expire_at).isoformat()
 
             item = {
-                "id": thread_ts if thread_ts else user,
+                "id": thread_ts or user,
                 "conversation": conversation,
                 "expire_dt": expire_dt,
                 "expire_at": expire_at,
@@ -256,14 +264,14 @@ class SlackManager:
                 return contexts
 
             messages = response.get("messages", [])
-            messages.reverse()
 
-            # Skip the thread parent message
-            if messages:
-                messages.pop(0)
+            # Slack API returns messages in chronological order (oldest first)
+            # First message is the thread parent, skip it by slicing from index 1
+            # Process from newest to oldest to prioritize recent context
+            thread_messages = messages[1:]  # Exclude thread parent
+            thread_messages.reverse()  # Now newest first
 
-            # Process each message in the thread
-            for message in messages:
+            for message in thread_messages:
                 # Skip the current message being processed
                 if message.get("client_msg_id") == client_msg_id:
                     continue
@@ -275,9 +283,10 @@ class SlackManager:
                 # Check if we've reached the context length limit
                 context_text = "\n".join(contexts)
                 if len(context_text) > Config.MAX_LEN_BEDROCK:
-                    contexts.pop(0)  # Remove oldest message
+                    contexts.pop(0)  # Remove oldest (first added) message
                     break
 
+            # Reverse back to chronological order for the prompt
             contexts.reverse()
 
         except Exception as e:
@@ -416,7 +425,7 @@ def handle_mention(body: Dict[str, Any], say: Say) -> None:
             return
 
     # Extract query text (remove the bot mention)
-    prompt = re.sub(f"<@{bot_id}>", "", event["text"]).strip()
+    prompt = re.sub(f"<@{get_bot_id()}>", "", event["text"]).strip()
 
     # Process the conversation
     conversation(say, prompt, thread_ts, channel, client_msg_id)
