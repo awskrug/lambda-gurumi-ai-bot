@@ -312,9 +312,9 @@ class SlackManager:
             messages = response.get("messages", [])
 
             # Slack API returns messages in chronological order (oldest first)
-            # First message is the thread parent, skip it by slicing from index 1
+            # Include all messages (including thread parent)
             # Process from newest to oldest to prioritize recent context
-            thread_messages = messages[1:]  # Exclude thread parent
+            thread_messages = messages.copy()
             thread_messages.reverse()  # Now newest first
 
             for message in thread_messages:
