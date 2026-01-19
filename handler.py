@@ -224,6 +224,33 @@ class MessageFormatter:
 class SlackManager:
     """Handles Slack messaging operations"""
 
+    # Cache for user display names to avoid repeated API calls
+    _user_name_cache: Dict[str, str] = {}
+
+    @classmethod
+    def get_user_display_name(cls, user_id: str) -> str:
+        """Get user display name from Slack API with caching"""
+        if user_id in cls._user_name_cache:
+            return cls._user_name_cache[user_id]
+
+        try:
+            response = app.client.users_info(user=user_id)
+            if response.get("ok"):
+                user_info = response.get("user", {})
+                profile = user_info.get("profile", {})
+                # Prefer display_name, fall back to real_name, then user_id
+                display_name = (
+                    profile.get("display_name")
+                    or profile.get("real_name")
+                    or user_id
+                )
+                cls._user_name_cache[user_id] = display_name
+                return display_name
+        except Exception as e:
+            print(f"Error fetching user info for {user_id}: {e}")
+
+        return user_id
+
     @staticmethod
     def update_message(say: Say, channel: str, thread_ts: Optional[str],
                       latest_ts: str, message: str) -> tuple:
@@ -251,8 +278,8 @@ class SlackManager:
             app.client.chat_update(channel=channel, ts=latest_ts, text=MSG_ERROR)
             return MSG_ERROR, latest_ts
 
-    @staticmethod
-    def get_thread_history(channel: str, thread_ts: str, client_msg_id: str) -> List[str]:
+    @classmethod
+    def get_thread_history(cls, channel: str, thread_ts: str, client_msg_id: str) -> List[str]:
         """Retrieve conversation history from a Slack thread"""
         contexts = []
 
@@ -276,9 +303,16 @@ class SlackManager:
                 if message.get("client_msg_id") == client_msg_id:
                     continue
 
-                # Determine role based on whether it's from a bot or user
-                role = "assistant" if message.get("bot_id") else "user"
-                contexts.append(f"{role}: {message.get('text', '')}")
+                # Determine role and author name
+                if message.get("bot_id"):
+                    role = "assistant"
+                    author = "assistant"
+                else:
+                    role = "user"
+                    user_id = message.get("user", "")
+                    author = cls.get_user_display_name(user_id) if user_id else "user"
+
+                contexts.append(f"{role}({author}): {message.get('text', '')}")
 
                 # Check if we've reached the context length limit
                 context_text = "\n".join(contexts)

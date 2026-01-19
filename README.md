@@ -51,6 +51,7 @@ files:write
 im:read
 im:write
 reactions:read
+users:read
 ```
 
 #### Event Subscriptions - Subscribe to bot events
