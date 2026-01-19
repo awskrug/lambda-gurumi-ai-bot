@@ -322,16 +322,14 @@ class SlackManager:
                 if message.get("client_msg_id") == client_msg_id:
                     continue
 
-                # Determine role and author info (Slack mention format)
+                # Determine role and author (Slack mention format for users)
                 if message.get("bot_id"):
                     role = "assistant"
                     author = "assistant"
                 else:
                     role = "user"
                     user_id = message.get("user", "")
-                    display_name = cls.get_user_display_name(user_id) if user_id else "unknown"
-                    # Use Slack mention format so AI learns the pattern
-                    author = f"<@{user_id}>({display_name})" if user_id else "unknown"
+                    author = f"<@{user_id}>" if user_id else "unknown"
 
                 contexts.append(f"{role}({author}): {message.get('text', '')}")
 
