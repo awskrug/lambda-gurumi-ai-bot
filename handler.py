@@ -113,11 +113,14 @@ class DynamoDBManager:
 
     @staticmethod
     def count_user_contexts(user: str) -> int:
-        """Count contexts belonging to a specific user"""
+        """Count contexts belonging to a specific user using GSI"""
         try:
-            # Using query with a GSI would be more efficient, but for now we use scan with filter
-            response = table.scan(FilterExpression=Key("user").eq(user))
-            return len(response.get("Items", []))
+            response = table.query(
+                IndexName="user-index",
+                KeyConditionExpression=Key("user").eq(user),
+                Select="COUNT"
+            )
+            return response.get("Count", 0)
         except Exception as e:
             print(f"Error counting contexts: {e}")
             return 0
