@@ -394,9 +394,10 @@ class BedrockManager:
 
         try:
             # Add conversation history if in a thread
-            if thread_ts and say and channel and client_msg_id and latest_ts:
-                # Update status message
-                SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
+            if thread_ts and say and channel and client_msg_id:
+                # Update status message (only when using placeholder message)
+                if latest_ts:
+                    SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_PREVIOUS)
 
                 # Get thread history
                 contexts = SlackManager.get_thread_history(channel, thread_ts, client_msg_id)
@@ -432,30 +433,56 @@ def conversation(say: Say, query: str, thread_ts: Optional[str] = None,
     """Main conversation handler that processes queries and returns AI responses"""
     print(f"conversation: query: {query}, user_id: {user_id}")
 
+    use_assistant_status = bool(thread_ts and channel)
+    latest_ts = None
+
     try:
-        # Send initial status message
-        result = say(text=Config.BOT_CURSOR, thread_ts=thread_ts)
-        latest_ts = result["ts"]
+        if use_assistant_status:
+            # Set assistant thread status (shows animated indicator)
+            try:
+                app.client.assistant_threads_setStatus(
+                    channel_id=channel,
+                    thread_ts=thread_ts,
+                    status="is thinking...",
+                )
+            except Exception as e:
+                print(f"Error setting thread status: {e}")
+                use_assistant_status = False
+
+        if not use_assistant_status:
+            # Fallback: send placeholder message
+            result = say(text=Config.BOT_CURSOR, thread_ts=thread_ts)
+            latest_ts = result["ts"]
 
         # Create prompt with context and query
         prompt = BedrockManager.create_prompt(
             say, query, thread_ts, channel, client_msg_id, latest_ts, user_id
         )
 
-        # Update status while waiting for response
-        SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
+        if not use_assistant_status and latest_ts:
+            # Update status while waiting for response
+            SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_RESPONSE)
 
         # Get response from AI
         message = BedrockManager.invoke_agent(prompt)
 
-        # Send final response
-        SlackManager.update_message(say, channel, thread_ts, latest_ts, message)
+        if use_assistant_status:
+            # Send response directly (auto-clears assistant status)
+            split_messages = MessageFormatter.split_message(message, Config.MAX_LEN_SLACK)
+            for i, text in enumerate(split_messages):
+                if Config.SLACK_SAY_INTERVAL > 0 and i > 0:
+                    time.sleep(Config.SLACK_SAY_INTERVAL)
+                say(text=text, thread_ts=thread_ts)
+        else:
+            # Update placeholder with final response
+            SlackManager.update_message(say, channel, thread_ts, latest_ts, message)
 
     except Exception as e:
         print(f"Error in conversation handler: {e}")
-        # Update with error message if possible
         try:
-            if latest_ts:
+            if use_assistant_status:
+                say(text=MSG_ERROR, thread_ts=thread_ts)
+            elif latest_ts:
                 SlackManager.update_message(say, channel, thread_ts, latest_ts, MSG_ERROR)
         except Exception:
             pass

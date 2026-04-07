@@ -1,4 +1,4 @@
-# bin
+# Notion 예제
 
 ## Install
 

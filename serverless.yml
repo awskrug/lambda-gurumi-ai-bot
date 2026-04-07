@@ -1,11 +1,11 @@
-# org: nalbam
-app: lambda-gureumi-ai-bot
+# yaml-language-server: $schema=https://raw.githubusercontent.com/lalcebo/json-schema/master/serverless/reference.json
 service: lambda-gurumi-ai-bot
 provider:
   name: aws
   region: us-east-1
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
+  architecture: arm64
   memorySize: 5120
   timeout: 90
   environment:
@@ -16,8 +16,6 @@ provider:
         - dynamodb:GetItem
         - dynamodb:PutItem
         - dynamodb:Query
-        - dynamodb:Scan
-        - dynamodb:DeleteItem
       Resource:
         - "arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BASE_NAME}-*"
         - "arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.BASE_NAME}-*/index/*"
@@ -26,17 +24,6 @@ provider:
         - bedrock:InvokeAgent
       Resource:
         - "arn:aws:bedrock:${self:provider.region}:*:agent-alias/*"
-    - Effect: Allow
-      Action:
-        - bedrock:Retrieve
-      Resource:
-        - "arn:aws:bedrock:${self:provider.region}:*:knowledge-base/*"
-    - Effect: Allow
-      Action:
-        - bedrock:InvokeModel
-      Resource:
-        - "arn:aws:bedrock:${self:provider.region}::foundation-model/anthropic.claude-*"
-        - "arn:aws:bedrock:${self:provider.region}::foundation-model/stability.stable-*"
 
 functions:
   mention:

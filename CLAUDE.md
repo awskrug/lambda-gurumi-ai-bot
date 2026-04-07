@@ -170,11 +170,11 @@ curl -X POST \
 
 GitHub Actions 워크플로우 (`.github/workflows/push.yml`):
 
-1. main 브랜치 푸시 시 트리거
+1. main 브랜치 푸시 또는 `repository_dispatch` (`deploy` 타입) 시 트리거
 2. Python 3.12 환경 설정
 3. 모든 의존성 설치
-4. GitHub Secrets에서 환경 변수 구성
-5. AWS IAM 역할 가정
+4. GitHub Variables(비민감)와 Secrets(민감)에서 환경 변수 구성
+5. AWS IAM 역할 가정 (OIDC)
 6. Serverless Framework로 배포
 
 ## 주요 구현 상세
@@ -200,6 +200,8 @@ GitHub Actions 워크플로우 (`.github/workflows/push.yml`):
 ├── requirements.txt        # Python 의존성
 ├── .env.example            # 환경 변수 예시
 ├── .env.local              # 환경 변수 (gitignore)
+├── images/
+│   └── gurumi-bot.png      # 프로젝트 이미지
 ├── examples/
 │   ├── bedrock/            # Bedrock 예제 스크립트
 │   │   ├── invoke_agent.py
@@ -213,6 +215,12 @@ GitHub Actions 워크플로우 (`.github/workflows/push.yml`):
 │   │   └── python_notion_exporter.py
 │   └── split.py            # 텍스트 분할 예제
 └── .github/
+    ├── aws-role/           # AWS IAM 역할 설정
+    │   ├── README.md
+    │   ├── role-policy.json
+    │   └── trust-policy.json
+    ├── auto-merge.yml      # 자동 머지 설정
+    ├── stale.yml           # Stale 이슈/PR 관리
     └── workflows/
         └── push.yml        # CI/CD 파이프라인
 ```

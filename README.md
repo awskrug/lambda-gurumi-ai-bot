@@ -24,6 +24,9 @@ brew install python@3.12
 # Serverless Framework 설치
 npm install -g serverless@3.38.0
 
+# 프로젝트 의존성 설치
+npm install
+
 # 플러그인 설치
 sls plugin install -n serverless-python-requirements
 sls plugin install -n serverless-dotenv-plugin
@@ -36,7 +39,7 @@ python -m pip install --upgrade -r requirements.txt
 
 ### Slack 앱 설정
 
-[Slack Bolt 시작 가이드](https://slack.dev/bolt-js/tutorial/getting-started)를 참고하여 Slack 앱을 생성합니다.
+[Slack Bolt for Python 시작 가이드](https://slack.dev/bolt-python/tutorial/getting-started)를 참고하여 Slack 앱을 생성합니다.
 
 #### OAuth & Permissions - Bot Token Scopes
 
@@ -201,5 +204,5 @@ python invoke_knowledge_base.py -p "지식 베이스 쿼리"
 ## 참고 자료
 
 - [AWS Bedrock Documentation](https://docs.aws.amazon.com/bedrock/)
-- [Slack Bolt Framework](https://slack.dev/bolt-js/)
+- [Slack Bolt for Python](https://slack.dev/bolt-python/)
 - [Serverless Framework](https://www.serverless.com/)
