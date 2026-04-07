@@ -86,3 +86,20 @@ jobs:
 
       - name: Deploy to AWS Lambda 🚀
         run: npx serverless deploy --stage ${{ env.STAGE }} --region ${{ env.AWS_REGION }}
+
+      - name: Update Bedrock Agent Alias 🔄
+        run: |
+          AGENT_ID=$(aws cloudformation describe-stacks \
+            --stack-name lambda-gurumi-ai-bot-${{ env.STAGE }} \
+            --query "Stacks[0].Outputs[?OutputKey=='AgentId'].OutputValue" \
+            --output text)
+          ALIAS_ID=$(aws cloudformation describe-stacks \
+            --stack-name lambda-gurumi-ai-bot-${{ env.STAGE }} \
+            --query "Stacks[0].Outputs[?OutputKey=='AgentAliasId'].OutputValue" \
+            --output text)
+
+          aws bedrock-agent update-agent-alias \
+            --agent-id "${AGENT_ID}" \
+            --agent-alias-id "${ALIAS_ID}" \
+            --agent-alias-name live \
+            --region ${{ env.AWS_REGION }}
