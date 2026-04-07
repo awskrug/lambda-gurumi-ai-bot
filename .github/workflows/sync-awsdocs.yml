@@ -1,0 +1,70 @@
+name: Sync AWS Docs to Knowledge Base
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # Every day at 01:00 UTC
+  workflow_dispatch:
+
+env:
+  AWS_REGION: "us-east-1"
+  AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
+  STACK_NAME: "lambda-gurumi-ai-bot-dev"
+
+  ENABLE_SYNC_AWSDOCS: ${{ vars.ENABLE_SYNC_AWSDOCS }}
+
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  sync:
+    if: ${{ vars.ENABLE_SYNC_AWSDOCS == 'true' }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
+
+      - name: Install qpdf
+        run: sudo apt-get install -y qpdf
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE_NAME }}"
+          role-session-name: github-actions-sync-awsdocs
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get stack outputs
+        id: stack
+        run: |
+          BUCKET=$(aws cloudformation describe-stack-resource \
+            --stack-name ${{ env.STACK_NAME }} \
+            --logical-resource-id S3Bucket \
+            --query "StackResourceDetail.PhysicalResourceId" \
+            --output text)
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+
+          KB_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='KnowledgeBaseId'].OutputValue" \
+            --output text)
+          echo "kb_id=${KB_ID}" >> "$GITHUB_OUTPUT"
+
+          DS_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='DataSourceId'].OutputValue" \
+            --output text)
+          echo "ds_id=${DS_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync AWS docs to S3
+        run: ./scripts/awsdocs/sync.sh ${{ steps.stack.outputs.bucket }}
+
+      - name: Start Knowledge Base ingestion
+        run: |
+          aws bedrock-agent start-ingestion-job \
+            --knowledge-base-id ${{ steps.stack.outputs.kb_id }} \
+            --data-source-id ${{ steps.stack.outputs.ds_id }} \
+            --region ${{ env.AWS_REGION }}

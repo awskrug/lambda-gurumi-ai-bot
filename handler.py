@@ -38,7 +38,6 @@ class Config:
     SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
     SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
     DYNAMODB_TABLE_NAME = get_env_str("DYNAMODB_TABLE_NAME", "gurumi-ai-bot-dev")
-    KAKAO_BOT_TOKEN = get_env_str("KAKAO_BOT_TOKEN", "None")
     AGENT_ID = get_env_str("AGENT_ID", "None")
     AGENT_ALIAS_ID = get_env_str("AGENT_ALIAS_ID", "None")
     ALLOWED_CHANNEL_IDS = get_env_str("ALLOWED_CHANNEL_IDS", "None")
@@ -689,14 +688,6 @@ def success(message: str = "") -> Dict[str, Any]:
     }
 
 
-def unauthorized() -> Dict[str, Any]:
-    """Return an unauthorized response for Lambda"""
-    return {
-        "statusCode": 401,
-        "headers": {"Content-type": "application/json"},
-        "body": json.dumps({"status": "Error", "message": "Unauthorized"}),
-    }
-
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Main Lambda handler for Slack events"""
@@ -761,39 +752,3 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     return slack_handler.handle(event, context)
 
 
-def kakao_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Handle Kakao bot events"""
-    print(f"kakao_handler: {event}")
-
-    # Validate authentication
-    headers = event.get("headers", {})
-    auth_header = headers.get("Authorization", "")
-
-    # Check for Authorization header and validate token
-    if not auth_header or auth_header != f"Bearer {Config.KAKAO_BOT_TOKEN}":
-        print("kakao_handler: unauthorized request")
-        return unauthorized()
-
-    # Parse request body
-    try:
-        body = json.loads(event["body"])
-    except Exception as e:
-        print(f"kakao_handler: error parsing body: {e}")
-        return success()
-
-    # Check if query exists
-    if "query" not in body:
-        print("kakao_handler: no query found")
-        return success()
-
-    query = body["query"]
-    print(f"kakao_handler: query: {query}")
-
-    # Create prompt and get response
-    try:
-        prompt = BedrockManager.create_prompt(None, query)
-        message = BedrockManager.invoke_agent(prompt)
-        return success(message)
-    except Exception as e:
-        print(f"kakao_handler: error processing query: {e}")
-        return success("죄송합니다. 응답을 생성하는 중 오류가 발생했습니다.")

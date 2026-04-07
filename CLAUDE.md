@@ -1,226 +1,164 @@
 # CLAUDE.md
 
-이 파일은 Claude Code (claude.ai/code)가 이 저장소의 코드 작업 시 참고하는 가이드입니다.
-
-## 프로젝트 개요
-
-AWS Lambda, Amazon Bedrock AI 모델, DynamoDB를 활용한 서버리스 챗봇 애플리케이션입니다. Slack과 Kakao 메신저를 지원합니다.
+이 파일은 Claude Code가 이 저장소의 코드를 수정할 때 참고하는 개발 가이드입니다.
 
 ## 주요 명령어
 
-### 초기 설정
-
 ```bash
-# Python 3.12 설치 (미설치 시)
-brew install python@3.12
-
-# Serverless Framework 설치
-npm install -g serverless@3.38.0
-
-# 프로젝트 의존성 설치
-npm install
-sls plugin install -n serverless-python-requirements
-sls plugin install -n serverless-dotenv-plugin
-python -m pip install --upgrade -r requirements.txt
-
-# 환경 변수 설정
-cp .env.example .env.local
-# .env.local 파일에 필요한 인증 정보 및 설정 입력
-```
-
-### 배포
-
-```bash
-# AWS 배포 (기본 스테이지: dev)
+# 배포
 sls deploy --region us-east-1
-
-# 특정 스테이지로 배포
-sls deploy --stage prod --region us-east-1
 
 # 배포 제거
 sls remove --region us-east-1
+
+# Bedrock 테스트
+cd scripts/bedrock && python invoke_agent.py -p "프롬프트"
 ```
 
-### Bedrock 통합 테스트
+## 코드 구조
 
-```bash
-# examples/bedrock/ 디렉토리의 예제 스크립트 사용
-cd examples/bedrock
-python invoke_agent.py -p "프롬프트 입력"
-python invoke_claude_3.py -p "프롬프트 입력"
-python invoke_stable_diffusion.py -p "이미지 생성 프롬프트"
-python invoke_knowledge_base.py -p "지식 베이스 쿼리"
+### handler.py - 단일 파일 구조
+
+모든 핵심 로직이 `handler.py`에 포함되어 있습니다.
+
+#### 클래스
+
+| 클래스 | 역할 | 주요 메서드 |
+|--------|------|------------|
+| `Config` | 환경 변수 기반 설정 (16개 항목) | `validate()`, `get_reaction_emojis()` |
+| `DynamoDBManager` | 컨텍스트 저장/조회, 중복 감지, 쓰로틀링 | `put_context()`, `get_context()`, `count_user_contexts()` |
+| `MessageFormatter` | 응답 분할 (코드 블록, 문단, 문장 단위) | `split_message()` |
+| `SlackManager` | 메시지 업데이트, 스레드 히스토리 조회 | `update_message()`, `get_thread_history()` |
+| `BedrockManager` | Agent 호출, 프롬프트 구성 | `invoke_agent()`, `create_prompt()` |
+
+#### 핸들러/함수
+
+| 함수 | 트리거 | 설명 |
+|------|--------|------|
+| `lambda_handler` | HTTP POST `/slack/events` | Slack 이벤트 진입점 |
+| `handle_mention` | `app_mention` 이벤트 | 앱 멘션 처리 |
+| `handle_message` | `message` 이벤트 | 다이렉트 메시지 처리 |
+| `handle_reaction_added` | `reaction_added` 이벤트 | 이모지 리액션 처리 |
+| `conversation` | 내부 호출 | AI 응답 생성 및 전송 |
+| `process_refund_done` | `:refund-done:` 리액션 | 계좌번호 마스킹, 환불일시 추가 |
+
+#### 데이터 흐름
+
+```
+Slack 이벤트 → lambda_handler → handle_mention/handle_message
+  → 중복 감지 (client_msg_id, DynamoDB)
+  → 쓰로틀링 체크 (MAX_THROTTLE_COUNT)
+  → conversation()
+    → SlackManager.get_thread_history() → 대화 컨텍스트 수집
+    → BedrockManager.create_prompt() → 프롬프트 구성
+      - PERSONAL_MESSAGE (페르소나)
+      - SYSTEM_MESSAGE (시스템 지시)
+      - <history> 태그 (대화 기록)
+      - <question> 태그 (현재 질문)
+    → BedrockManager.invoke_agent() → Bedrock Agent 호출
+      - Agent가 Knowledge Base를 자동으로 쿼리 (RAG)
+    → MessageFormatter.split_message() → 응답 분할 (MAX_LEN_SLACK)
+    → SlackManager.update_message() → Slack 전송
 ```
 
-### 로컬 테스트
+### serverless.yml - AWS 리소스
 
-```bash
-# Slack URL 검증 테스트
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"token": "test", "challenge": "test_challenge", "type": "url_verification"}' \
-  https://your-api-url/dev/slack/events
+#### CloudFormation 리소스
 
-# Kakao 봇 엔드포인트 테스트
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_KAKAO_BOT_TOKEN" \
-  -d '{"query": "Hello"}' \
-  https://your-api-url/dev/kakao/events
+| 리소스 | 타입 | 이름 패턴 |
+|--------|------|-----------|
+| DynamoDBTable | `AWS::DynamoDB::Table` | `gurumi-ai-bot-{stage}` |
+| S3Bucket | `AWS::S3::Bucket` | `gurumi-ai-bot-{account-id}` |
+| S3VectorBucket | `AWS::S3Vectors::VectorBucket` | `gurumi-ai-bot-vectors-{account-id}` |
+| S3VectorIndex | `AWS::S3Vectors::Index` | `gurumi-ai-bot-index` (1024dim, cosine, float32) |
+| BedrockKBRole | `AWS::IAM::Role` | `lambda-gurumi-ai-bot-kb-role` |
+| BedrockKnowledgeBase | `AWS::Bedrock::KnowledgeBase` | `gurumi-ai-bot-kb` |
+| BedrockDataSource | `AWS::Bedrock::DataSource` | `gurumi-ai-bot-datasource` |
+| BedrockAgentRole | `AWS::IAM::Role` | `lambda-gurumi-ai-bot-agent-role` |
+| BedrockAgent | `AWS::Bedrock::Agent` | `gurumi-ai-bot` (Claude Sonnet 4.5, KB 연결 포함) |
+| BedrockAgentAlias | `AWS::Bedrock::AgentAlias` | `live` |
+
+#### Lambda IAM 권한 (iamRoleStatements)
+
+- `dynamodb:GetItem/PutItem/Query` → `gurumi-ai-bot-*` 테이블
+- `bedrock:InvokeAgent` → `agent-alias/*`
+
+#### RAG 파이프라인
+
+```
+S3 documents/ → BedrockDataSource (고정 크기 청킹: 300 토큰, 20% 오버랩)
+  → Titan Embeddings V2 (1024차원) → S3VectorIndex
+  → Bedrock Agent가 자동으로 Knowledge Base 쿼리
 ```
 
-## 아키텍처
+#### Outputs
 
-### 핵심 컴포넌트
+- `KnowledgeBaseId` - Bedrock Knowledge Base ID
+- `DataSourceId` - Bedrock Data Source ID
+- `AgentId` - Bedrock Agent ID
+- `AgentAliasId` - Bedrock Agent Alias ID
 
-#### 1. handler.py - Lambda 함수 진입점
+### .github/workflows/ - CI/CD
 
-| 함수/핸들러 | 설명 |
-|-------------|------|
-| `lambda_handler` | Slack 이벤트 처리 (앱 멘션, 다이렉트 메시지) |
-| `kakao_handler` | Kakao 봇 요청 처리 |
-| `conversation` | 대화 처리 및 AI 응답 생성 |
-| `handle_mention` | 앱 멘션 이벤트 핸들러 |
-| `handle_message` | 다이렉트 메시지 이벤트 핸들러 |
-| `handle_reaction_added` | 이모지 리액션 이벤트 핸들러 |
-| `process_refund_done` | 환불 완료 처리 (계좌 마스킹, 환불일시 추가) |
-| `mask_account_number` | 계좌번호 마스킹 (앞 4자리, 뒤 2자리만 표시) |
+#### push.yml - 인프라 배포
 
-#### 2. 주요 클래스
+`main` 브랜치 푸시 시 자동 실행:
+1. Python 3.12 + 의존성 설치
+2. GitHub Variables(비민감) / Secrets(민감)에서 `.env` 생성
+3. AWS OIDC 인증 (역할: `lambda-gurumi-ai-bot`)
+4. `serverless deploy` (Lambda, DynamoDB, S3, S3 Vectors, KB, Agent 전체 배포)
 
-| 클래스 | 역할 |
-|--------|------|
-| `Config` | 환경 변수 기반 설정 관리 (17개 설정 항목) |
-| `DynamoDBManager` | 대화 컨텍스트 저장/조회, 사용자별 쓰로틀링 카운트 |
-| `MessageFormatter` | 메시지 분할 (코드 블록, 문단 단위) |
-| `SlackManager` | Slack 메시지 업데이트, 스레드 히스토리 조회 |
-| `BedrockManager` | Bedrock Agent 호출, 프롬프트 생성 |
+#### sync-notion.yml - Notion 문서 동기화
 
-#### 3. AWS 리소스 (serverless.yml)
+매일 UTC 00:00 스케줄 + 수동 실행(`workflow_dispatch`):
+1. Notion 페이지를 Markdown으로 내보내기 (`notion-exporter`, 공식 Notion API)
+2. S3 `documents/{page_name}/` 프리픽스로 동기화 (`aws s3 sync --delete`)
+3. Knowledge Base Ingestion 실행 (문서 → 임베딩 → S3 Vectors)
+4. KB/DS ID는 CloudFormation Output에서 자동 조회
+5. GitHub Secrets: `NOTION_TOKEN` (Notion Integration API 키)
+6. 활성화: GitHub Variables `ENABLE_SYNC_NOTION=true`
 
-| 리소스 | 이름 패턴 | 용도 |
-|--------|-----------|------|
-| Lambda Functions | `mention`, `kakao` | Slack/Kakao 핸들러 |
-| DynamoDB Table | `gurumi-ai-bot-{stage}` | TTL 기반 컨텍스트 저장 |
-| S3 Bucket | `gurumi-ai-bot-{account-id}` | 파일 저장 |
-| IAM Permissions | - | DynamoDB, Bedrock 접근 |
+#### sync-awsdocs.yml - AWS 공식 문서 동기화
 
-### 데이터 흐름
+매일 UTC 01:00 스케줄 + 수동 실행(`workflow_dispatch`):
+1. `scripts/awsdocs/docs.txt`에 정의된 AWS 공식 PDF 다운로드 (19개 서비스)
+2. 50MB 초과 PDF는 `qpdf`로 100페이지 단위 자동 분할
+3. S3 `documents/{service}/` 프리픽스로 동기화
+4. Knowledge Base Ingestion 실행
+5. 활성화: GitHub Variables `ENABLE_SYNC_AWSDOCS=true`
+6. 문서 추가/제거: `scripts/awsdocs/docs.txt` 편집
 
-#### Slack 통합
+### .github/aws-role/role-policy.json - 배포 IAM 정책
 
-1. HTTP POST `/slack/events`로 이벤트 수신
-2. Signing Secret으로 요청 검증
-3. 중복 이벤트 감지 (`client_msg_id` 기반 DynamoDB 체크)
-4. 사용자별 쓰로틀링 체크 (`MAX_THROTTLE_COUNT`)
-5. 스레드 대화 관리 및 컨텍스트 유지
-6. 긴 응답은 청크 단위로 분할 전송
+배포 역할의 최소 권한 정책. 서비스별 필요 액션만 포함:
+- CloudFormation, Lambda, IAM, S3, DynamoDB, API Gateway, CloudWatch Logs
+- S3 Vectors, Bedrock (Knowledge Base, Data Source, Agent)
 
-#### 대화 컨텍스트
+## 환경 변수
 
-- DynamoDB에 `thread_ts` 또는 `user_id`를 키로 저장
-- 1시간 TTL로 자동 정리 (`expire_at` 속성)
-- 스레드 히스토리에서 대화 기록 조회 (`MAX_LEN_BEDROCK` 제한)
-
-#### AI 처리
-
-- Bedrock Agent를 통한 응답 생성
-- 프롬프트에 시스템 메시지, 대화 히스토리, 질문 포함
-- `<question>` 태그로 사용자 질문 래핑
-- `<history>` 태그로 대화 기록 래핑
-
-#### Kakao 통합
-
-- HTTP POST `/kakao/events`로 요청 수신
-- Bearer 토큰 인증 (`KAKAO_BOT_TOKEN`)
-- 대화 컨텍스트 없이 단일 질의/응답
-
-### 환경 변수
-
-`.env.local` 파일로 관리되는 설정:
-
-#### 필수 설정
-
-| 변수명 | 설명 |
-|--------|------|
-| `SLACK_BOT_TOKEN` | Slack Bot OAuth 토큰 |
-| `SLACK_SIGNING_SECRET` | Slack 요청 서명 검증용 시크릿 |
-| `AGENT_ID` | Bedrock Agent ID |
-| `AGENT_ALIAS_ID` | Bedrock Agent Alias ID |
-
-#### 선택적 설정
-
-| 변수명 | 기본값 | 설명 |
+| 변수명 | 기본값 | 용도 |
 |--------|--------|------|
-| `AWS_REGION` | `us-east-1` | AWS 리전 |
+| `SLACK_BOT_TOKEN` | (필수) | Slack Bot OAuth 토큰 |
+| `SLACK_SIGNING_SECRET` | (필수) | 요청 서명 검증 |
+| `AGENT_ID` | (CF 자동) | Bedrock Agent ID (CloudFormation `Fn::GetAtt` 참조) |
+| `AGENT_ALIAS_ID` | (CF 자동) | Bedrock Agent Alias ID (CloudFormation `Fn::GetAtt` 참조) |
 | `DYNAMODB_TABLE_NAME` | `gurumi-ai-bot-dev` | DynamoDB 테이블명 |
-| `KAKAO_BOT_TOKEN` | `None` | Kakao 봇 인증 토큰 |
-| `ALLOWED_CHANNEL_IDS` | `None` | 허용 채널 ID (쉼표 구분, 모든 채널 허용) |
+| `AWS_REGION` | `us-east-1` | AWS 리전 |
+| `ALLOWED_CHANNEL_IDS` | `None` | 허용 채널 (쉼표 구분, None=전체 허용) |
 | `ALLOWED_CHANNEL_MESSAGE` | 영문 메시지 | 비허용 채널 응답 메시지 |
-| `PERSONAL_MESSAGE` | 일반 AI 어시스턴트 | AI 페르소나 설정 메시지 |
-| `SYSTEM_MESSAGE` | `None` | 추가 시스템 지시사항 |
-| `MAX_LEN_SLACK` | `2000` | Slack 메시지 최대 길이 |
+| `PERSONAL_MESSAGE` | `You are a friendly and professional AI assistant.` | 페르소나 프롬프트 |
+| `SYSTEM_MESSAGE` | `None` | 시스템 지시사항 |
+| `MAX_LEN_SLACK` | `2000` | Slack 메시지 분할 길이 |
 | `MAX_LEN_BEDROCK` | `4000` | Bedrock 컨텍스트 최대 길이 |
-| `MAX_THROTTLE_COUNT` | `100` | 사용자별 요청 제한 수 |
-| `SLACK_SAY_INTERVAL` | `0` | 메시지 전송 간격 (초) |
+| `MAX_THROTTLE_COUNT` | `100` | 사용자별 동시 활성 컨텍스트 수 제한 |
+| `SLACK_SAY_INTERVAL` | `0` | 분할 메시지 전송 간격 (초) |
 | `BOT_CURSOR` | `:robot_face:` | 로딩 표시 이모지 |
 | `REACTION_EMOJIS` | `refund-done` | 허용 이모지 리액션 (쉼표 구분) |
 
-### 배포 파이프라인
+## 코드 수정 시 주의사항
 
-GitHub Actions 워크플로우 (`.github/workflows/push.yml`):
-
-1. main 브랜치 푸시 또는 `repository_dispatch` (`deploy` 타입) 시 트리거
-2. Python 3.12 환경 설정
-3. 모든 의존성 설치
-4. GitHub Variables(비민감)와 Secrets(민감)에서 환경 변수 구성
-5. AWS IAM 역할 가정 (OIDC)
-6. Serverless Framework로 배포
-
-## 주요 구현 상세
-
-| 기능 | 설명 |
-|------|------|
-| 메시지 스레딩 | Slack `thread_ts`로 대화 컨텍스트 유지 |
-| 중복 이벤트 방지 | `client_msg_id`를 DynamoDB에 저장하여 중복 처리 방지 |
-| 사용자 쓰로틀링 | 사용자별 활성 컨텍스트 수 기반 제한 |
-| 에러 처리 | 사용자 친화적 에러 메시지 (한국어) |
-| 응답 분할 | 코드 블록과 문단 단위로 긴 응답 분할 |
-| 채널 필터링 | 허용된 채널 화이트리스트 지원 |
-| 컨텍스트 영속성 | DynamoDB TTL 기반 1시간 자동 정리 |
-| 이모지 리액션 처리 | `reaction_added` 이벤트로 특정 동작 트리거 |
-| 환불 완료 처리 | `:refund-done:` 이모지로 계좌 마스킹 및 환불일시 추가 |
-
-## 프로젝트 구조
-
-```text
-.
-├── handler.py              # Lambda 핸들러 및 핵심 로직
-├── serverless.yml          # Serverless Framework 설정
-├── requirements.txt        # Python 의존성
-├── .env.example            # 환경 변수 예시
-├── .env.local              # 환경 변수 (gitignore)
-├── images/
-│   └── gurumi-bot.png      # 프로젝트 이미지
-├── examples/
-│   ├── bedrock/            # Bedrock 예제 스크립트
-│   │   ├── invoke_agent.py
-│   │   ├── invoke_claude_3.py
-│   │   ├── invoke_claude_3_image.py
-│   │   ├── invoke_knowledge_base.py
-│   │   ├── invoke_stable_diffusion.py
-│   │   └── converse_stream.py
-│   ├── notion/             # Notion 예제 스크립트
-│   │   ├── notion_exporter.py
-│   │   └── python_notion_exporter.py
-│   └── split.py            # 텍스트 분할 예제
-└── .github/
-    ├── aws-role/           # AWS IAM 역할 설정
-    │   ├── README.md
-    │   ├── role-policy.json
-    │   └── trust-policy.json
-    ├── auto-merge.yml      # 자동 머지 설정
-    ├── stale.yml           # Stale 이슈/PR 관리
-    └── workflows/
-        └── push.yml        # CI/CD 파이프라인
-```
+- `handler.py`는 단일 파일 구조. 800줄 이상 시 클래스 단위 분리 검토
+- `serverless.yml`의 리소스 이름 패턴(`gurumi-ai-bot-*`, `lambda-gurumi-ai-bot-*`)은 `role-policy.json`의 IAM 리소스 패턴과 일치해야 함
+- Bedrock Agent는 CloudFormation으로 관리 (`AWS::Bedrock::Agent`). `AGENT_ID`/`AGENT_ALIAS_ID`는 `Fn::GetAtt` 참조
+- Knowledge Base는 Agent에 연결되므로 `handler.py`에서 직접 Retrieve API를 호출하지 않음
+- DynamoDB TTL은 `expire_at` (Unix timestamp) 속성 사용, 1시간 기본

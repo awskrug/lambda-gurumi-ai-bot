@@ -2,6 +2,7 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "CloudFormation",
       "Effect": "Allow",
       "Action": [
         "cloudformation:ValidateTemplate"
@@ -9,48 +10,206 @@
       "Resource": "*"
     },
     {
+      "Sid": "CloudFormationStack",
       "Effect": "Allow",
       "Action": [
-        "cloudformation:*"
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "cloudformation:DeleteStack",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResource",
+        "cloudformation:ListStackResources",
+        "cloudformation:GetTemplate",
+        "cloudformation:CreateChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet",
+        "cloudformation:DescribeChangeSet"
       ],
       "Resource": "arn:aws:cloudformation:*:*:stack/lambda-gurumi-ai-bot-*"
     },
     {
+      "Sid": "Lambda",
       "Effect": "Allow",
       "Action": [
-        "lambda:*"
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:DeleteFunction",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:PublishVersion",
+        "lambda:ListVersionsByFunction",
+        "lambda:TagResource",
+        "lambda:UntagResource",
+        "lambda:ListTags"
       ],
       "Resource": [
-        "arn:aws:lambda:*:*:function:lambda-gurumi-ai-bot-*",
-        "arn:aws:lambda:*:*:function:gurumi-ai-bot-*"
+        "arn:aws:lambda:*:*:function:lambda-gurumi-ai-bot-*"
       ]
     },
     {
+      "Sid": "IAM",
       "Effect": "Allow",
       "Action": [
-        "iam:*"
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:PassRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRoleTags"
       ],
       "Resource": "arn:aws:iam::*:role/lambda-gurumi-ai-bot-*"
     },
     {
+      "Sid": "S3",
       "Effect": "Allow",
       "Action": [
-        "s3:*"
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketTagging",
+        "s3:GetBucketTagging",
+        "s3:PutEncryptionConfiguration",
+        "s3:GetEncryptionConfiguration",
+        "s3:PutBucketPolicy",
+        "s3:GetBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
       ],
       "Resource": [
         "arn:aws:s3:::lambda-gurumi-ai-bot-*",
-        "arn:aws:s3:::gurumi-ai-bot-*"
+        "arn:aws:s3:::lambda-gurumi-ai-bot-*/*",
+        "arn:aws:s3:::gurumi-ai-bot-*",
+        "arn:aws:s3:::gurumi-ai-bot-*/*"
       ]
     },
     {
+      "Sid": "DynamoDB",
       "Effect": "Allow",
       "Action": [
-        "dynamodb:*"
+        "dynamodb:CreateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:UpdateTable",
+        "dynamodb:UpdateTimeToLive",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:TagResource",
+        "dynamodb:UntagResource",
+        "dynamodb:ListTagsOfResource"
       ],
       "Resource": [
-        "arn:aws:dynamodb:*:*:table/lambda-gurumi-ai-bot-*",
         "arn:aws:dynamodb:*:*:table/gurumi-ai-bot-*"
       ]
+    },
+    {
+      "Sid": "APIGateway",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:DELETE"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/restapis",
+        "arn:aws:apigateway:*::/restapis/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy",
+        "logs:TagResource",
+        "logs:UntagResource",
+        "logs:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/lambda-gurumi-ai-bot-*"
+    },
+    {
+      "Sid": "S3Vectors",
+      "Effect": "Allow",
+      "Action": [
+        "s3vectors:CreateVectorBucket",
+        "s3vectors:DeleteVectorBucket",
+        "s3vectors:GetVectorBucket",
+        "s3vectors:ListVectorBuckets",
+        "s3vectors:CreateIndex",
+        "s3vectors:DeleteIndex",
+        "s3vectors:GetIndex",
+        "s3vectors:ListIndexes",
+        "s3vectors:TagResource",
+        "s3vectors:UntagResource",
+        "s3vectors:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:s3vectors:*:*:bucket/gurumi-ai-bot-*",
+        "arn:aws:s3vectors:*:*:bucket/gurumi-ai-bot-*/index/*"
+      ]
+    },
+    {
+      "Sid": "BedrockKnowledgeBase",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:CreateKnowledgeBase",
+        "bedrock:DeleteKnowledgeBase",
+        "bedrock:GetKnowledgeBase",
+        "bedrock:UpdateKnowledgeBase",
+        "bedrock:TagResource",
+        "bedrock:UntagResource",
+        "bedrock:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:bedrock:*:*:knowledge-base/*"
+    },
+    {
+      "Sid": "BedrockDataSource",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:CreateDataSource",
+        "bedrock:DeleteDataSource",
+        "bedrock:GetDataSource",
+        "bedrock:UpdateDataSource"
+      ],
+      "Resource": "arn:aws:bedrock:*:*:knowledge-base/*/data-source/*"
+    },
+    {
+      "Sid": "BedrockAgent",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:CreateAgent",
+        "bedrock:UpdateAgent",
+        "bedrock:DeleteAgent",
+        "bedrock:GetAgent",
+        "bedrock:PrepareAgent",
+        "bedrock:CreateAgentAlias",
+        "bedrock:UpdateAgentAlias",
+        "bedrock:DeleteAgentAlias",
+        "bedrock:GetAgentAlias",
+        "bedrock:AssociateAgentKnowledgeBase",
+        "bedrock:DisassociateAgentKnowledgeBase",
+        "bedrock:ListAgentKnowledgeBases",
+        "bedrock:TagResource",
+        "bedrock:UntagResource",
+        "bedrock:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:bedrock:*:*:agent/*"
     }
   ]
 }

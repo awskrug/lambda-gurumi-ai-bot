@@ -1,19 +1,38 @@
 # lambda-gurumi-ai-bot
 
-AWS Lambda, API Gateway, DynamoDB, Amazon Bedrock AI 모델을 활용한 서버리스 챗봇입니다. Slack과 Kakao 메신저를 지원합니다.
+AWS Lambda, Amazon Bedrock, S3 Vectors를 활용한 서버리스 AI 챗봇입니다. RAG(Retrieval-Augmented Generation) 기반으로 문서를 검색하여 답변합니다.
 
 ![Gurumi Bot](images/gurumi-bot.png)
 
 ## 주요 기능
 
-- **서버리스 아키텍처**: AWS Lambda와 API Gateway 기반
-- **대화 히스토리 관리**: DynamoDB를 통한 컨텍스트 유지
-- **AI 기능**: Amazon Bedrock (Claude 모델) 기반 응답 생성
-- **Slack 통합**: 메시지 스레딩 및 멘션 지원
-- **Kakao 봇 통합**: REST API 기반 연동
-- **채널 기반 접근 제어**: 허용된 채널만 응답
+- **RAG 지원**: S3 Vectors + Bedrock Knowledge Base 기반 문서 검색 및 답변
+- **서버리스 아키텍처**: AWS Lambda + API Gateway + DynamoDB
+- **대화 히스토리**: DynamoDB를 통한 스레드 컨텍스트 유지 (1시간 TTL)
+- **Slack 통합**: 앱 멘션, 다이렉트 메시지, 이모지 리액션 지원
+- **채널 접근 제어**: 허용된 채널 화이트리스트
 - **사용자 쓰로틀링**: 남용 방지를 위한 요청 제한
-- **응답 스트리밍**: 긴 응답 분할 전송으로 사용자 경험 개선
+- **응답 분할**: 긴 응답을 코드 블록/문단 단위로 분할 전송
+
+## 아키텍처
+
+```
+┌──────────┐     ┌─────────────┐     ┌─────────────┐
+│  Slack   │────▶│ API Gateway │────▶│   Lambda    │
+└──────────┘     └─────────────┘     └──────┬──────┘
+                                            │
+              ┌─────────────────────────────┼──────────────────┐
+              │                             │                  │
+              ▼                             ▼                  ▼
+       ┌─────────────┐           ┌──────────────────┐  ┌─────────────┐
+       │  DynamoDB   │           │  Bedrock Agent   │  │     S3      │
+       │  (Context)  │           │       │          │  │ (Documents) │
+       └─────────────┘           │  Knowledge Base  │  └──────┬──────┘
+                                 │       │          │         │
+                                 │  S3 Vectors      │◀────────┘
+                                 │  (Embeddings)    │  Titan Embeddings V2
+                                 └──────────────────┘
+```
 
 ## 설치
 
@@ -26,12 +45,8 @@ npm install -g serverless@3.38.0
 
 # 프로젝트 의존성 설치
 npm install
-
-# 플러그인 설치
 sls plugin install -n serverless-python-requirements
 sls plugin install -n serverless-dotenv-plugin
-
-# Python 의존성 설치
 python -m pip install --upgrade -r requirements.txt
 ```
 
@@ -65,20 +80,21 @@ message.im
 reaction_added
 ```
 
-### 환경 변수 설정
+### 환경 변수
 
 ```bash
 cp .env.example .env.local
 ```
 
-#### 필수 설정
+#### 필수 설정 (GitHub Secrets)
 
 | 변수명 | 설명 |
 |--------|------|
 | `SLACK_BOT_TOKEN` | Slack Bot OAuth 토큰 (`xoxb-xxxx`) |
 | `SLACK_SIGNING_SECRET` | Slack 요청 서명 검증용 시크릿 |
-| `AGENT_ID` | Bedrock Agent ID |
-| `AGENT_ALIAS_ID` | Bedrock Agent Alias ID |
+| `NOTION_TOKEN` | Notion Integration API 키 ([생성](https://www.notion.so/my-integrations)) |
+
+> `AGENT_ID`/`AGENT_ALIAS_ID`는 CloudFormation에서 자동 관리됩니다.
 
 #### 선택적 설정
 
@@ -86,15 +102,12 @@ cp .env.example .env.local
 |--------|--------|------|
 | `AWS_REGION` | `us-east-1` | AWS 리전 |
 | `DYNAMODB_TABLE_NAME` | `gurumi-ai-bot-dev` | DynamoDB 테이블명 |
-| `KAKAO_BOT_TOKEN` | `None` | Kakao 봇 인증 토큰 |
 | `ALLOWED_CHANNEL_IDS` | `None` | 허용 채널 ID (쉼표 구분) |
-| `ALLOWED_CHANNEL_MESSAGE` | 영문 메시지 | 비허용 채널 응답 메시지 |
 | `PERSONAL_MESSAGE` | 일반 AI 어시스턴트 | AI 페르소나 설정 |
 | `SYSTEM_MESSAGE` | `None` | 추가 시스템 지시사항 |
 | `MAX_LEN_SLACK` | `2000` | Slack 메시지 최대 길이 |
 | `MAX_LEN_BEDROCK` | `4000` | Bedrock 컨텍스트 최대 길이 |
 | `MAX_THROTTLE_COUNT` | `100` | 사용자별 요청 제한 수 |
-| `SLACK_SAY_INTERVAL` | `0` | 메시지 전송 간격 (초) |
 | `BOT_CURSOR` | `:robot_face:` | 로딩 표시 이모지 |
 | `REACTION_EMOJIS` | `refund-done` | 허용 이모지 리액션 (쉼표 구분) |
 
@@ -111,98 +124,53 @@ sls deploy --stage prod --region us-east-1
 sls remove --region us-east-1
 ```
 
+### RAG 문서 추가
+
+배포 후 S3 버킷의 `documents/` 프리픽스에 문서를 업로드하고 동기화합니다.
+
+```bash
+# 문서 업로드 (PDF, TXT, MD, HTML, DOCX, CSV 지원)
+aws s3 cp my-document.pdf s3://gurumi-ai-bot-{account-id}/documents/
+
+# Knowledge Base 동기화
+aws bedrock-agent start-ingestion-job \
+  --knowledge-base-id <KB_ID> \
+  --data-source-id <DS_ID>
+```
+
+### 문서 동기화
+
+두 가지 자동 동기화 워크플로우가 있으며, GitHub Variables로 활성화합니다.
+
+| 워크플로우 | 소스 | 활성화 변수 |
+|-----------|------|------------|
+| `sync-notion.yml` | Notion 페이지 → Markdown | `ENABLE_SYNC_NOTION=true` |
+| `sync-awsdocs.yml` | AWS 공식 PDF (19개 서비스) | `ENABLE_SYNC_AWSDOCS=true` |
+
+AWS 문서 목록은 `scripts/awsdocs/docs.txt`에서 관리합니다.
+
+### CI/CD
+
+GitHub Actions (`push.yml`)로 `main` 브랜치 푸시 시 자동 배포됩니다.
+
 ## 테스트
 
-### Slack URL 검증 테스트
-
 ```bash
+# Slack URL 검증
 curl -X POST \
   -H "Content-Type: application/json" \
-  -d '{
-    "token": "Jhj5dZrVaK7ZwHHjRyZWjbDl",
-    "challenge": "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P",
-    "type": "url_verification"
-  }' \
-  https://xxxx.execute-api.us-east-1.amazonaws.com/dev/slack/events
-```
+  -d '{"token": "test", "challenge": "test_challenge", "type": "url_verification"}' \
+  https://your-api-url/dev/slack/events
 
-### Kakao 봇 테스트
-
-```bash
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_KAKAO_BOT_TOKEN" \
-  -d '{
-    "query": "안녕하세요?"
-  }' \
-  https://xxxx.execute-api.us-east-1.amazonaws.com/dev/kakao/events
-```
-
-### Bedrock 직접 테스트
-
-```bash
-cd examples/bedrock
-
-# Bedrock Agent 테스트
+# Bedrock Agent 직접 테스트
+cd scripts/bedrock
 python invoke_agent.py -p "프롬프트 입력"
-
-# Claude 3 모델 직접 호출
-python invoke_claude_3.py -p "프롬프트 입력"
-
-# 이미지 생성 (Stable Diffusion)
-python invoke_stable_diffusion.py -p "이미지 생성 프롬프트"
-
-# Knowledge Base 쿼리
 python invoke_knowledge_base.py -p "지식 베이스 쿼리"
-```
-
-## 아키텍처
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Slack     │────▶│ API Gateway │────▶│   Lambda    │
-│   Kakao     │     │             │     │  (handler)  │
-└─────────────┘     └─────────────┘     └──────┬──────┘
-                                               │
-                    ┌──────────────────────────┼──────────────────────────┐
-                    │                          │                          │
-                    ▼                          ▼                          ▼
-             ┌─────────────┐           ┌─────────────┐           ┌─────────────┐
-             │  DynamoDB   │           │   Bedrock   │           │     S3      │
-             │  (Context)  │           │   (Agent)   │           │  (Storage)  │
-             └─────────────┘           └─────────────┘           └─────────────┘
-```
-
-## 프로젝트 구조
-
-```
-.
-├── handler.py              # Lambda 핸들러 및 핵심 로직
-├── serverless.yml          # Serverless Framework 설정
-├── requirements.txt        # Python 의존성
-├── .env.example            # 환경 변수 예시
-├── .env.local              # 환경 변수 (gitignore)
-├── images/
-│   └── gurumi-bot.png      # 프로젝트 이미지
-├── examples/
-│   ├── bedrock/            # Bedrock 예제 스크립트
-│   │   ├── invoke_agent.py
-│   │   ├── invoke_claude_3.py
-│   │   ├── invoke_claude_3_image.py
-│   │   ├── invoke_knowledge_base.py
-│   │   ├── invoke_stable_diffusion.py
-│   │   └── converse_stream.py
-│   ├── notion/             # Notion 예제 스크립트
-│   │   ├── notion_exporter.py
-│   │   └── python_notion_exporter.py
-│   └── split.py            # 텍스트 분할 예제
-└── .github/
-    └── workflows/
-        └── push.yml        # CI/CD 파이프라인
 ```
 
 ## 참고 자료
 
 - [AWS Bedrock Documentation](https://docs.aws.amazon.com/bedrock/)
+- [Amazon S3 Vectors](https://aws.amazon.com/s3/features/vectors/)
 - [Slack Bolt for Python](https://slack.dev/bolt-python/)
 - [Serverless Framework](https://www.serverless.com/)
