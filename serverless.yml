@@ -247,12 +247,10 @@ resources:
                     - bedrock:InvokeModel
                     - bedrock:InvokeModelWithResponseStream
                   Resource:
-                    - Fn::Sub: arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0
-                    - Fn::Sub: arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0
-                - Sid: InferenceProfiles
+                    - Fn::Sub: arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0
+                - Sid: GetFoundationModel
                   Effect: Allow
                   Action:
-                    - bedrock:GetInferenceProfile
                     - bedrock:GetFoundationModel
                   Resource: "*"
                 - Sid: KnowledgeBaseRetrieve
@@ -274,7 +272,7 @@ resources:
       Properties:
         AgentName: ${self:provider.environment.BASE_NAME}
         Description: AWSKRUG AI assistant gurumi
-        FoundationModel: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        FoundationModel: amazon.nova-lite-v1:0
         AgentResourceRoleArn:
           Fn::GetAtt: [BedrockAgentRole, Arn]
         Instruction: >-
