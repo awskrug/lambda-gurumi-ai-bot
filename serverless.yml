@@ -10,6 +10,7 @@ provider:
   timeout: 90
   environment:
     BASE_NAME: gurumi-ai-bot
+    FOUNDATION_MODEL: ${env:FOUNDATION_MODEL, 'amazon.nova-lite-v1:0'}
     AGENT_ID:
       Fn::GetAtt: [BedrockAgent, AgentId]
     AGENT_ALIAS_ID:
@@ -247,11 +248,13 @@ resources:
                     - bedrock:InvokeModel
                     - bedrock:InvokeModelWithResponseStream
                   Resource:
-                    - Fn::Sub: arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0
-                - Sid: GetFoundationModel
+                    - Fn::Sub: arn:aws:bedrock:*::foundation-model/${self:provider.environment.FOUNDATION_MODEL}
+                    - Fn::Sub: arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*
+                - Sid: InferenceProfiles
                   Effect: Allow
                   Action:
                     - bedrock:GetFoundationModel
+                    - bedrock:GetInferenceProfile
                   Resource: "*"
                 - Sid: KnowledgeBaseRetrieve
                   Effect: Allow
@@ -272,7 +275,7 @@ resources:
       Properties:
         AgentName: ${self:provider.environment.BASE_NAME}
         Description: AWSKRUG AI assistant gurumi
-        FoundationModel: amazon.nova-lite-v1:0
+        FoundationModel: ${self:provider.environment.FOUNDATION_MODEL}
         AgentResourceRoleArn:
           Fn::GetAtt: [BedrockAgentRole, Arn]
         Instruction: >-
