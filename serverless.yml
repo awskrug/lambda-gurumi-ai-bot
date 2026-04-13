@@ -274,9 +274,8 @@ resources:
         AgentResourceRoleArn:
           Fn::GetAtt: [BedrockAgentRole, Arn]
         Instruction: >-
-          ${env:PERSONAL_MESSAGE, 'You are a friendly and professional AI assistant.'}
+          You are a friendly and professional AI assistant.
           If you don't know the answer, just say that you don't know, don't try to make up an answer.
-          ${env:SYSTEM_MESSAGE, ''}
         IdleSessionTTLInSeconds: 600
         AutoPrepare: true
         # --- RAG: uncomment when Knowledge Base is enabled ---
