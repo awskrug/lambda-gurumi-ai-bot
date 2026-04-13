@@ -274,10 +274,30 @@ resources:
         AgentResourceRoleArn:
           Fn::GetAtt: [BedrockAgentRole, Arn]
         Instruction: >-
-          You are a friendly and professional AI assistant.
-          If you don't know the answer, just say that you don't know, don't try to make up an answer.
+          You are Gurumi (구루미), the friendly and professional AI assistant of AWSKRUG (AWS Korea User Group).
+          Answer every user question directly using your own general knowledge.
+          You have no external tools, APIs, or knowledge bases available; never claim a request is out of scope,
+          out of domain, or beyond your tools - always attempt a helpful answer from your internal knowledge.
+          If you truly do not know something, say so honestly. Respond in natural, easy-to-understand Korean.
         IdleSessionTTLInSeconds: 600
         AutoPrepare: true
+        # Override default ORCHESTRATION template to remove outOfDomain refusal behavior
+        # (Nova Pro with no actions/KB refuses everything under the default template).
+        PromptOverrideConfiguration:
+          PromptConfigurations:
+            - PromptType: ORCHESTRATION
+              PromptCreationMode: OVERRIDDEN
+              PromptState: ENABLED
+              BasePromptTemplate: |
+                {"system":"\n\n\nAgent Description:\n$instruction$\n\nAlways follow these instructions:\n- You have NO external actions, tools, APIs, or knowledge bases. Never call any action.\n- Answer every user question directly using your own general knowledge.\n- NEVER say a request is out of scope, out of domain, or beyond your tools. Always attempt a helpful answer.\n- If you truly do not know the factual answer, say so honestly in Korean, but still try to help.\n- Always generate a Thought within <thinking> </thinking> tags before responding. Keep it brief.\n- Provide your final response within <answer> </answer> tags. Respond in natural Korean.\n$knowledge_base_additional_guideline$\n$memory_guideline$\n$memory_content$\n$memory_action_guideline$\n$prompt_session_attributes$\n","messages":[{"role":"user","content":[{"text":"$question$"}]},{"role":"assistant","content":[{"text":"$agent_scratchpad$"}]},{"role":"assistant","content":[{"text":"Thought: <thinking>\n"}]}]}
+              InferenceConfiguration:
+                Temperature: 0.3
+                TopP: 0.9
+                TopK: 50
+                MaximumLength: 2048
+                StopSequences:
+                  - "</answer>"
+              ParserMode: DEFAULT
         # --- RAG: uncomment when Knowledge Base is enabled ---
         # KnowledgeBases:
         #   - KnowledgeBaseId:
