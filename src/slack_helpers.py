@@ -289,15 +289,29 @@ class StreamingMessage:
         # behind a msg_too_long error on the next update.
         display = text + " " + self.placeholder
         if len(display) >= self.max_len:
+            # If the rolling buffer ends inside an unclosed code block,
+            # close it on this ts and reopen it on the next placeholder
+            # so each rolled message renders as a balanced block in
+            # Slack instead of leaking an unclosed ``` into thread
+            # rendering.
+            sealed_text = text
+            carry = ""
+            if text.count(CODE_FENCE) % 2 == 1:
+                sealed_text = text + "\n" + CODE_FENCE
+                carry = CODE_FENCE + "\n"
             sealed = False
             try:
-                self.client.chat_update(channel=self.channel, ts=self.ts, text=text)
+                self.client.chat_update(channel=self.channel, ts=self.ts, text=sealed_text)
                 sealed = True
             except SlackApiError as exc:
                 logger.warning("chat_update (roll-finalize) failed: %s", exc)
             if sealed:
+                # Track the raw (un-fenced) text so stop()'s
+                # final_text slice still matches the LLM output.
                 self._finalized_text += text
             self._roll_to_new_message()
+            if sealed and carry:
+                self._buffer = carry
             return
         try:
             self.client.chat_update(channel=self.channel, ts=self.ts, text=display)

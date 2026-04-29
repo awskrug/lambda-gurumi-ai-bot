@@ -297,7 +297,7 @@ def test_sanitize_error_redacts_aws_session_key():
 # StreamingMessage
 # --------------------------------------------------------------------------- #
 
-from src.slack_helpers import StreamingMessage
+from src.slack_helpers import CODE_FENCE, StreamingMessage
 
 
 def _slack_client_native_stream():
@@ -597,6 +597,82 @@ def test_streaming_message_stop_skips_already_rolled_prefix():
     for call in ts2_finalize_calls:
         text = call.kwargs.get("text", "")
         assert prefix not in text, f"ts2 finalize must not contain the rolled prefix: {text!r}"
+
+
+def test_streaming_message_roll_seals_unclosed_code_block_with_fence():
+    """Regression: when the rolling buffer ends inside an open code
+    block, the seal must add a closing ``` so the rolled message
+    renders as a balanced block in Slack, and the next placeholder
+    must reopen the block with ``` so streaming continues inside the
+    same fence. Without this, ts1 leaks an unclosed ``` and the user
+    sees the code block run past the message boundary."""
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    client.chat_postMessage.side_effect = [
+        {"ok": True, "ts": "ts1"},
+        {"ok": True, "ts": "ts2"},
+    ]
+    client.chat_update.return_value = {"ok": True}
+
+    sm = StreamingMessage(
+        client=client, channel="C1", thread_ts="thread-1", min_interval=0.0, max_len=50
+    )
+    sm.start()
+
+    # Stream content that opens but never closes a code block, large
+    # enough to trigger a roll on the next flush.
+    open_block = "```python\n" + ("x" * 50)
+    sm.append(open_block)
+
+    # ts1 was sealed via chat_update with a closing fence appended.
+    seal_calls = [
+        c for c in client.chat_update.call_args_list
+        if c.kwargs.get("ts") == "ts1"
+    ]
+    assert seal_calls, "expected chat_update on ts1 during roll"
+    last_text = seal_calls[-1].kwargs["text"]
+    assert last_text.count(CODE_FENCE) % 2 == 0, f"ts1 still unbalanced: {last_text!r}"
+    assert last_text.endswith(CODE_FENCE), f"ts1 missing closing fence: {last_text!r}"
+
+    # ts2 took over and its buffer was pre-loaded with ```\n so the
+    # next delta continues inside the reopened code block.
+    assert sm.ts == "ts2"
+    assert sm._buffer.startswith(CODE_FENCE), f"ts2 buffer missing carry-over: {sm._buffer!r}"
+
+    # _finalized_text tracks the raw streamed text only — no extra
+    # closing fence — so stop()'s final_text slice still matches.
+    assert sm._finalized_text == open_block
+
+
+def test_streaming_message_roll_no_carry_when_fence_already_balanced():
+    """If the rolling buffer ends with the code block already closed,
+    no extra fence should be added on either side."""
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    client.chat_postMessage.side_effect = [
+        {"ok": True, "ts": "ts1"},
+        {"ok": True, "ts": "ts2"},
+    ]
+    client.chat_update.return_value = {"ok": True}
+
+    sm = StreamingMessage(
+        client=client, channel="C1", thread_ts="thread-1", min_interval=0.0, max_len=50
+    )
+    sm.start()
+
+    closed_block = "```\nshort code\n```\n" + ("y" * 40)
+    sm.append(closed_block)
+
+    seal_calls = [
+        c for c in client.chat_update.call_args_list
+        if c.kwargs.get("ts") == "ts1"
+    ]
+    assert seal_calls
+    last_text = seal_calls[-1].kwargs["text"]
+    # Sealed text equals the raw buffer — no synthetic closing fence.
+    assert last_text == closed_block
+    # ts2 buffer is empty (no carry).
+    assert sm._buffer == ""
 
 
 def test_streaming_message_stop_unchanged_when_no_roll():
