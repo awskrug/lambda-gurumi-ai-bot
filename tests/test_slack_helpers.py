@@ -638,10 +638,15 @@ def test_streaming_message_roll_seals_unclosed_code_block_with_fence():
     # next delta continues inside the reopened code block.
     assert sm.ts == "ts2"
     assert sm._buffer.startswith(CODE_FENCE), f"ts2 buffer missing carry-over: {sm._buffer!r}"
+    # The carried-over content includes the rest of the buffer that
+    # came after the cut point — no token is dropped.
+    assert "x" * 50 in sm._buffer
 
-    # _finalized_text tracks the raw streamed text only — no extra
-    # closing fence — so stop()'s final_text slice still matches.
-    assert sm._finalized_text == open_block
+    # _finalized_text tracks the raw prefix up to (and including) the
+    # cut point so stop()'s final_text slice still matches the LLM
+    # output. Here the cut lands on the only \n in open_block, so the
+    # finalized prefix is "```python\n".
+    assert sm._finalized_text == "```python\n"
 
 
 def test_streaming_message_roll_no_carry_when_fence_already_balanced():
@@ -669,10 +674,91 @@ def test_streaming_message_roll_no_carry_when_fence_already_balanced():
     ]
     assert seal_calls
     last_text = seal_calls[-1].kwargs["text"]
-    # Sealed text equals the raw buffer — no synthetic closing fence.
-    assert last_text == closed_block
-    # ts2 buffer is empty (no carry).
-    assert sm._buffer == ""
+    # Sealed text is the buffer prefix up to the cut point — no
+    # synthetic closing fence is appended because the prefix is
+    # already balanced.
+    assert last_text.count(CODE_FENCE) % 2 == 0
+    assert "```" not in last_text[-3:] or last_text.endswith("```")  # original closing fence kept
+    # No code-fence carry-over leaked into the new ts buffer because
+    # the sealed prefix was already balanced.
+    assert not sm._buffer.startswith(CODE_FENCE)
+
+
+def test_streaming_message_roll_cuts_at_last_newline_not_mid_token():
+    """Regression: the roll-finalize used to seal whatever raw bytes
+    happened to be in the buffer when it crossed max_len, splitting
+    JS template literals like `${body` mid-token. Cut at the last
+    \\n inside the buffer instead, and carry the post-cut bytes into
+    the next ts so the user sees a clean line boundary."""
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    client.chat_postMessage.side_effect = [
+        {"ok": True, "ts": "ts1"},
+        {"ok": True, "ts": "ts2"},
+    ]
+    client.chat_update.return_value = {"ok": True}
+
+    sm = StreamingMessage(
+        client=client, channel="C1", thread_ts="thread-1", min_interval=0.0, max_len=60
+    )
+    sm.start()
+
+    # Stream content that crosses max_len with a mid-token tail. The
+    # buffer ends with `${body` — without the cut fix it would seal
+    # exactly there, breaking the template literal across two
+    # messages.
+    body = "first line of plain text\nconst base = `v0:${timestamp}:${body"
+    sm.append(body)
+
+    seal_calls = [
+        c for c in client.chat_update.call_args_list
+        if c.kwargs.get("ts") == "ts1"
+    ]
+    assert seal_calls, "expected chat_update on ts1 during roll"
+    sealed = seal_calls[-1].kwargs["text"]
+
+    # ts1 must end at the \n boundary, not on the `${body` fragment.
+    assert "${body" not in sealed, f"mid-token cut: {sealed!r}"
+    assert sealed.endswith("text"), f"expected line cut, got: {sealed!r}"
+
+    # The post-cut tail rides into ts2 so no streamed bytes are lost.
+    assert "${body" in sm._buffer
+    assert "const base" in sm._buffer
+
+
+def test_streaming_message_stop_reapplies_fence_when_roll_left_open_block():
+    """If the rolled prefix ended inside an unclosed code block, the
+    next ts was carrying ```\\n during streaming. stop() must reapply
+    that prefix on its chat_update so the latest ts doesn't render
+    the suffix as plain text outside the fence."""
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    client.chat_postMessage.return_value = {"ok": True, "ts": "ts1"}
+    client.chat_update.return_value = {"ok": True}
+
+    sm = StreamingMessage(
+        client=client, channel="C1", thread_ts="thread-1", min_interval=0.0, max_len=10_000
+    )
+    sm.start()
+
+    # Simulate what _flush would do on roll: track an unclosed-block
+    # prefix in _finalized_text and a fresh ts in self.ts.
+    sm._finalized_text = "```python\n"
+    sm.ts = "ts1"
+
+    full_answer = "```python\nbody = run()\nresult = body\n```"
+    sm.stop(full_answer)
+
+    final_calls = [
+        c for c in client.chat_update.call_args_list
+        if c.kwargs.get("ts") == "ts1"
+    ]
+    assert final_calls, "expected final chat_update on ts1"
+    body = final_calls[-1].kwargs["text"]
+    # The latest ts must reopen the block so its content renders as
+    # code, not as plain text.
+    assert body.startswith(CODE_FENCE), f"missing fence reopen: {body!r}"
+    assert body.count(CODE_FENCE) % 2 == 0, f"unbalanced final ts: {body!r}"
 
 
 def test_streaming_message_stop_unchanged_when_no_roll():
