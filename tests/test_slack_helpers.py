@@ -115,6 +115,46 @@ def test_split_inside_code_block_uses_inner_paragraph_break():
         assert chunk.rstrip().endswith("```")
 
 
+def test_split_inside_code_block_falls_back_to_single_newline():
+    """Real code blocks rarely contain \\n\\n — they use single \\n
+    between lines. When the block exceeds max_len, the splitter must
+    cut at a line boundary (\\n) so identifiers and tokens stay whole
+    instead of getting hard-sliced mid-word."""
+    code = "```\n" + "\n".join(f"def function_number_{i}(): return {i}" for i in range(20)) + "\n```"
+    chunks = MessageFormatter.split_message(code, max_len=150)
+    assert all(len(c) <= 150 for c in chunks), [len(c) for c in chunks]
+    # Every chunk balanced: both ``` are inside the chunk.
+    for chunk in chunks:
+        assert chunk.count("```") % 2 == 0, f"unbalanced fence: {chunk!r}"
+        assert chunk.startswith("```")
+        assert chunk.rstrip().endswith("```")
+    # No identifier got cut in half. Every "function_number_<N>" that
+    # appears must be complete (each cut should have landed on \n,
+    # never inside the identifier).
+    import re
+
+    full_text = "\n".join(chunks)
+    # Each occurrence of "function_number_" must be followed by a digit
+    # and then "(" — otherwise it was sliced.
+    bad = re.findall(r"function_number_(?!\d+\()[^\n]{0,5}", full_text)
+    assert not bad, f"identifier sliced: {bad}"
+
+
+def test_split_falls_back_to_single_newline_for_lists():
+    """Lists or other line-based content without \\n\\n or sentence
+    punctuation should still cut at \\n rather than hard-slicing."""
+    text = "\n".join(f"- item number {i} with some descriptive text" for i in range(20))
+    chunks = MessageFormatter.split_message(text, max_len=150)
+    assert all(len(c) <= 150 for c in chunks), [len(c) for c in chunks]
+    # Every chunk should start and end at a list-item boundary, not
+    # mid-word. We verify by ensuring no chunk ends with a partial
+    # "item number <N>" pattern.
+    for chunk in chunks[:-1]:
+        # Trailing content must be a complete item line, not split.
+        last_line = chunk.rstrip("\n").rsplit("\n", 1)[-1]
+        assert last_line.startswith("- item number "), f"mid-word cut: {last_line!r}"
+
+
 def test_user_name_cache_uses_display_name():
     cache = UserNameCache._default()
     client = MagicMock()

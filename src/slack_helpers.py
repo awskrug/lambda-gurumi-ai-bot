@@ -46,10 +46,13 @@ class MessageFormatter:
          block to the next chunk by re-cutting at the \\n\\n right
          before the block opens.
       3. If the block itself is larger than max_len, cut at the last
-         \\n\\n inside the block (or hard-slice if none), close the
-         current chunk with \\n``` and reopen the next chunk with ```\\n.
+         \\n\\n inside the block; if the block uses only single \\n
+         between lines (the common case), cut at the last \\n instead.
+         Close the current chunk with \\n``` and reopen the next chunk
+         with ```\\n.
       4. When no \\n\\n is available within max_len at all, fall back
-         to a sentence boundary (.!? + whitespace), then hard-slice.
+         to a sentence boundary (.!? + whitespace), then to a single
+         \\n, then hard-slice.
     """
 
     @staticmethod
@@ -86,15 +89,25 @@ class MessageFormatter:
                 else:
                     # Block won't fit anywhere whole. Cut inside the block,
                     # leaving room for the closing fence so the chunk still
-                    # respects max_len.
+                    # respects max_len. The cut must land after the opening
+                    # fence and its newline so we always make progress.
+                    min_cut = last_fence + len(CODE_FENCE) + 1
                     inner_budget = max_len - len(fence_suffix)
-                    inner_cut = remaining.rfind(PARAGRAPH_SEP, 0, inner_budget)
+                    inner_cut = remaining.rfind(PARAGRAPH_SEP, min_cut, inner_budget)
                     if inner_cut > 0:
                         first = remaining[:inner_cut]
                         tail_start = inner_cut + len(PARAGRAPH_SEP)
                     else:
-                        first = remaining[:inner_budget]
-                        tail_start = inner_budget
+                        # Code blocks usually have only single \n between
+                        # lines, not \n\n. Cut at a line boundary so a token
+                        # doesn't get sliced.
+                        line_cut = remaining.rfind("\n", min_cut, inner_budget)
+                        if line_cut > 0:
+                            first = remaining[:line_cut]
+                            tail_start = line_cut + 1
+                        else:
+                            first = remaining[:inner_budget]
+                            tail_start = inner_budget
                     chunks.append(first + fence_suffix)
                     remaining = fence_prefix + remaining[tail_start:]
                     continue
@@ -111,8 +124,10 @@ class MessageFormatter:
     def _fallback_cut(text: str, max_len: int) -> tuple[str, int]:
         """Choose a cut when no \\n\\n boundary exists within max_len.
 
-        Prefer the last sentence boundary inside max_len; otherwise
-        hard-slice at max_len.
+        Tries (in order): sentence boundary (.!? + whitespace), single
+        \\n, then hard slice. The single-\\n fallback handles content
+        like bullet lists or code blocks that only use one newline
+        between lines.
         """
         last_match = None
         for match in SENTENCE_SPLIT_RE.finditer(text):
@@ -121,6 +136,11 @@ class MessageFormatter:
             last_match = match
         if last_match is not None:
             return text[: last_match.start()], last_match.end()
+
+        line_cut = text.rfind("\n", 0, max_len)
+        if line_cut > 0:
+            return text[:line_cut], line_cut + 1
+
         return text[:max_len], max_len
 
 
