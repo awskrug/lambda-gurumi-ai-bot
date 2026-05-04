@@ -187,6 +187,79 @@ def test_read_attached_images_urls_reject_non_slack_host():
         read_attached_images(ctx, urls=["https://evil.example.com/cat.png"])
 
 
+def test_read_attached_images_uses_per_app_token_from_slack_client():
+    """Regression: the Authorization header must carry the per-app bot_token
+    that the worker resolved from SSM (and put on the WebClient passed into
+    ToolContext) — NOT `settings.slack_bot_token`, which is empty in the
+    Lambda runtime under the multi-tenant config."""
+    import dataclasses
+
+    slack_client = MagicMock()
+    slack_client.token = "xoxb-per-app-from-ssm"
+    # Mirror the runtime: settings.slack_bot_token is empty.
+    ctx = ToolContext(
+        slack_client=slack_client,
+        channel="C1",
+        thread_ts="ts1",
+        event={},
+        settings=dataclasses.replace(_settings(), slack_bot_token=""),
+        llm=MagicMock(describe_image=MagicMock(return_value="x")),
+    )
+
+    captured: dict[str, str] = {}
+
+    def _capture_request(req, timeout=None):
+        captured["auth"] = req.headers.get("Authorization")
+        cm = MagicMock()
+        cm.__enter__.return_value.read.return_value = b"img-bytes"
+        return cm
+
+    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture_request):
+        read_attached_images(ctx, urls=["https://files.slack.com/x/cat.png"])
+
+    assert captured["auth"] == "Bearer xoxb-per-app-from-ssm"
+
+
+def test_read_attached_document_uses_per_app_token_from_slack_client():
+    """Regression: same contract as the images path — token comes from the
+    WebClient on ToolContext, not from settings."""
+    import dataclasses
+
+    slack_client = MagicMock()
+    slack_client.token = "xoxb-per-app-from-ssm"
+    ctx = ToolContext(
+        slack_client=slack_client,
+        channel="C1",
+        thread_ts="ts1",
+        event={
+            "files": [
+                {
+                    "mimetype": "text/plain",
+                    "url_private_download": "https://files.slack.com/x/doc.txt",
+                    "name": "doc.txt",
+                }
+            ]
+        },
+        settings=dataclasses.replace(_settings(), slack_bot_token=""),
+        llm=MagicMock(),
+    )
+
+    captured: dict[str, str] = {}
+
+    def _capture_request(req, timeout=None):
+        captured["auth"] = req.headers.get("Authorization")
+        cm = MagicMock()
+        resp = cm.__enter__.return_value
+        resp.headers.get.return_value = "text/plain"
+        resp.read.side_effect = [b"hello world", b""]  # body chunk, then EOF
+        return cm
+
+    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture_request):
+        read_attached_document(ctx, limit=1)
+
+    assert captured["auth"] == "Bearer xoxb-per-app-from-ssm"
+
+
 def test_read_attached_images_runs_describes_in_parallel():
     """The describe step is the slow one (LLM call). Three images that each
     take 0.3s to describe should finish in well under the serial 0.9s if the

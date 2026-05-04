@@ -52,7 +52,13 @@ def read_attached_images(
     limit: int = 3,
     urls: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    token = ctx.settings.slack_bot_token
+    # The token is the per-app bot_token resolved from SSM by the worker
+    # entrypoint (`app._process_worker`) and carried on the WebClient that
+    # was injected into ToolContext. `ctx.settings.slack_bot_token` is
+    # empty in the Lambda runtime — that field is a localtest-only field
+    # — so reading it here would send `Authorization: Bearer ` and Slack
+    # would 401 every download.
+    token = ctx.slack_client.token
     seen: set[str] = set()
     candidates: list[tuple[str, str, str]] = []  # (url, mime_hint, name)
 
@@ -234,7 +240,10 @@ def read_attached_document(
     limit: int = 2,
     urls: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    token = ctx.settings.slack_bot_token
+    # See the matching comment in `read_attached_images` — the token must
+    # come from the per-app WebClient, not from `settings.slack_bot_token`
+    # (which is empty in the Lambda runtime).
+    token = ctx.slack_client.token
     max_bytes = ctx.settings.max_doc_bytes
     max_chars = ctx.settings.max_doc_chars
     seen: set[str] = set()
