@@ -49,7 +49,11 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_sdk import WebClient
 
 from src.agent import SlackMentionAgent
-from src.app_metadata import AppMetadataStore
+from src.app_metadata import (
+    ALLOWED_CHANNEL_IDS_ATTR,
+    ALLOWED_USER_IDS_ATTR,
+    AppMetadataStore,
+)
 from src.config import Settings
 from src.credentials import CredentialsStore
 from src.dedup import ConversationStore, DedupStore
@@ -307,39 +311,63 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
     # Record this app's metadata only after dedup passes — Slack retries
     # and our own re-deliveries shouldn't bump last_seen_at, and known-bad
     # messages (empty text) shouldn't appear in the registry as activity.
+    # `record(...)` returns the full row (ALL_NEW), which carries any per-app
+    # ACL overrides the operator set via the CLI — so we resolve effective
+    # allowlists in the same DynamoDB roundtrip we already needed for the
+    # write, no extra GetItem.
+    app_row: dict | None = None
     if api_app_id:
         try:
-            _get_app_metadata().record(api_app_id, team_id=event.get("team"))
+            app_row = _get_app_metadata().record(api_app_id, team_id=event.get("team"))
         except Exception as exc:  # noqa: BLE001
             logger.warning("app metadata record failed: %s", exc)
+
+    # Three-state ACL resolution per attribute:
+    #   - attribute ABSENT in row    → global env var (back-compat)
+    #   - attribute PRESENT in row   → per-app value, IGNORE global
+    #   - attribute is `[]`          → "this app explicitly allows all" —
+    #                                   overrides even a non-empty global
+    # The third state matters: an operator may want one app to be carved
+    # out as unrestricted even when the deployment-wide default is locked
+    # down. DynamoDB distinguishes empty list from missing attribute, so
+    # we mirror that distinction here.
+    def _effective(attr: str, fallback: list[str]) -> list[str]:
+        if app_row is None or attr not in app_row:
+            return fallback
+        return list(app_row[attr])
+
+    effective_channels = _effective(ALLOWED_CHANNEL_IDS_ATTR, settings.allowed_channel_ids)
+    effective_users = _effective(ALLOWED_USER_IDS_ATTR, settings.allowed_user_ids)
 
     # Channel allowlist applies to public/private channels only. DMs use
     # per-channel IDs (D-prefix) that aren't normally enrolled in the
     # allowlist — enforcing there would lock out every user's direct-message
     # path the moment an operator sets ALLOWED_CHANNEL_IDS. Slack's own
     # workspace install permission already gates who can open the DM.
-    if not is_dm and not channel_allowed(channel, settings.allowed_channel_ids):
+    # Both check AND `{}` substitution use the EFFECTIVE list so the
+    # message points at a per-app channel when overridden.
+    if not is_dm and not channel_allowed(channel, effective_channels):
         msg = settings.allowed_channel_message or ""
-        if msg and "{}" in msg and settings.allowed_channel_ids:
-            msg = msg.replace("{}", f"<#{settings.allowed_channel_ids[0]}>")
+        if msg and "{}" in msg and effective_channels:
+            msg = msg.replace("{}", f"<#{effective_channels[0]}>")
         if msg:
             say(text=msg, thread_ts=thread_ts)
-        log_event(logger, "channel.blocked", channel=channel)
+        log_event(logger, "channel.blocked", channel=channel, api_app_id=api_app_id)
         return
 
     # User allowlist applies to channels AND DMs. Unlike the channel allowlist
     # (which exempts DMs because DM channel IDs are D-prefixed and wouldn't
     # be enrolled), restricting *who* can talk to the bot is meaningful in
     # both directions — arguably more so in DMs, where there's no channel-
-    # level gate at all. Operator opts in via ALLOWED_USER_IDS; empty list
-    # means everyone is allowed.
-    if settings.allowed_user_ids and user not in settings.allowed_user_ids:
+    # level gate at all. Operator opts in via ALLOWED_USER_IDS (or per-app
+    # override); empty list means everyone is allowed.
+    if effective_users and user not in effective_users:
         msg = settings.allowed_user_message or ""
         if msg and "{}" in msg:
-            msg = msg.replace("{}", f"<@{settings.allowed_user_ids[0]}>")
+            msg = msg.replace("{}", f"<@{effective_users[0]}>")
         if msg:
             say(text=msg, thread_ts=thread_ts)
-        log_event(logger, "user.blocked", user=user, channel=channel)
+        log_event(logger, "user.blocked", user=user, channel=channel, api_app_id=api_app_id)
         return
 
     try:

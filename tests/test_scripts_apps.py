@@ -536,3 +536,275 @@ def test_cmd_delete_handles_missing_ssm_params_gracefully(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "not found" in out  # InvalidParameters branch
+
+
+# --------------------------------------------------------------------------- #
+# acl — per-app channel/user allowlist overrides
+#
+# We re-use the moto DDB fixture via the same `table` helper. SSM is
+# unused for ACL commands but the dispatch interface still requires it.
+# --------------------------------------------------------------------------- #
+
+
+def _settings_with_acl(channels=None, users=None):
+    """Build a real Settings frozen dataclass with the two ACL fields set.
+    Avoids hand-rolling a fake — keeps `cmd_acl_get` exercising the same
+    attribute access path it does in production."""
+    from src.config import Settings
+
+    return Settings(
+        slack_bot_token="",
+        llm_provider="openai",
+        llm_model="gpt-4o-mini",
+        image_provider="openai",
+        image_model="gpt-image-1",
+        agent_max_steps=3,
+        response_language="ko",
+        dynamodb_table_name="t",
+        aws_region="us-east-1",
+        allowed_channel_ids=list(channels or []),
+        allowed_user_ids=list(users or []),
+    )
+
+
+@mock_aws
+def test_cmd_acl_set_writes_per_app_channel_override():
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_acl_set(
+        _ns(app_id="A1", channels="C1,C2", users=None),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["allowed_channel_ids"] == ["C1", "C2"]
+    assert "allowed_user_ids" not in item  # not touched
+
+
+@mock_aws
+def test_cmd_acl_set_empty_string_writes_explicit_empty_list():
+    """`--channels=""` is the explicit allow-all override, distinct from
+    not setting the flag at all (which would leave the global env var
+    in effect)."""
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_acl_set(
+        _ns(app_id="A1", channels="", users=None),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert "allowed_channel_ids" in item
+    assert item["allowed_channel_ids"] == []
+
+
+@mock_aws
+def test_cmd_acl_set_strips_whitespace_and_drops_empties():
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_acl_set(
+        _ns(app_id="A1", channels=" C1 ,, C2 , ", users=None),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["allowed_channel_ids"] == ["C1", "C2"]
+
+
+@mock_aws
+def test_cmd_acl_set_both_channels_and_users(capsys):
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_acl_set(
+        _ns(app_id="A1", channels="C1", users="U1,U2"),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["allowed_channel_ids"] == ["C1"]
+    assert item["allowed_user_ids"] == ["U1", "U2"]
+
+
+@mock_aws
+def test_cmd_acl_set_noop_returns_error(capsys):
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_acl_set(
+        _ns(app_id="A1", channels=None, users=None),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 1
+    assert "nothing to set" in capsys.readouterr().err
+
+
+@mock_aws
+def test_cmd_acl_unset_removes_attribute_only():
+    table = _create_ddb_table()
+    table.put_item(
+        Item={
+            "id": "app:A1",
+            "team_id": "T1",
+            "allowed_channel_ids": ["C1"],
+            "allowed_user_ids": ["U1"],
+        }
+    )
+    rc = apps_cli.cmd_acl_unset(
+        _ns(app_id="A1", channels=True, users=False),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert "allowed_channel_ids" not in item
+    # other fields untouched — unset is surgical
+    assert item["allowed_user_ids"] == ["U1"]
+    assert item["team_id"] == "T1"
+
+
+@mock_aws
+def test_cmd_acl_unset_both_flags(capsys):
+    table = _create_ddb_table()
+    table.put_item(
+        Item={
+            "id": "app:A1",
+            "team_id": "T1",
+            "allowed_channel_ids": ["C1"],
+            "allowed_user_ids": ["U1"],
+        }
+    )
+    rc = apps_cli.cmd_acl_unset(
+        _ns(app_id="A1", channels=True, users=True),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert "allowed_channel_ids" not in item
+    assert "allowed_user_ids" not in item
+    assert item["team_id"] == "T1"
+
+
+@mock_aws
+def test_cmd_acl_unset_noop_returns_error(capsys):
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_acl_unset(
+        _ns(app_id="A1", channels=False, users=False),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+    )
+    assert rc == 1
+    assert "nothing to unset" in capsys.readouterr().err
+
+
+@mock_aws
+def test_cmd_acl_get_shows_per_app_global_and_effective(capsys):
+    table = _create_ddb_table()
+    table.put_item(
+        Item={
+            "id": "app:A1",
+            "team_id": "T1",
+            "allowed_channel_ids": ["C-PER"],
+        }
+    )
+    settings = _settings_with_acl(channels=["C-GLOBAL"], users=["U-GLOBAL"])
+
+    rc = apps_cli.cmd_acl_get(
+        _ns(app_id="A1", json=False),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+        settings=settings,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # channels: per-app set, global differs, effective = per-app
+    assert "C-PER" in out
+    assert "C-GLOBAL" in out
+    # users: not set per-app, falls back to global
+    assert "falls back to global" in out
+    assert "U-GLOBAL" in out
+
+
+@mock_aws
+def test_cmd_acl_get_shows_explicit_empty_per_app_label(capsys):
+    """When per-app is `[]`, the operator needs to see clearly that this
+    is INTENTIONAL allow-all — not just an empty-list rendering accident."""
+    table = _create_ddb_table()
+    table.put_item(Item={"id": "app:A1", "allowed_user_ids": []})
+    settings = _settings_with_acl(users=["U-GLOBAL"])
+
+    rc = apps_cli.cmd_acl_get(
+        _ns(app_id="A1", json=False),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+        settings=settings,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ALLOW ALL" in out
+    assert "overrides global" in out
+
+
+@mock_aws
+def test_cmd_acl_get_no_row_falls_back_to_global(capsys):
+    table = _create_ddb_table()
+    settings = _settings_with_acl(channels=["C-G"], users=["U-G"])
+    rc = apps_cli.cmd_acl_get(
+        _ns(app_id="A-NEW", json=False),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+        settings=settings,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "falls back to global" in out
+    assert "C-G" in out and "U-G" in out
+
+
+@mock_aws
+def test_cmd_acl_get_json_output(capsys):
+    table = _create_ddb_table()
+    table.put_item(
+        Item={
+            "id": "app:A1",
+            "allowed_channel_ids": ["C-PER"],
+            "allowed_user_ids": [],
+        }
+    )
+    settings = _settings_with_acl(channels=["C-G"], users=["U-G"])
+
+    rc = apps_cli.cmd_acl_get(
+        _ns(app_id="A1", json=True),
+        ssm=None,
+        table=table,
+        prefix=PREFIX,
+        settings=settings,
+    )
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["app_id"] == "A1"
+    assert parsed["channels"]["per_app"] == ["C-PER"]
+    assert parsed["channels"]["global"] == ["C-G"]
+    assert parsed["channels"]["effective"] == ["C-PER"]
+    # users: per_app=[] (explicit) → effective=[]
+    assert parsed["users"]["per_app"] == []
+    assert parsed["users"]["effective"] == []
+
+
+def test_parse_id_list():
+    assert apps_cli._parse_id_list("") == []
+    assert apps_cli._parse_id_list("C1") == ["C1"]
+    assert apps_cli._parse_id_list("C1,C2") == ["C1", "C2"]
+    assert apps_cli._parse_id_list(" C1 , C2 ") == ["C1", "C2"]
+    assert apps_cli._parse_id_list("C1,,C2,") == ["C1", "C2"]
+    assert apps_cli._parse_id_list(",,") == []

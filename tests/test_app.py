@@ -970,3 +970,239 @@ class _StubStream:
 
     def stop(self, _final):
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Per-app ACL — DynamoDB row attributes override the global env var.
+#
+# The contract under test (mirrored in src/app_metadata.py):
+#   - attribute ABSENT  → fall back to global env var (back-compat)
+#   - attribute PRESENT → use per-app, ignore global
+#   - attribute is `[]` → "this app explicitly allows all" — even when the
+#                          global is restrictive
+# --------------------------------------------------------------------------- #
+
+
+def _stub_metadata_returning(row):
+    """Build a fake AppMetadataStore whose record() returns the given row.
+    `None` simulates a DynamoDB read failure or a not-yet-initialized app."""
+
+    class _Stub:
+        def record(self, _app_id, team_id=None):
+            return row
+
+    return _Stub()
+
+
+def test_process_per_app_channel_override_beats_global(app_module, monkeypatch):
+    """Global allowlist=[C-GLOBAL]. Per-app override=[C-OVERRIDE]. A request
+    in C-GLOBAL must be BLOCKED (it's not in the per-app list), and the
+    block message's `{}` substitution uses the per-app channel."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        allowed_channel_ids=["C-GLOBAL"],
+        allowed_channel_message="use {} please",
+        allowed_user_ids=[],
+        allowed_user_message="",
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(
+        app_module,
+        "_get_app_metadata",
+        lambda: _stub_metadata_returning({"id": "app:A1", "allowed_channel_ids": ["C-OVERRIDE"]}),
+    )
+
+    posts = []
+    app_module._process(
+        {"channel": "C-GLOBAL", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-acl-ch-1"},
+        client=object(),
+        say=lambda text, thread_ts=None: posts.append(text),
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    # Blocked because C-GLOBAL is not in per-app [C-OVERRIDE], and `{}`
+    # substitutes the per-app channel — operator gets pointed to the right
+    # place for THIS app, not the deployment-wide default.
+    assert posts == ["use <#C-OVERRIDE> please"]
+
+
+def test_process_per_app_empty_channel_list_allows_all_overriding_global(app_module, monkeypatch):
+    """Global allowlist=[C-GLOBAL] (restrictive). Per-app=[] means
+    'this specific app is unrestricted' — request in any channel passes."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        allowed_channel_ids=["C-GLOBAL"],
+        allowed_channel_message="should NOT see this",
+        allowed_user_ids=[],
+        allowed_user_message="",
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(
+        app_module,
+        "_get_app_metadata",
+        lambda: _stub_metadata_returning({"id": "app:A1", "allowed_channel_ids": []}),
+    )
+    # Stub the rest so the agent path doesn't actually run.
+    monkeypatch.setattr(app_module, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(app_module, "_get_llm", lambda: object())
+    monkeypatch.setattr(app_module, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(app_module, "SlackMentionAgent", _StubAgent)
+    monkeypatch.setattr(app_module, "StreamingMessage", _StubStream)
+
+    posts = []
+    app_module._process(
+        {"channel": "C-NOT-IN-GLOBAL", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-acl-ch-2"},
+        client=_StubClient(),
+        say=lambda **kw: posts.append(kw),
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    # No block message — the agent path ran instead.
+    assert posts == []
+
+
+def test_process_per_app_missing_channel_falls_back_to_global(app_module, monkeypatch):
+    """Row exists (timestamps etc.) but no allowed_channel_ids attribute →
+    behavior identical to back-compat global-only setup."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        allowed_channel_ids=["C-GLOBAL"],
+        allowed_channel_message="global blocks: use {}",
+        allowed_user_ids=[],
+        allowed_user_message="",
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(
+        app_module,
+        "_get_app_metadata",
+        # Row present, but no ACL attribute → use global
+        lambda: _stub_metadata_returning({"id": "app:A1", "first_seen_at": 1700000000}),
+    )
+
+    posts = []
+    app_module._process(
+        {"channel": "C-OTHER", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-acl-ch-3"},
+        client=object(),
+        say=lambda text, thread_ts=None: posts.append(text),
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    assert posts == ["global blocks: use <#C-GLOBAL>"]
+
+
+def test_process_per_app_user_override_beats_global(app_module, monkeypatch):
+    """Per-app allowed_user_ids=[U-PER] should let U-PER through even when
+    the global env var lists [U-GLOBAL]. Conversely, U-GLOBAL is blocked
+    when only the per-app list applies."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=["U-GLOBAL"],
+        allowed_user_message="only {} can talk to this app",
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(
+        app_module,
+        "_get_app_metadata",
+        lambda: _stub_metadata_returning({"id": "app:A1", "allowed_user_ids": ["U-PER"]}),
+    )
+
+    posts = []
+    app_module._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U-GLOBAL", "client_msg_id": "msg-acl-u-1"},
+        client=object(),
+        say=lambda text, thread_ts=None: posts.append(text),
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    # Per-app override wins; substitution points at the per-app user.
+    assert posts == ["only <@U-PER> can talk to this app"]
+
+
+def test_process_per_app_empty_user_list_allows_all_users_overriding_global(app_module, monkeypatch):
+    """Global users=[U-ADMIN] (restrictive). Per-app users=[] means
+    anyone can use THIS app — even users not in the global list."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=["U-ADMIN"],
+        allowed_user_message="should NOT see this",
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(
+        app_module,
+        "_get_app_metadata",
+        lambda: _stub_metadata_returning({"id": "app:A1", "allowed_user_ids": []}),
+    )
+    monkeypatch.setattr(app_module, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(app_module, "_get_llm", lambda: object())
+    monkeypatch.setattr(app_module, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(app_module, "SlackMentionAgent", _StubAgent)
+    monkeypatch.setattr(app_module, "StreamingMessage", _StubStream)
+
+    posts = []
+    app_module._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U-RANDOM", "client_msg_id": "msg-acl-u-2"},
+        client=_StubClient(),
+        say=lambda **kw: posts.append(kw),
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    assert posts == []  # passed through
+
+
+def test_process_metadata_failure_falls_back_to_global_acl(app_module, monkeypatch):
+    """If the DynamoDB row read/write fails (record() raises or returns None),
+    the bot must NOT lock everyone out — it falls back to the global env-var
+    ACL so transient DDB issues don't take the bot offline."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        allowed_channel_ids=["C-OK"],
+        allowed_channel_message="global: {}",
+        allowed_user_ids=[],
+        allowed_user_message="",
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+
+    class _Broken:
+        def record(self, *_a, **_kw):
+            raise RuntimeError("DDB unreachable")
+
+    monkeypatch.setattr(app_module, "_get_app_metadata", lambda: _Broken())
+
+    posts = []
+    app_module._process(
+        {"channel": "C-BLOCKED", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-ddb-fail"},
+        client=object(),
+        say=lambda text, thread_ts=None: posts.append(text),
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    # Global C-OK list still enforced; substitution still works.
+    assert posts == ["global: <#C-OK>"]

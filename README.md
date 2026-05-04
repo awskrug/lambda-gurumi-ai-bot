@@ -89,10 +89,10 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `RESPONSE_LANGUAGE` | | `ko` | `ko` / `en` |
 | `DYNAMODB_TABLE_NAME` | | `lambda-gurumi-bot-dev` | dedup / 대화 저장 테이블 |
 | `AWS_REGION` | | `us-east-1` | AWS 리전 |
-| `ALLOWED_CHANNEL_IDS` | | (empty) | 콤마 구분. 비어있으면 모든 채널 허용. **DM(`message.im`) 은 허용 리스트 대상이 아님** — allowlist 를 설정해도 DM 경로는 항상 허용됨 |
-| `ALLOWED_CHANNEL_MESSAGE` | | — | 비허용 채널 응답 메시지 (DM 에는 적용되지 않음). `{}` 가 있으면 `ALLOWED_CHANNEL_IDS` 의 첫 채널을 `<#ID>` 멘션 형태로 치환 |
-| `ALLOWED_USER_IDS` | | (empty) | 콤마 구분. 비어있으면 모든 유저 허용. **채널·DM 모든 경로에 적용** — DM 도 차단 |
-| `ALLOWED_USER_MESSAGE` | | — | 비허용 유저 응답 메시지. `{}` 가 있으면 `ALLOWED_USER_IDS` 의 첫 유저를 `<@ID>` 멘션 형태로 치환 |
+| `ALLOWED_CHANNEL_IDS` | | (empty) | **앱별 오버라이드 가능** (DynamoDB → `scripts/apps.py acl set`). 글로벌 fallback. 비어있으면 모든 채널 허용. **DM 은 채널 allowlist 대상이 아님** — allowlist 를 설정해도 DM 경로는 항상 허용 |
+| `ALLOWED_CHANNEL_MESSAGE` | | — | 비허용 채널 응답 메시지 (DM 에는 적용되지 않음). `{}` 가 있으면 *effective* allowlist 의 첫 채널을 `<#ID>` 멘션 형태로 치환 |
+| `ALLOWED_USER_IDS` | | (empty) | **앱별 오버라이드 가능** (DynamoDB → `scripts/apps.py acl set`). 글로벌 fallback. 비어있으면 모든 유저 허용. **채널·DM 모든 경로에 적용** — DM 도 차단 |
+| `ALLOWED_USER_MESSAGE` | | — | 비허용 유저 응답 메시지. `{}` 가 있으면 *effective* allowlist 의 첫 유저를 `<@ID>` 멘션 형태로 치환 |
 | `MAX_LEN_SLACK` | | `3000` | 메시지 분할 기준 (≥500). `.env.example` · `serverless.yml` 기본 `3000`, 미지정 시 `config.py` 폴백 `2000`. |
 | `MAX_OUTPUT_TOKENS` | | `4096` | LLM hop 당 출력 토큰 상한 (≥256) |
 | `MAX_THROTTLE_COUNT` | | `100` | 유저별 동시 요청 상한 |
@@ -109,6 +109,32 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `SYSTEM_MESSAGE` | | — | 작업 규칙에 append 되는 추가 운영 정책 (예: 조직·채널 제약). base 를 덮어쓰지 않음 |
 | `PERSONA_MESSAGE` | | — | 답변 스타일/톤 (예: `"자연스러운 한국어로 핵심부터 답한다"`) |
 | `LOG_LEVEL` | | `INFO` | 로그 레벨 |
+
+### 앱별 ACL 오버라이드 (DynamoDB)
+
+`ALLOWED_CHANNEL_IDS` / `ALLOWED_USER_IDS` 는 **배포 단위 기본값**입니다. 각
+Slack 앱(`api_app_id`)은 DynamoDB `app:{app_id}` 행에 동일 이름의 속성을
+추가해 글로벌을 *덮어쓸* 수 있습니다. 세 가지 상태:
+
+| DynamoDB 속성 상태 | 동작 |
+|--------------------|------|
+| 속성 *없음* | 글로벌 env var 사용 (기본·하위호환) |
+| 속성 = `[C1, C2]` | per-app 값 사용, 글로벌 무시 |
+| 속성 = `[]` | "이 앱은 명시적으로 모두 허용" — 제한적인 글로벌도 무시 |
+
+운영은 CLI로:
+
+```bash
+python scripts/apps.py acl get A0123ABC                    # 현재 상태
+python scripts/apps.py acl set A0123ABC --channels=C1,C2   # per-app 채널 제한
+python scripts/apps.py acl set A0123ABC --channels=""      # 명시적 허용 (글로벌 무시)
+python scripts/apps.py acl set A0123ABC --users=U1         # per-app 유저 제한
+python scripts/apps.py acl unset A0123ABC --channels --users  # 글로벌로 복귀
+```
+
+차단 메시지(`ALLOWED_CHANNEL_MESSAGE` 등)의 `{}` 치환은 *effective* 리스트의
+첫 항목을 사용 — per-app 오버라이드가 적용된 앱은 자기 채널/유저로 안내됩니다.
+메시지 템플릿 자체는 글로벌로 유지.
 
 ## 모델 매트릭스
 

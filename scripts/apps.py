@@ -52,11 +52,35 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from src.app_metadata import (  # noqa: E402
+    ALLOWED_CHANNEL_IDS_ATTR,
+    ALLOWED_USER_IDS_ATTR,
+    AppMetadataStore,
+)
 from src.config import Settings  # noqa: E402
 
 
 _KINDS = ("signing_secret", "bot_token")
 _DDB_PREFIX = "app:"
+
+
+def _parse_id_list(raw: str) -> list[str]:
+    """Parse comma-separated IDs. Strips whitespace, drops empties.
+
+    `""` → `[]`. The empty list is a meaningful state — it's an explicit
+    "allow all per-app" override that wins over the global env var.
+    """
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _metadata_store(table) -> AppMetadataStore:
+    """Build an AppMetadataStore around an already-resolved boto3 Table.
+
+    `table_name` / `region` are unused once `table=` is injected, so the
+    empty strings here are inert."""
+    return AppMetadataStore(table_name="", region="", table=table)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +187,7 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def cmd_list(args, *, ssm, table, prefix: str) -> int:
+def cmd_list(args, *, ssm, table, prefix: str, settings=None) -> int:
     ssm_apps = _list_ssm_apps(ssm, prefix)
     md_apps = _list_metadata_apps(table)
 
@@ -195,7 +219,7 @@ def cmd_list(args, *, ssm, table, prefix: str) -> int:
     return 0
 
 
-def cmd_get(args, *, ssm, table, prefix: str) -> int:
+def cmd_get(args, *, ssm, table, prefix: str, settings=None) -> int:
     app_id = args.app_id
     sig_name, tok_name = _ssm_param_names(prefix, app_id)
 
@@ -273,7 +297,7 @@ def _read_secret(name: str, env_var: str | None, prompter: Callable[[str], str])
     return value or None
 
 
-def cmd_set(args, *, ssm, table, prefix: str) -> int:
+def cmd_set(args, *, ssm, table, prefix: str, settings=None) -> int:
     app_id = args.app_id
     sig_name, tok_name = _ssm_param_names(prefix, app_id)
 
@@ -294,7 +318,7 @@ def cmd_set(args, *, ssm, table, prefix: str) -> int:
     return 0
 
 
-def cmd_delete(args, *, ssm, table, prefix: str) -> int:
+def cmd_delete(args, *, ssm, table, prefix: str, settings=None) -> int:
     app_id = args.app_id
     sig_name, tok_name = _ssm_param_names(prefix, app_id)
 
@@ -336,6 +360,126 @@ def cmd_delete(args, *, ssm, table, prefix: str) -> int:
         except ClientError as exc:
             print(f"DynamoDB delete failed: {exc}", file=sys.stderr)
             return 1
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# acl — per-app channel/user allowlist overrides
+# --------------------------------------------------------------------------- #
+
+
+def _format_acl_field(label: str, per_app: list[str] | None, global_list: list[str]) -> list[str]:
+    """Render the per_app / global / effective triple for one ACL field.
+
+    Returns a list of lines (stdout-ready) so callers can interleave with
+    other output. The three-state contract — per_app=None means "use global"
+    — is shown explicitly so the operator can tell at a glance whether they
+    set the override or are inheriting it.
+    """
+    out = [f"{label}:"]
+    if per_app is None:
+        out.append("  per-app:    (not set — falls back to global)")
+        effective = global_list
+    elif per_app == []:
+        out.append("  per-app:    [] (explicit ALLOW ALL — overrides global)")
+        effective = per_app
+    else:
+        out.append(f"  per-app:    {per_app}")
+        effective = per_app
+    out.append(f"  global:     {global_list if global_list else '[] (allow all)'}")
+    if effective:
+        out.append(f"  effective:  {effective}")
+    else:
+        out.append("  effective:  [] (allow all)")
+    return out
+
+
+def cmd_acl_get(args, *, ssm, table, prefix: str, settings=None) -> int:
+    if settings is None:
+        # Defensive — main() always injects settings, but tests may not.
+        # Falls back to empty global lists; the per-app side still works.
+        settings = Settings.from_env()
+    app_id = args.app_id
+    store = _metadata_store(table)
+    row = store.get(app_id)
+
+    def _resolve(attr: str) -> list[str] | None:
+        if row is None or attr not in row:
+            return None
+        return list(row[attr])
+
+    ch_per = _resolve(ALLOWED_CHANNEL_IDS_ATTR)
+    us_per = _resolve(ALLOWED_USER_IDS_ATTR)
+    ch_global = list(settings.allowed_channel_ids)
+    us_global = list(settings.allowed_user_ids)
+
+    if args.json:
+        out = {
+            "app_id": app_id,
+            "channels": {
+                "per_app": ch_per,
+                "global": ch_global,
+                "effective": ch_per if ch_per is not None else ch_global,
+            },
+            "users": {
+                "per_app": us_per,
+                "global": us_global,
+                "effective": us_per if us_per is not None else us_global,
+            },
+        }
+        print(json.dumps(out))
+        return 0
+
+    print(f"app_id: {app_id}")
+    print()
+    for line in _format_acl_field("channels", ch_per, ch_global):
+        print(line)
+    print()
+    for line in _format_acl_field("users", us_per, us_global):
+        print(line)
+    return 0
+
+
+def cmd_acl_set(args, *, ssm, table, prefix: str, settings=None) -> int:
+    if args.channels is None and args.users is None:
+        print("nothing to set (specify --channels and/or --users)", file=sys.stderr)
+        return 1
+
+    store = _metadata_store(table)
+    app_id = args.app_id
+
+    if args.channels is not None:
+        values = _parse_id_list(args.channels)
+        store.set_allowlist(app_id, ALLOWED_CHANNEL_IDS_ATTR, values)
+        if values:
+            print(f"set {ALLOWED_CHANNEL_IDS_ATTR} = {values}")
+        else:
+            print(f"set {ALLOWED_CHANNEL_IDS_ATTR} = [] (explicit allow all per-app)")
+
+    if args.users is not None:
+        values = _parse_id_list(args.users)
+        store.set_allowlist(app_id, ALLOWED_USER_IDS_ATTR, values)
+        if values:
+            print(f"set {ALLOWED_USER_IDS_ATTR} = {values}")
+        else:
+            print(f"set {ALLOWED_USER_IDS_ATTR} = [] (explicit allow all per-app)")
+    return 0
+
+
+def cmd_acl_unset(args, *, ssm, table, prefix: str, settings=None) -> int:
+    if not args.channels and not args.users:
+        print("nothing to unset (specify --channels and/or --users)", file=sys.stderr)
+        return 1
+
+    store = _metadata_store(table)
+    app_id = args.app_id
+
+    if args.channels:
+        store.unset_allowlist(app_id, ALLOWED_CHANNEL_IDS_ATTR)
+        print(f"unset {ALLOWED_CHANNEL_IDS_ATTR} (reverts to global env var)")
+    if args.users:
+        store.unset_allowlist(app_id, ALLOWED_USER_IDS_ATTR)
+        print(f"unset {ALLOWED_USER_IDS_ATTR} (reverts to global env var)")
     return 0
 
 
@@ -387,6 +531,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_del.add_argument("--keep-secrets", action="store_true", help="Don't delete SSM secrets")
     p_del.add_argument("--keep-metadata", action="store_true", help="Don't delete DynamoDB row")
     p_del.set_defaults(func=cmd_delete)
+
+    # `acl` is a nested subcommand group: `acl get`, `acl set`, `acl unset`.
+    # The three-state contract is reflected in the flag shapes:
+    #   set --channels=<csv|""> writes the attribute (empty = explicit [])
+    #   unset --channels         removes the attribute (revert to global)
+    p_acl = sub.add_parser(
+        "acl",
+        help="Manage per-app channel/user allowlist overrides (DynamoDB)",
+    )
+    acl_sub = p_acl.add_subparsers(dest="acl_cmd", required=True)
+
+    p_acl_get = acl_sub.add_parser("get", help="Show per-app ACL alongside the global env-var fallback")
+    p_acl_get.add_argument("app_id")
+    p_acl_get.add_argument("--json", action="store_true")
+    p_acl_get.set_defaults(func=cmd_acl_get)
+
+    p_acl_set = acl_sub.add_parser(
+        "set",
+        help="Set per-app allowlist override (empty value = explicit allow all)",
+    )
+    p_acl_set.add_argument("app_id")
+    p_acl_set.add_argument(
+        "--channels",
+        default=None,
+        help='Comma-separated channel IDs, e.g. "C123,C456". Pass "" for explicit empty (overrides global).',
+    )
+    p_acl_set.add_argument(
+        "--users",
+        default=None,
+        help='Comma-separated user IDs. Pass "" for explicit empty (overrides global).',
+    )
+    p_acl_set.set_defaults(func=cmd_acl_set)
+
+    p_acl_unset = acl_sub.add_parser(
+        "unset",
+        help="Remove per-app override; behavior reverts to the global env var",
+    )
+    p_acl_unset.add_argument("app_id")
+    p_acl_unset.add_argument("--channels", action="store_true", help="Remove allowed_channel_ids")
+    p_acl_unset.add_argument("--users", action="store_true", help="Remove allowed_user_ids")
+    p_acl_unset.set_defaults(func=cmd_acl_unset)
     return parser
 
 
@@ -401,7 +586,7 @@ def main(argv=None) -> int:
 
     ssm = boto3.client("ssm", region_name=region)
     table = boto3.resource("dynamodb", region_name=region).Table(table_name)
-    return args.func(args, ssm=ssm, table=table, prefix=prefix)
+    return args.func(args, ssm=ssm, table=table, prefix=prefix, settings=settings)
 
 
 if __name__ == "__main__":

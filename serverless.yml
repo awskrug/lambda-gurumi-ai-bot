@@ -78,8 +78,16 @@ provider:
       statements:
         - Effect: Allow
           Action:
+            # GetItem/PutItem/Query — dedup reservations + conversation history
+            # UpdateItem — required by AppMetadataStore.record() (uses
+            #   update_item with if_not_exists for first_seen_at + ALL_NEW
+            #   return so per-app ACL is read on the same roundtrip).
+            #   Without this, every metadata write fails with
+            #   AccessDeniedException, which we catch + warn but the
+            #   `app:{api_app_id}` row never appears in DynamoDB.
             - dynamodb:GetItem
             - dynamodb:PutItem
+            - dynamodb:UpdateItem
             - dynamodb:Query
           Resource:
             - !GetAtt ConversationTable.Arn

@@ -34,6 +34,13 @@ SIG=... TOK=... python scripts/apps.py set A0123ABC \
     --signing-secret-env=SIG --bot-token-env=TOK    # scripted (no shell history leak)
 python scripts/apps.py delete A0123ABC              # confirm by re-typing app_id
 
+# Per-app channel/user allowlist overrides (DynamoDB):
+python scripts/apps.py acl get A0123ABC                          # show per-app + global + effective
+python scripts/apps.py acl set A0123ABC --channels=C1,C2         # restrict to C1,C2 for THIS app only
+python scripts/apps.py acl set A0123ABC --channels=""            # explicit allow-all (overrides restrictive global)
+python scripts/apps.py acl set A0123ABC --users=U1,U2            # restrict users
+python scripts/apps.py acl unset A0123ABC --channels --users     # remove overrides → back to global env var
+
 # Or directly via aws-cli (no masking, no confirmation):
 aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/signing_secret \
     --type SecureString --value "$SLACK_SIGNING_SECRET"
@@ -124,7 +131,19 @@ When credentials are missing, the request returns HTTP 200 with a structured `re
 
 `src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so the legacy / blank-app code path doesn't pollute the registry.
 
-`scripts/apps.py` is the operator CLI for both stores — `list` / `get` / `set` / `delete`. It uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` so secret rotation, partial updates, and orphan detection stay consistent.
+`scripts/apps.py` is the operator CLI for both stores — `list` / `get` / `set` / `delete` for secrets + metadata, plus `acl get` / `acl set` / `acl unset` for per-app ACL overrides. It uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` / `aws dynamodb update-item` so secret rotation, partial updates, ACL overrides, and orphan detection stay consistent.
+
+### Per-app ACL overrides (channel/user allowlist)
+
+`ALLOWED_CHANNEL_IDS` / `ALLOWED_USER_IDS` env vars are deployment-wide defaults. Each `app:{app_id}` row in DynamoDB can carry optional `allowed_channel_ids` and `allowed_user_ids` list attributes that *override* the global for that one app. Three states per attribute, all observably distinct in DynamoDB:
+
+- **attribute ABSENT** — fall back to the global env var (back-compat, default for newly-seen apps)
+- **attribute PRESENT with non-empty list** — use this list, ignore the global
+- **attribute is `[]`** — explicit "this app allows all", overrides even a non-empty global (the only way to carve out an unrestricted app under a restrictive deployment)
+
+Resolution happens in `_process` using the row returned from `AppMetadataStore.record(...)` (which uses `ReturnValues=ALL_NEW` so the metadata write *also* hands back any pre-set ACL attributes — no separate GetItem). On DynamoDB read failure, `record(...)` returns `None` and the bot falls back to the global env var so transient DDB issues don't take it offline.
+
+The `{}` substitution in `ALLOWED_CHANNEL_MESSAGE` / `ALLOWED_USER_MESSAGE` uses the **effective** list — so when an app has a per-app override, the block message points at the per-app channel/user, not the global one. Message *templates themselves* remain global; making them per-app is a future addition if operators ask.
 
 ### Receiver / worker split via Lambda async self-invoke
 
@@ -240,6 +259,10 @@ Per-module coverage:
 - **Removing the negative-result cache in `CredentialsStore`**. A misconfigured app sending a burst of events would otherwise hit SSM `GetParameters` once per request — easy to blow through SSM throttle quotas. Negative results (missing app) are cached for the same TTL window as positive ones for this reason.
 - **Loosening `scripts/apps.py delete` confirmation** (e.g., changing it to a y/n yes-prompt or auto-yes by default). Re-typing the `app_id` is what protects against muscle-memory deletes that would simultaneously evict SSM secrets AND DDB metadata — and there's no undo. `--yes` exists for scripted use; that's the only escape hatch.
 - **Letting `scripts/apps.py` accept secrets as positional CLI args**. Anything in `argv` lands in shell history, `ps`, and CI logs. The CLI takes secrets only via `getpass` prompt or env var pointer (`--signing-secret-env=NAME`), never as a literal arg. Don't add a `--signing-secret VALUE` flag, even "for convenience."
+- **Conflating "attribute absent" with "attribute is `[]`" in per-app ACL resolution**. The three-state contract (`absent → fall back to global`, `present → ignore global`, `[] → explicit allow all`) is the only way to express "this single app is unrestricted under an otherwise restrictive deployment." Collapsing absent and `[]` to the same meaning silently loses the override semantics — `_effective` in `_process` and `set_allowlist`/`unset_allowlist` in `AppMetadataStore` must keep them distinct.
+- **Switching `record(...)` away from `ReturnValues=ALL_NEW`**. The runtime relies on the write returning the full row so it can resolve per-app ACL on the same DynamoDB roundtrip. Dropping `ALL_NEW` either adds a separate GetItem per event (latency + cost) or — worse — silently regresses ACL to global-only because `app_row` becomes empty.
+- **Failing closed when `record(...)` raises**. The current contract is fail-open to global ACL — a transient DynamoDB outage degrades to "global env-var rules apply" rather than "the bot rejects everyone." Locking down on read failure would create an outage amplifier; the existing global env vars are the safety net.
+- **Forgetting `dynamodb:UpdateItem` in the Lambda execution role**. `AppMetadataStore.record()` and `set_allowlist`/`unset_allowlist` all use `update_item` (UpdateItem on Items API). Without this permission the calls raise `AccessDeniedException`, which `record()` catches and turns into a warning log + `None` return — so the bot keeps working but `app:{api_app_id}` rows silently never appear in DynamoDB. The symptom is "metadata not saved" with a `"app metadata record failed: AccessDenied"` line in CloudWatch. `dedup:`/`ctx:` rows continue to work because they use `put_item`. The IAM block in `serverless.yml` lists `GetItem` / `PutItem` / `UpdateItem` / `Query` — keep `UpdateItem` there.
 
 ## Excluded (Phase 2+)
 
