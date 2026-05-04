@@ -90,6 +90,40 @@ def test_allowed_user_ids_parsed_from_env(monkeypatch, reload_config):
     assert s.allowed_user_message == "허용된 유저만 응답합니다."
 
 
+def test_block_messages_default_to_non_empty_when_env_is_blank(monkeypatch, reload_config):
+    """Empty env var must fall back to a non-empty Korean default — otherwise
+    a blocked user gets no response and the bot looks broken. Operator can
+    still override with an explicit non-empty value."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ALLOWED_CHANNEL_MESSAGE", "")
+    monkeypatch.setenv("ALLOWED_USER_MESSAGE", "")
+    s = reload_config()
+    assert s.allowed_channel_message
+    assert "{}" in s.allowed_channel_message  # has substitution placeholder
+    assert s.allowed_user_message
+
+
+def test_block_messages_explicit_override_wins(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ALLOWED_CHANNEL_MESSAGE", "Custom channel block")
+    monkeypatch.setenv("ALLOWED_USER_MESSAGE", "Custom user block")
+    s = reload_config()
+    assert s.allowed_channel_message == "Custom channel block"
+    assert s.allowed_user_message == "Custom user block"
+
+
+def test_block_messages_whitespace_only_falls_back_to_default(monkeypatch, reload_config):
+    """A whitespace-only env var (`   `) is meaningless intent — strip and
+    fall back, same as empty."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ALLOWED_CHANNEL_MESSAGE", "   ")
+    monkeypatch.setenv("ALLOWED_USER_MESSAGE", "   ")
+    s = reload_config()
+    assert s.allowed_channel_message
+    assert "{}" in s.allowed_channel_message
+    assert s.allowed_user_message
+
+
 def test_ssm_params_prefix_default(monkeypatch, reload_config):
     _clear_env(monkeypatch)
     monkeypatch.delenv("SSM_PARAMS_PREFIX", raising=False)

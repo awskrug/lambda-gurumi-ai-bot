@@ -150,9 +150,18 @@ class Settings:
             ssm_params_prefix=os.getenv("SSM_PARAMS_PREFIX", "/gurumi-bot/apps").strip() or "/gurumi-bot/apps",
             ssm_cache_ttl_seconds=_int_env("SSM_CACHE_TTL_SECONDS", 300, minimum=10),
             allowed_channel_ids=_list_env("ALLOWED_CHANNEL_IDS"),
-            allowed_channel_message=os.getenv("ALLOWED_CHANNEL_MESSAGE", "구루미에게 질문은 {} 채널을 이용해 주세요~").strip(),
+            # Empty env var falls back to the Korean default — silent block
+            # is confusing to end users (looks like the bot is broken). Set
+            # the env var explicitly to a non-empty string to override.
+            allowed_channel_message=(
+                os.getenv("ALLOWED_CHANNEL_MESSAGE", "").strip()
+                or "질문은 {} 채널을 이용해 주세요~"
+            ),
             allowed_user_ids=_list_env("ALLOWED_USER_IDS"),
-            allowed_user_message=os.getenv("ALLOWED_USER_MESSAGE", "허용된 유저만 응답합니다.").strip(),
+            allowed_user_message=(
+                os.getenv("ALLOWED_USER_MESSAGE", "").strip()
+                or "허용된 유저만 응답합니다."
+            ),
             max_len_slack=_int_env("MAX_LEN_SLACK", 2000, minimum=500),
             max_throttle_count=_int_env("MAX_THROTTLE_COUNT", 100, minimum=1),
             max_history_chars=_int_env("MAX_HISTORY_CHARS", 4000, minimum=500),
