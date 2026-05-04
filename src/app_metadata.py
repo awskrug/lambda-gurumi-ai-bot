@@ -17,7 +17,7 @@ Two optional list attributes on the row, written by `set_allowlist`:
 
 Resolution rule (applied in `app._process`):
 
-  - attribute ABSENT      → fall back to global env var (back-compat)
+  - attribute ABSENT      → use the global env var
   - attribute PRESENT     → use this value, IGNORE the global
   - attribute is `[]`     → "this app explicitly allows all" — overrides
                             even a non-empty global list

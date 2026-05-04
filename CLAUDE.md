@@ -129,7 +129,7 @@ The receiver-path body parse is done *before* signature verification — but onl
 
 When credentials are missing, the request returns HTTP 200 with a structured `request.unknown_app` log — Slack would otherwise retry an unrecoverable misconfiguration. Operator must populate Parameter Store before that app's events stop being dropped.
 
-`src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so the legacy / blank-app code path doesn't pollute the registry.
+`src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so a blank-app code path can't pollute the registry.
 
 `scripts/apps.py` is the operator CLI for both stores — `list` / `get` / `set` / `delete` for secrets + metadata, plus `acl get` / `acl set` / `acl unset` for per-app ACL overrides. It uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` / `aws dynamodb update-item` so secret rotation, partial updates, ACL overrides, and orphan detection stay consistent.
 
@@ -137,7 +137,7 @@ When credentials are missing, the request returns HTTP 200 with a structured `re
 
 `ALLOWED_CHANNEL_IDS` / `ALLOWED_USER_IDS` env vars are deployment-wide defaults. Each `app:{app_id}` row in DynamoDB can carry optional `allowed_channel_ids` and `allowed_user_ids` list attributes that *override* the global for that one app. Three states per attribute, all observably distinct in DynamoDB:
 
-- **attribute ABSENT** — fall back to the global env var (back-compat, default for newly-seen apps)
+- **attribute ABSENT** — the global env var is the effective list (also the default state for newly-seen apps)
 - **attribute PRESENT with non-empty list** — use this list, ignore the global
 - **attribute is `[]`** — explicit "this app allows all", overrides even a non-empty global (the only way to carve out an unrestricted app under a restrictive deployment)
 
@@ -181,9 +181,9 @@ Enum/int validation quietly falls back to defaults with a warning: invalid `LLM_
 
 ### Streaming runs on every LLM hop
 
-`OpenAIProvider.chat(on_delta=...)` switches into `stream=True` and forwards content deltas as they arrive. When the model starts a `tool_calls` delta (preamble like "Let me search..."), forwarding is suppressed — that pre-tool commentary would leak into the final reply. Tool_calls are accumulated across chunks and returned alongside the content. The agent passes `self.on_stream` into every `chat()` call, so when the LLM decides to answer directly (no tools) the user sees tokens immediately. A separate `stream_chat()` path still exists for the forced compose at `max_steps` and for Bedrock paths that don't yet support tool+stream natively.
+`OpenAIProvider.chat(on_delta=...)` switches into `stream=True` and forwards content deltas as they arrive. When the model starts a `tool_calls` delta (preamble like "Let me search..."), forwarding is suppressed — that pre-tool commentary would leak into the final reply. Tool_calls are accumulated across chunks and returned alongside the content. The agent passes `self.on_stream` into every `chat()` call, so when the LLM decides to answer directly (no tools) the user sees tokens immediately. A separate `stream_chat()` path handles the forced compose at `max_steps` and the Bedrock paths that don't support tool+stream natively.
 
-Stream throttling is handled inside `StreamingMessage.append()` (`min_interval=0.6s`), not by a wrapper in `app.py`. `StreamingMessage` also rolls into a fresh `chat_postMessage` when the fallback buffer approaches `max_len`, and `stop()` splits an oversized final answer using `MessageFormatter` so no single update hits Slack's `msg_too_long` error.
+Stream throttling is handled inside `StreamingMessage.append()` (`min_interval=0.6s`). `StreamingMessage` also rolls into a fresh `chat_postMessage` when the fallback buffer approaches `max_len`, and `stop()` splits an oversized final answer using `MessageFormatter` so no single update hits Slack's `msg_too_long` error.
 
 ### Structured logging with request_id
 
@@ -218,7 +218,7 @@ Separate from the Lambda runtime role. `trust-policy.json` allows both `repo:aws
 
 ## Testing
 
-206 tests, 84% overall coverage (the drop vs. the 89% of `src/*`-only measurement is just `app.py` now being in scope: its `_process` path is exercised by live Slack traffic, not unit tests). `pytest.ini` pins `testpaths = tests`, `filterwarnings = ignore::DeprecationWarning`. Key approach:
+`pytest.ini` pins `testpaths = tests`, `filterwarnings = ignore::DeprecationWarning`. `app.py`'s `_process` path is exercised by live Slack traffic, not unit tests. Key approach:
 
 - Tests mirror source layout: `tests/llms/` for each `src/llms/*` submodule, `tests/tools/` for each `src/tools/*` submodule. Top-level `tests/test_agent.py`, `test_config.py`, `test_dedup.py`, `test_logging_utils.py`, `test_slack_helpers.py` cover the non-packaged modules.
 - Shared tool-test fixtures (`_ctx`, `_settings`, `_streamed_read`) live in `tests/tools/_helpers.py` — individual test files import from there instead of redefining them.
@@ -262,7 +262,7 @@ Per-module coverage:
 - **Conflating "attribute absent" with "attribute is `[]`" in per-app ACL resolution**. The three-state contract (`absent → fall back to global`, `present → ignore global`, `[] → explicit allow all`) is the only way to express "this single app is unrestricted under an otherwise restrictive deployment." Collapsing absent and `[]` to the same meaning silently loses the override semantics — `_effective` in `_process` and `set_allowlist`/`unset_allowlist` in `AppMetadataStore` must keep them distinct.
 - **Switching `record(...)` away from `ReturnValues=ALL_NEW`**. The runtime relies on the write returning the full row so it can resolve per-app ACL on the same DynamoDB roundtrip. Dropping `ALL_NEW` either adds a separate GetItem per event (latency + cost) or — worse — silently regresses ACL to global-only because `app_row` becomes empty.
 - **Failing closed when `record(...)` raises**. The current contract is fail-open to global ACL — a transient DynamoDB outage degrades to "global env-var rules apply" rather than "the bot rejects everyone." Locking down on read failure would create an outage amplifier; the existing global env vars are the safety net.
-- **Forgetting `dynamodb:UpdateItem` in the Lambda execution role**. `AppMetadataStore.record()` and `set_allowlist`/`unset_allowlist` all use `update_item` (UpdateItem on Items API). Without this permission the calls raise `AccessDeniedException`, which `record()` catches and turns into a warning log + `None` return — so the bot keeps working but `app:{api_app_id}` rows silently never appear in DynamoDB. The symptom is "metadata not saved" with a `"app metadata record failed: AccessDenied"` line in CloudWatch. `dedup:`/`ctx:` rows continue to work because they use `put_item`. The IAM block in `serverless.yml` lists `GetItem` / `PutItem` / `UpdateItem` / `Query` — keep `UpdateItem` there.
+- **Removing `dynamodb:UpdateItem` from the Lambda IAM**. `AppMetadataStore.record()` plus `set_allowlist`/`unset_allowlist` all go through `update_item`. Without the permission `record()` swallows the `AccessDeniedException` and returns `None`, so the bot keeps responding but `app:{api_app_id}` rows never appear and per-app ACL silently degrades to global. `dedup:`/`ctx:` paths use `put_item` and stay healthy, which makes the missing-metadata state easy to overlook.
 
 ## Excluded (Phase 2+)
 

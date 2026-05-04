@@ -198,8 +198,7 @@ def _enqueue_worker(event: dict, is_dm: bool, api_app_id: str) -> None:
         )
     except Exception:
         # If async invoke fails (IAM, throttling, network), fall back to
-        # inline execution so the user's message isn't dropped — same
-        # behavior as before the multi-tenant refactor.
+        # inline execution so the user's message isn't dropped.
         logger.exception("async worker invoke failed, running inline")
         _process_worker(inline_payload)
 
@@ -323,8 +322,8 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
             logger.warning("app metadata record failed: %s", exc)
 
     # Three-state ACL resolution per attribute:
-    #   - attribute ABSENT in row    → global env var (back-compat)
-    #   - attribute PRESENT in row   → per-app value, IGNORE global
+    #   - attribute ABSENT in row    → use the global env var
+    #   - attribute PRESENT in row   → use per-app value, IGNORE the global
     #   - attribute is `[]`          → "this app explicitly allows all" —
     #                                   overrides even a non-empty global
     # The third state matters: an operator may want one app to be carved

@@ -22,7 +22,7 @@ provider:
     # NOTE: AWS_REGION is auto-injected by the Lambda runtime and is a
     # reserved name we can't override here — src/config.py reads it directly
     # via os.getenv("AWS_REGION", ...). Do not add an AWS_REGION_NAME alias
-    # here; no code reads it, so it was removed as dead config.
+    # here; no code reads it.
     DYNAMODB_TABLE_NAME: ${self:service}-${sls:stage}
     # --- multi-tenant Slack credentials (per-app, fetched at request time) ---
     # Each Slack app's signing_secret + bot_token live as SecureString
@@ -78,13 +78,10 @@ provider:
       statements:
         - Effect: Allow
           Action:
-            # GetItem/PutItem/Query — dedup reservations + conversation history
-            # UpdateItem — required by AppMetadataStore.record() (uses
-            #   update_item with if_not_exists for first_seen_at + ALL_NEW
-            #   return so per-app ACL is read on the same roundtrip).
-            #   Without this, every metadata write fails with
-            #   AccessDeniedException, which we catch + warn but the
-            #   `app:{api_app_id}` row never appears in DynamoDB.
+            # GetItem/PutItem/Query  — dedup reservations + conversation history
+            # UpdateItem             — AppMetadataStore.record() uses
+            #   update_item(if_not_exists, ReturnValues=ALL_NEW) so per-app
+            #   ACL is read on the same roundtrip as the metadata write.
             - dynamodb:GetItem
             - dynamodb:PutItem
             - dynamodb:UpdateItem

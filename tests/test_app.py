@@ -891,9 +891,8 @@ def test_process_records_app_metadata_when_api_app_id_present(app_module, monkey
 
 
 def test_process_skips_metadata_when_api_app_id_blank(app_module, monkeypatch):
-    """Backwards-compat path (api_app_id="") must not write metadata —
-    otherwise we'd pollute the registry with rows for api_app_id="" or
-    legacy single-tenant invocations."""
+    """Defensive path (api_app_id="") must not write metadata — otherwise
+    we'd pollute the registry with a row keyed on the empty string."""
     import dataclasses
 
     override = dataclasses.replace(
@@ -976,7 +975,7 @@ class _StubStream:
 # Per-app ACL — DynamoDB row attributes override the global env var.
 #
 # The contract under test (mirrored in src/app_metadata.py):
-#   - attribute ABSENT  → fall back to global env var (back-compat)
+#   - attribute ABSENT  → use the global env var
 #   - attribute PRESENT → use per-app, ignore global
 #   - attribute is `[]` → "this app explicitly allows all" — even when the
 #                          global is restrictive
@@ -1072,7 +1071,7 @@ def test_process_per_app_empty_channel_list_allows_all_overriding_global(app_mod
 
 def test_process_per_app_missing_channel_falls_back_to_global(app_module, monkeypatch):
     """Row exists (timestamps etc.) but no allowed_channel_ids attribute →
-    behavior identical to back-compat global-only setup."""
+    the global env var is the effective allowlist."""
     import dataclasses
 
     override = dataclasses.replace(
