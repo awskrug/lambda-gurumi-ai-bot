@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover
 from src.app_metadata import (
     ALLOWED_CHANNEL_IDS_ATTR,
     ALLOWED_USER_IDS_ATTR,
+    PERSONA_MESSAGE_ATTR,
     AppMetadataStore,
 )
 
@@ -310,3 +311,124 @@ def test_acl_persists_across_record_calls():
     assert item["allowed_channel_ids"] == ["C1", "C2"]
     assert item["allowed_user_ids"] == []
     assert item["team_id"] == "T1"
+
+
+# --------------------------------------------------------------------------- #
+# set_persona / unset_persona — per-app PERSONA_MESSAGE override
+# --------------------------------------------------------------------------- #
+
+
+@mock_aws
+def test_set_persona_writes_attribute():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.set_persona("A1", "당신은 친근한 어시스턴트입니다.")
+    item = store.get("A1")
+    assert item[PERSONA_MESSAGE_ATTR] == "당신은 친근한 어시스턴트입니다."
+
+
+@mock_aws
+def test_set_persona_empty_string_is_preserved_distinct_from_missing():
+    """`""` is the explicit no-persona override — it must round-trip as a
+    real empty string, not be elided as 'attribute absent'."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.set_persona("A1", "")
+    item = store.get("A1")
+    assert PERSONA_MESSAGE_ATTR in item
+    assert item[PERSONA_MESSAGE_ATTR] == ""
+
+
+@mock_aws
+def test_set_persona_creates_row_when_no_metadata_yet():
+    """An operator can configure persona before the bot ever receives an
+    event from this app. The row gets created with just the persona, and
+    the next record() call adds timestamps."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.set_persona("A-NEW", "공식적인 톤으로 답한다")
+    item = store.get("A-NEW")
+    assert item is not None
+    assert item[PERSONA_MESSAGE_ATTR] == "공식적인 톤으로 답한다"
+    assert "first_seen_at" not in item
+
+
+@mock_aws
+def test_set_persona_rejects_empty_app_id():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    with pytest.raises(ValueError, match="app_id is required"):
+        store.set_persona("", "x")
+
+
+@mock_aws
+def test_set_persona_rejects_non_string_value():
+    """Persona must be a string. Passing a list or None would silently
+    write the wrong DynamoDB type."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    with pytest.raises(TypeError, match="persona value must be str"):
+        store.set_persona("A1", ["bad"])
+    with pytest.raises(TypeError):
+        store.set_persona("A1", None)
+
+
+@mock_aws
+def test_unset_persona_removes_attribute_keeping_row():
+    """Removing persona must NOT delete the metadata row — other fields
+    survive so the registry stays accurate."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.record("A1", team_id="T1")
+    store.set_persona("A1", "원래 페르소나")
+    store.set_allowlist("A1", ALLOWED_USER_IDS_ATTR, ["U1"])
+
+    store.unset_persona("A1")
+
+    item = store.get("A1")
+    assert PERSONA_MESSAGE_ATTR not in item
+    # Other fields untouched.
+    assert item["allowed_user_ids"] == ["U1"]
+    assert item["team_id"] == "T1"
+
+
+@mock_aws
+def test_unset_persona_on_missing_attr_is_noop():
+    """REMOVE on a non-existent attribute is silent in DynamoDB —
+    re-running unset shouldn't error out."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.record("A1")
+    store.unset_persona("A1")  # never was set
+    item = store.get("A1")
+    assert PERSONA_MESSAGE_ATTR not in item
+
+
+@mock_aws
+def test_persona_persists_across_record_calls():
+    """Persona set BEFORE an event arrives must survive the subsequent
+    record() write that adds timestamps."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.set_persona("A1", "공식적인 톤")
+
+    store.record("A1", team_id="T1")
+    store.record("A1", team_id="T1")
+
+    item = store.get("A1")
+    assert item[PERSONA_MESSAGE_ATTR] == "공식적인 톤"
+    assert item["team_id"] == "T1"
+
+
+@mock_aws
+def test_record_returned_row_includes_existing_persona():
+    """`record()` must surface the persona attribute alongside timestamps
+    so `_process` can resolve the per-app override on the same roundtrip."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.set_persona("A1", "친근한 어시스턴트")
+
+    row = store.record("A1", team_id="T1")
+    assert row is not None
+    assert row[PERSONA_MESSAGE_ATTR] == "친근한 어시스턴트"
+    assert row["team_id"] == "T1"

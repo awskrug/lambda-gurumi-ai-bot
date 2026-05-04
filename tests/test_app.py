@@ -1172,6 +1172,147 @@ def test_process_per_app_empty_user_list_allows_all_users_overriding_global(app_
     assert posts == []  # passed through
 
 
+# --------------------------------------------------------------------------- #
+# Per-app PERSONA_MESSAGE — same override contract as ACL but for a string.
+#   - attribute ABSENT → use global env var
+#   - attribute PRESENT → per-app value, even if `""` (= no persona)
+# --------------------------------------------------------------------------- #
+
+
+class _CapturingAgent:
+    """Stub SlackMentionAgent that captures constructor kwargs so tests can
+    assert what `_process` actually wired in."""
+
+    captured: dict = {}
+
+    def __init__(self, **kwargs):
+        type(self).captured = kwargs
+
+    def run(self, _text):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            text="ok", steps=1, tool_calls_count=0,
+            token_usage={"input": 0, "output": 0}, image_url=None,
+        )
+
+
+def _stub_process_dependencies(app_module, monkeypatch, *, app_row):
+    """Wire up _process so it can run end-to-end against fakes, with a
+    capturing agent to inspect the kwargs."""
+    monkeypatch.setattr(app_module, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(
+        app_module,
+        "_get_app_metadata",
+        lambda: _stub_metadata_returning(app_row),
+    )
+    monkeypatch.setattr(app_module, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(app_module, "_get_llm", lambda: object())
+    monkeypatch.setattr(app_module, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(app_module, "SlackMentionAgent", _CapturingAgent)
+    monkeypatch.setattr(app_module, "StreamingMessage", _StubStream)
+
+
+def _run_process(app_module, **process_kwargs):
+    event = process_kwargs.pop("event", {
+        "channel": "C1", "ts": "1.1", "text": "hello", "user": "U1",
+        "client_msg_id": "msg-persona-1",
+    })
+    app_module._process(
+        event,
+        client=_StubClient(),
+        say=lambda **kw: None,
+        is_dm=False,
+        api_app_id=process_kwargs.pop("api_app_id", "A1"),
+    )
+
+
+def test_process_per_app_persona_overrides_global(app_module, monkeypatch):
+    """Per-app `persona_message` wins over `settings.persona_message`."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        persona_message="GLOBAL: be concise",
+        allowed_channel_ids=[], allowed_user_ids=[],
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    _stub_process_dependencies(
+        app_module, monkeypatch,
+        app_row={"id": "app:A1", "persona_message": "PER-APP: be playful"},
+    )
+
+    _run_process(app_module)
+
+    assert _CapturingAgent.captured["persona_message"] == "PER-APP: be playful"
+    # SYSTEM_MESSAGE has NO per-app override — always global.
+    assert _CapturingAgent.captured["system_message"] == override.system_message
+
+
+def test_process_per_app_empty_persona_overrides_non_empty_global(app_module, monkeypatch):
+    """Per-app `""` is the explicit "no persona for this app" override —
+    must be passed through, NOT silently treated as 'use global'."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        persona_message="GLOBAL: be formal",
+        allowed_channel_ids=[], allowed_user_ids=[],
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    _stub_process_dependencies(
+        app_module, monkeypatch,
+        app_row={"id": "app:A1", "persona_message": ""},
+    )
+
+    _run_process(app_module)
+
+    # Empty string passed through. Agent's own `if self.persona_message:`
+    # check then renders this as "no persona section" — but the override
+    # decision happened HERE, in _process.
+    assert _CapturingAgent.captured["persona_message"] == ""
+
+
+def test_process_persona_falls_back_to_global_when_attr_absent(app_module, monkeypatch):
+    """Row exists (timestamps etc.) but no persona_message attribute →
+    behavior is the global persona."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        persona_message="GLOBAL persona",
+        allowed_channel_ids=[], allowed_user_ids=[],
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    _stub_process_dependencies(
+        app_module, monkeypatch,
+        app_row={"id": "app:A1", "first_seen_at": 1700000000},
+    )
+
+    _run_process(app_module)
+
+    assert _CapturingAgent.captured["persona_message"] == "GLOBAL persona"
+
+
+def test_process_persona_falls_back_to_global_when_record_fails(app_module, monkeypatch):
+    """If `record()` returns None (DDB outage), per-app override can't be
+    resolved — global persona must still apply."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        app_module.settings,
+        persona_message="GLOBAL persona",
+        allowed_channel_ids=[], allowed_user_ids=[],
+    )
+    monkeypatch.setattr(app_module, "settings", override)
+    _stub_process_dependencies(app_module, monkeypatch, app_row=None)
+
+    _run_process(app_module)
+
+    assert _CapturingAgent.captured["persona_message"] == "GLOBAL persona"
+
+
 def test_process_metadata_failure_falls_back_to_global_acl(app_module, monkeypatch):
     """If the DynamoDB row read/write fails (record() raises or returns None),
     the bot must NOT lock everyone out — it falls back to the global env-var

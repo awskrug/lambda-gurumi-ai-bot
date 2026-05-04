@@ -52,6 +52,7 @@ from src.agent import SlackMentionAgent
 from src.app_metadata import (
     ALLOWED_CHANNEL_IDS_ATTR,
     ALLOWED_USER_IDS_ATTR,
+    PERSONA_MESSAGE_ATTR,
     AppMetadataStore,
 )
 from src.config import Settings
@@ -321,22 +322,23 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
         except Exception as exc:  # noqa: BLE001
             logger.warning("app metadata record failed: %s", exc)
 
-    # Three-state ACL resolution per attribute:
+    # Per-app override resolution (applies to both the list ACLs and the
+    # string persona):
     #   - attribute ABSENT in row    → use the global env var
     #   - attribute PRESENT in row   → use per-app value, IGNORE the global
-    #   - attribute is `[]`          → "this app explicitly allows all" —
-    #                                   overrides even a non-empty global
-    # The third state matters: an operator may want one app to be carved
-    # out as unrestricted even when the deployment-wide default is locked
-    # down. DynamoDB distinguishes empty list from missing attribute, so
-    # we mirror that distinction here.
-    def _effective(attr: str, fallback: list[str]) -> list[str]:
+    # Empty list / empty string is preserved as a meaningful PRESENT value:
+    # `[]` means "this app explicitly allows all" (overrides a non-empty
+    # global allowlist), and `""` means "this app has no persona" (overrides
+    # a non-empty global PERSONA_MESSAGE). DynamoDB distinguishes these from
+    # the attribute being absent, so we mirror that distinction here.
+    def _effective(attr, fallback):
         if app_row is None or attr not in app_row:
             return fallback
-        return list(app_row[attr])
+        return app_row[attr]
 
-    effective_channels = _effective(ALLOWED_CHANNEL_IDS_ATTR, settings.allowed_channel_ids)
-    effective_users = _effective(ALLOWED_USER_IDS_ATTR, settings.allowed_user_ids)
+    effective_channels = list(_effective(ALLOWED_CHANNEL_IDS_ATTR, settings.allowed_channel_ids))
+    effective_users = list(_effective(ALLOWED_USER_IDS_ATTR, settings.allowed_user_ids))
+    effective_persona = _effective(PERSONA_MESSAGE_ATTR, settings.persona_message)
 
     # Channel allowlist applies to public/private channels only. DMs use
     # per-channel IDs (D-prefix) that aren't normally enrolled in the
@@ -447,8 +449,11 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
         registry=default_registry,
         max_steps=settings.agent_max_steps,
         response_language=settings.response_language,
+        # SYSTEM_MESSAGE is global only — it's a security/policy field that
+        # stays consistent across the deployment. PERSONA_MESSAGE has a
+        # per-app override (resolved above) since it's just answer style.
         system_message=settings.system_message,
-        persona_message=settings.persona_message,
+        persona_message=effective_persona,
         history=history,
         on_stream=_on_stream_wrapped,
         on_step=_on_step,

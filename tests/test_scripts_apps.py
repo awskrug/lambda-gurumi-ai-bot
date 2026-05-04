@@ -808,3 +808,212 @@ def test_parse_id_list():
     assert apps_cli._parse_id_list(" C1 , C2 ") == ["C1", "C2"]
     assert apps_cli._parse_id_list("C1,,C2,") == ["C1", "C2"]
     assert apps_cli._parse_id_list(",,") == []
+
+
+# --------------------------------------------------------------------------- #
+# persona — per-app PERSONA_MESSAGE override (string, not list)
+# --------------------------------------------------------------------------- #
+
+
+def _settings_with_persona(persona):
+    """Settings with a configurable global persona_message."""
+    from src.config import Settings
+
+    return Settings(
+        slack_bot_token="",
+        llm_provider="openai",
+        llm_model="gpt-4o-mini",
+        image_provider="openai",
+        image_model="gpt-image-1",
+        agent_max_steps=3,
+        response_language="ko",
+        dynamodb_table_name="t",
+        aws_region="us-east-1",
+        persona_message=persona,
+    )
+
+
+@mock_aws
+def test_cmd_persona_set_writes_value_from_positional():
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_persona_set(
+        _ns(app_id="A1", value="당신은 친근한 어시스턴트", from_file=None, from_stdin=False),
+        ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["persona_message"] == "당신은 친근한 어시스턴트"
+
+
+@mock_aws
+def test_cmd_persona_set_empty_string_writes_explicit_no_persona():
+    """`persona set <id> ""` is the explicit no-persona override — distinct
+    from `unset` which removes the attribute entirely."""
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_persona_set(
+        _ns(app_id="A1", value="", from_file=None, from_stdin=False),
+        ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert "persona_message" in item
+    assert item["persona_message"] == ""
+
+
+@mock_aws
+def test_cmd_persona_set_from_file(tmp_path):
+    """Multi-line persona via file — common case for non-trivial personas
+    that don't fit comfortably on a CLI argument."""
+    table = _create_ddb_table()
+    persona_file = tmp_path / "persona.txt"
+    persona_file.write_text("line one\nline two\n공식적인 톤")
+    rc = apps_cli.cmd_persona_set(
+        _ns(app_id="A1", value=None, from_file=str(persona_file), from_stdin=False),
+        ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["persona_message"] == "line one\nline two\n공식적인 톤"
+
+
+@mock_aws
+def test_cmd_persona_set_from_stdin(monkeypatch):
+    """Pipe-friendly: `cat persona.txt | apps.py persona set A1 --from-stdin`."""
+    import io
+
+    table = _create_ddb_table()
+    monkeypatch.setattr("sys.stdin", io.StringIO("piped persona"))
+    rc = apps_cli.cmd_persona_set(
+        _ns(app_id="A1", value=None, from_file=None, from_stdin=True),
+        ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["persona_message"] == "piped persona"
+
+
+@mock_aws
+def test_cmd_persona_set_no_input_returns_error(capsys):
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_persona_set(
+        _ns(app_id="A1", value=None, from_file=None, from_stdin=False),
+        ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no input source" in err
+
+
+@mock_aws
+def test_cmd_persona_unset_removes_attribute_keeping_row():
+    """Unset removes ONLY the persona attribute — other metadata (timestamps,
+    team_id, ACL) survive."""
+    table = _create_ddb_table()
+    table.put_item(
+        Item={
+            "id": "app:A1",
+            "team_id": "T1",
+            "persona_message": "원래 페르소나",
+            "allowed_channel_ids": ["C1"],
+        }
+    )
+    rc = apps_cli.cmd_persona_unset(
+        _ns(app_id="A1"), ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert "persona_message" not in item
+    assert item["allowed_channel_ids"] == ["C1"]
+    assert item["team_id"] == "T1"
+
+
+@mock_aws
+def test_cmd_persona_get_shows_per_app_global_and_effective(capsys):
+    table = _create_ddb_table()
+    table.put_item(Item={"id": "app:A1", "persona_message": "PER-APP"})
+
+    rc = apps_cli.cmd_persona_get(
+        _ns(app_id="A1", json=False),
+        ssm=None, table=table, prefix=PREFIX,
+        settings=_settings_with_persona("GLOBAL"),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PER-APP" in out
+    assert "GLOBAL" in out
+
+
+@mock_aws
+def test_cmd_persona_get_explicit_empty_label(capsys):
+    """`persona get` must clearly mark the explicit empty-string override
+    so an operator doesn't read it as 'nothing set' (which would imply
+    falling back to global)."""
+    table = _create_ddb_table()
+    table.put_item(Item={"id": "app:A1", "persona_message": ""})
+
+    rc = apps_cli.cmd_persona_get(
+        _ns(app_id="A1", json=False),
+        ssm=None, table=table, prefix=PREFIX,
+        settings=_settings_with_persona("GLOBAL"),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NO PERSONA" in out
+    assert "overrides global" in out
+
+
+@mock_aws
+def test_cmd_persona_get_no_attr_falls_back_to_global(capsys):
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_persona_get(
+        _ns(app_id="A-NEW", json=False),
+        ssm=None, table=table, prefix=PREFIX,
+        settings=_settings_with_persona("GLOBAL persona"),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "falls back to global" in out
+    assert "GLOBAL persona" in out
+
+
+@mock_aws
+def test_cmd_persona_get_json_output(capsys):
+    table = _create_ddb_table()
+    table.put_item(Item={"id": "app:A1", "persona_message": "PER-APP"})
+    rc = apps_cli.cmd_persona_get(
+        _ns(app_id="A1", json=True),
+        ssm=None, table=table, prefix=PREFIX,
+        settings=_settings_with_persona("GLOBAL"),
+    )
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["app_id"] == "A1"
+    assert parsed["per_app"] == "PER-APP"
+    assert parsed["global"] == "GLOBAL"
+    assert parsed["effective"] == "PER-APP"
+
+
+@mock_aws
+def test_cmd_persona_get_json_distinguishes_empty_from_missing(capsys):
+    """JSON output must preserve the per_app=null vs per_app="" distinction
+    so machine consumers can tell the override-to-empty case from the
+    fall-through-to-global case."""
+    table = _create_ddb_table()
+    # Case 1: per_app explicitly empty
+    table.put_item(Item={"id": "app:A1", "persona_message": ""})
+    apps_cli.cmd_persona_get(
+        _ns(app_id="A1", json=True), ssm=None, table=table, prefix=PREFIX,
+        settings=_settings_with_persona("G"),
+    )
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["per_app"] == ""
+    assert parsed["effective"] == ""
+
+    # Case 2: attribute absent
+    apps_cli.cmd_persona_get(
+        _ns(app_id="A2", json=True), ssm=None, table=table, prefix=PREFIX,
+        settings=_settings_with_persona("G"),
+    )
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["per_app"] is None
+    assert parsed["effective"] == "G"

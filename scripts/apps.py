@@ -29,6 +29,17 @@ Usage:
     python scripts/apps.py delete A0123ABC --yes                 # skip confirm
     python scripts/apps.py delete A0123ABC --keep-metadata       # SSM only
 
+    # Per-app channel/user allowlist overrides
+    python scripts/apps.py acl get A0123ABC
+    python scripts/apps.py acl set A0123ABC --channels=C1,C2
+    python scripts/apps.py acl unset A0123ABC --channels --users
+
+    # Per-app PERSONA_MESSAGE override (string, not list)
+    python scripts/apps.py persona get A0123ABC
+    python scripts/apps.py persona set A0123ABC "당신은 친근한 어시스턴트"
+    python scripts/apps.py persona set A0123ABC --from-file persona.txt
+    python scripts/apps.py persona unset A0123ABC
+
 After Slack-side rotation, run `set` against the same app_id — SSM
 overwrite is enabled, the cached `App` in the Lambda will rebuild within
 one `SSM_CACHE_TTL_SECONDS` window automatically.
@@ -55,6 +66,7 @@ if _REPO_ROOT not in sys.path:
 from src.app_metadata import (  # noqa: E402
     ALLOWED_CHANNEL_IDS_ATTR,
     ALLOWED_USER_IDS_ATTR,
+    PERSONA_MESSAGE_ATTR,
     AppMetadataStore,
 )
 from src.config import Settings  # noqa: E402
@@ -484,6 +496,103 @@ def cmd_acl_unset(args, *, ssm, table, prefix: str, settings=None) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# persona — per-app PERSONA_MESSAGE override (string, distinct from ACL)
+# --------------------------------------------------------------------------- #
+
+
+def _abbrev(text: str, limit: int = 200) -> str:
+    """Single-line preview of a possibly multi-line persona for `persona get`.
+    Newlines collapse to spaces; trailing chars cut with an ellipsis."""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 1] + "…"
+
+
+def cmd_persona_get(args, *, ssm, table, prefix: str, settings=None) -> int:
+    if settings is None:
+        settings = Settings.from_env()
+    app_id = args.app_id
+    store = _metadata_store(table)
+    row = store.get(app_id)
+
+    if row is None or PERSONA_MESSAGE_ATTR not in row:
+        per_app = None
+    else:
+        per_app = str(row[PERSONA_MESSAGE_ATTR])
+    global_value = settings.persona_message or ""
+    effective = per_app if per_app is not None else global_value
+
+    if args.json:
+        print(json.dumps({
+            "app_id": app_id,
+            "per_app": per_app,
+            "global": global_value,
+            "effective": effective,
+        }, ensure_ascii=False))
+        return 0
+
+    print(f"app_id: {app_id}")
+    print()
+    print("persona:")
+    if per_app is None:
+        print("  per-app:    (not set — falls back to global)")
+    elif per_app == "":
+        print('  per-app:    "" (explicit NO PERSONA — overrides global)')
+    else:
+        print(f"  per-app:    {_abbrev(per_app)}")
+    if global_value:
+        print(f"  global:     {_abbrev(global_value)}")
+    else:
+        print("  global:     (not set)")
+    if effective:
+        print(f"  effective:  {_abbrev(effective)}")
+    else:
+        print("  effective:  (no persona)")
+    return 0
+
+
+def _read_persona_value(args) -> str | None:
+    """Resolve the persona text from one of the supported input modes.
+    Returns None if no input source provided (caller should error)."""
+    if getattr(args, "from_stdin", False):
+        return sys.stdin.read()
+    path = getattr(args, "from_file", None)
+    if path:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    if args.value is not None:
+        return args.value
+    return None
+
+
+def cmd_persona_set(args, *, ssm, table, prefix: str, settings=None) -> int:
+    value = _read_persona_value(args)
+    if value is None:
+        print(
+            "no input source — pass a positional value, --from-file PATH, or --from-stdin",
+            file=sys.stderr,
+        )
+        return 1
+
+    store = _metadata_store(table)
+    store.set_persona(args.app_id, value)
+    if value == "":
+        print(f"set {PERSONA_MESSAGE_ATTR} = \"\" (explicit no-persona override)")
+    else:
+        print(f"set {PERSONA_MESSAGE_ATTR} ({len(value)} chars)")
+        print(f"  preview: {_abbrev(value)}")
+    return 0
+
+
+def cmd_persona_unset(args, *, ssm, table, prefix: str, settings=None) -> int:
+    store = _metadata_store(table)
+    store.unset_persona(args.app_id)
+    print(f"unset {PERSONA_MESSAGE_ATTR} (reverts to global env var)")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # entrypoint
 # --------------------------------------------------------------------------- #
 
@@ -572,6 +681,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_acl_unset.add_argument("--channels", action="store_true", help="Remove allowed_channel_ids")
     p_acl_unset.add_argument("--users", action="store_true", help="Remove allowed_user_ids")
     p_acl_unset.set_defaults(func=cmd_acl_unset)
+
+    # `persona` is a separate group from `acl` because PERSONA_MESSAGE is a
+    # string (not a list) and goes through a different DynamoDB attribute.
+    # The set/unset/get split mirrors `acl` so operators only learn one
+    # mental model.
+    p_persona = sub.add_parser(
+        "persona",
+        help="Manage per-app PERSONA_MESSAGE override (DynamoDB)",
+    )
+    persona_sub = p_persona.add_subparsers(dest="persona_cmd", required=True)
+
+    p_persona_get = persona_sub.add_parser("get", help="Show per-app persona alongside the global env-var fallback")
+    p_persona_get.add_argument("app_id")
+    p_persona_get.add_argument("--json", action="store_true")
+    p_persona_get.set_defaults(func=cmd_persona_get)
+
+    p_persona_set = persona_sub.add_parser(
+        "set",
+        help='Set per-app persona override. Empty string ("") = explicit no-persona override.',
+    )
+    p_persona_set.add_argument("app_id")
+    p_persona_set.add_argument(
+        "value",
+        nargs="?",
+        default=None,
+        help="Persona text. Use --from-file or --from-stdin for multi-line.",
+    )
+    p_persona_set.add_argument("--from-file", default=None, dest="from_file", help="Read persona text from a file")
+    p_persona_set.add_argument("--from-stdin", action="store_true", dest="from_stdin", help="Read persona text from stdin")
+    p_persona_set.set_defaults(func=cmd_persona_set)
+
+    p_persona_unset = persona_sub.add_parser(
+        "unset",
+        help="Remove per-app persona override; behavior reverts to the global PERSONA_MESSAGE env var",
+    )
+    p_persona_unset.add_argument("app_id")
+    p_persona_unset.set_defaults(func=cmd_persona_unset)
     return parser
 
 

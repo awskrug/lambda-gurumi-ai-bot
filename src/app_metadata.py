@@ -8,24 +8,34 @@ TTL only acts on items that explicitly carry the configured attribute,
 so permanent rows coexist with TTL'd `dedup:` and `ctx:` rows in the
 same table.
 
-Per-app ACL semantics
-=====================
-Two optional list attributes on the row, written by `set_allowlist`:
+Per-app overrides
+=================
+Three optional attributes on the row override the matching deployment-wide
+env var for that one app:
 
-  - `allowed_channel_ids`: per-app override for `ALLOWED_CHANNEL_IDS` env var
-  - `allowed_user_ids`:    per-app override for `ALLOWED_USER_IDS` env var
+  - `allowed_channel_ids` (list)  — overrides `ALLOWED_CHANNEL_IDS`
+  - `allowed_user_ids`    (list)  — overrides `ALLOWED_USER_IDS`
+  - `persona_message`     (str)   — overrides `PERSONA_MESSAGE`
 
-Resolution rule (applied in `app._process`):
+Resolution rule (applied in `app._process`, same shape for all three):
 
-  - attribute ABSENT      → use the global env var
-  - attribute PRESENT     → use this value, IGNORE the global
-  - attribute is `[]`     → "this app explicitly allows all" — overrides
-                            even a non-empty global list
+  - attribute ABSENT  → use the global env var
+  - attribute PRESENT → use this value, IGNORE the global
 
-This three-state design lets operators (a) leave per-app config untouched
-and inherit the deployment-wide default, (b) lock down a specific app
-independently, or (c) explicitly carve out an unrestricted app even when
-the global is restrictive.
+For the list attributes, the empty list `[]` is preserved as a meaningful
+PRESENT value — it means "this app explicitly allows all", overriding even
+a non-empty global. For the string attribute, the empty string `""` is
+preserved the same way — it means "this app has no persona", overriding
+even a non-empty global persona.
+
+This design lets operators (a) leave per-app config untouched and inherit
+the deployment-wide default, (b) lock a specific app down or open it up
+independently, or (c) carve out a single app's behavior even when the
+global is restrictive.
+
+`SYSTEM_MESSAGE` (operator policy that gets appended to the base task
+rules) intentionally has NO per-app override — it's a security/policy
+field that should stay consistent across the deployment.
 """
 from __future__ import annotations
 
@@ -44,6 +54,7 @@ logger = logging.getLogger(__name__)
 # affected apps to the global env var.
 ALLOWED_CHANNEL_IDS_ATTR = "allowed_channel_ids"
 ALLOWED_USER_IDS_ATTR = "allowed_user_ids"
+PERSONA_MESSAGE_ATTR = "persona_message"
 _ACL_ATTRS = (ALLOWED_CHANNEL_IDS_ATTR, ALLOWED_USER_IDS_ATTR)
 
 
@@ -148,3 +159,36 @@ class AppMetadataStore:
             logger.warning(
                 "app metadata unset_allowlist failed for %s/%s: %s", app_id, attr, exc
             )
+
+    def set_persona(self, app_id: str, value: str) -> None:
+        """Write the per-app persona override.
+
+        `value=""` is a meaningful state — it means "this app has no
+        persona" and overrides any non-empty global `PERSONA_MESSAGE`.
+        Use `unset_persona` to remove the attribute and revert to global.
+        """
+        if not app_id:
+            raise ValueError("app_id is required")
+        if not isinstance(value, str):
+            raise TypeError(f"persona value must be str, got {type(value).__name__}")
+        self._get_table().update_item(
+            Key={"id": f"app:{app_id}"},
+            UpdateExpression="SET #attr = :v",
+            ExpressionAttributeNames={"#attr": PERSONA_MESSAGE_ATTR},
+            ExpressionAttributeValues={":v": value},
+        )
+
+    def unset_persona(self, app_id: str) -> None:
+        """Remove the per-app persona override; behavior reverts to the
+        global `PERSONA_MESSAGE` env var. No-op when the attribute is
+        already absent."""
+        if not app_id:
+            raise ValueError("app_id is required")
+        try:
+            self._get_table().update_item(
+                Key={"id": f"app:{app_id}"},
+                UpdateExpression="REMOVE #attr",
+                ExpressionAttributeNames={"#attr": PERSONA_MESSAGE_ATTR},
+            )
+        except ClientError as exc:
+            logger.warning("app metadata unset_persona failed for %s: %s", app_id, exc)

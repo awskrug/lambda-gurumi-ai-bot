@@ -106,35 +106,45 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `MAX_WEB_LINKS` | | `20` | `fetch_webpage` 반환 링크 최대 개수 (≥0) |
 | `JINA_READER_BASE` | | `https://r.jina.ai` | `fetch_webpage` 가 호출하는 Jina Reader 베이스 URL. `https://` 가 아니면 기본값으로 폴백 |
 | `BOT_CURSOR` | | `:robot_face:` | 플레이스홀더·스트림 인디케이터 이모지 |
-| `SYSTEM_MESSAGE` | | — | 작업 규칙에 append 되는 추가 운영 정책 (예: 조직·채널 제약). base 를 덮어쓰지 않음 |
-| `PERSONA_MESSAGE` | | — | 답변 스타일/톤 (예: `"자연스러운 한국어로 핵심부터 답한다"`) |
+| `SYSTEM_MESSAGE` | | — | 작업 규칙에 append 되는 추가 운영 정책. base 를 덮어쓰지 않음. **글로벌 전용** (per-app 오버라이드 없음 — 보안·정책 일관성) |
+| `PERSONA_MESSAGE` | | — | 답변 스타일/톤 (예: `"자연스러운 한국어로 핵심부터 답한다"`). **앱별 오버라이드 가능** (DynamoDB → `scripts/apps.py persona set`) |
 | `LOG_LEVEL` | | `INFO` | 로그 레벨 |
 
-### 앱별 ACL 오버라이드 (DynamoDB)
+### 앱별 오버라이드 (DynamoDB)
 
-`ALLOWED_CHANNEL_IDS` / `ALLOWED_USER_IDS` 는 **배포 단위 기본값**입니다. 각
-Slack 앱(`api_app_id`)은 DynamoDB `app:{app_id}` 행에 동일 이름의 속성을
-추가해 글로벌을 *덮어쓸* 수 있습니다. 세 가지 상태:
+`ALLOWED_CHANNEL_IDS` / `ALLOWED_USER_IDS` / `PERSONA_MESSAGE` 는 **배포 단위
+기본값**입니다. 각 Slack 앱(`api_app_id`)은 DynamoDB `app:{app_id}` 행에
+같은 이름의 속성을 추가해 글로벌을 *덮어쓸* 수 있습니다. 세 가지 상태:
 
-| DynamoDB 속성 상태 | 동작 |
+| 속성 상태 | 동작 |
 |--------------------|------|
 | 속성 *없음* | 글로벌 env var 사용 (기본 동작) |
-| 속성 = `[C1, C2]` | per-app 값 사용, 글로벌 무시 |
-| 속성 = `[]` | "이 앱은 명시적으로 모두 허용" — 제한적인 글로벌도 무시 |
+| 속성 = `[C1, C2]` / `"text"` | per-app 값 사용, 글로벌 무시 |
+| 속성 = `[]` / `""` | 빈값을 명시적 오버라이드로 보존 — 리스트는 "이 앱은 모두 허용", 문자열은 "이 앱은 페르소나 없음" 의미 |
 
 운영은 CLI로:
 
 ```bash
-python scripts/apps.py acl get A0123ABC                    # 현재 상태
+# ACL (channel/user allowlist)
+python scripts/apps.py acl get A0123ABC
 python scripts/apps.py acl set A0123ABC --channels=C1,C2   # per-app 채널 제한
 python scripts/apps.py acl set A0123ABC --channels=""      # 명시적 허용 (글로벌 무시)
-python scripts/apps.py acl set A0123ABC --users=U1         # per-app 유저 제한
-python scripts/apps.py acl unset A0123ABC --channels --users  # 글로벌로 복귀
+python scripts/apps.py acl unset A0123ABC --channels --users
+
+# 페르소나 (PERSONA_MESSAGE)
+python scripts/apps.py persona get A0123ABC
+python scripts/apps.py persona set A0123ABC "당신은 친근한 어시스턴트"
+python scripts/apps.py persona set A0123ABC --from-file persona.txt    # 멀티라인
+python scripts/apps.py persona set A0123ABC ""                         # 명시적 페르소나 없음
+python scripts/apps.py persona unset A0123ABC
 ```
 
 차단 메시지(`ALLOWED_CHANNEL_MESSAGE` 등)의 `{}` 치환은 *effective* 리스트의
 첫 항목을 사용 — per-app 오버라이드가 적용된 앱은 자기 채널/유저로 안내됩니다.
 메시지 템플릿 자체는 글로벌로 유지.
+
+`SYSTEM_MESSAGE`는 운영 정책(보안·컴플라이언스)이라 일관성을 위해 **글로벌
+전용**입니다. per-app 오버라이드 없음.
 
 ## 모델 매트릭스
 

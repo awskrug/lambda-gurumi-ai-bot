@@ -41,6 +41,13 @@ python scripts/apps.py acl set A0123ABC --channels=""            # explicit allo
 python scripts/apps.py acl set A0123ABC --users=U1,U2            # restrict users
 python scripts/apps.py acl unset A0123ABC --channels --users     # remove overrides → back to global env var
 
+# Per-app PERSONA_MESSAGE override (string):
+python scripts/apps.py persona get A0123ABC                      # show per-app + global + effective
+python scripts/apps.py persona set A0123ABC "당신은 친근한 어시스턴트"  # short form
+python scripts/apps.py persona set A0123ABC --from-file persona.txt   # multi-line via file
+python scripts/apps.py persona set A0123ABC ""                   # explicit no-persona (overrides global)
+python scripts/apps.py persona unset A0123ABC                    # remove override → back to global
+
 # Or directly via aws-cli (no masking, no confirmation):
 aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/signing_secret \
     --type SecureString --value "$SLACK_SIGNING_SECRET"
@@ -133,17 +140,27 @@ When credentials are missing, the request returns HTTP 200 with a structured `re
 
 `scripts/apps.py` is the operator CLI for both stores — `list` / `get` / `set` / `delete` for secrets + metadata, plus `acl get` / `acl set` / `acl unset` for per-app ACL overrides. It uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` / `aws dynamodb update-item` so secret rotation, partial updates, ACL overrides, and orphan detection stay consistent.
 
-### Per-app ACL overrides (channel/user allowlist)
+### Per-app overrides (ACL + persona)
 
-`ALLOWED_CHANNEL_IDS` / `ALLOWED_USER_IDS` env vars are deployment-wide defaults. Each `app:{app_id}` row in DynamoDB can carry optional `allowed_channel_ids` and `allowed_user_ids` list attributes that *override* the global for that one app. Three states per attribute, all observably distinct in DynamoDB:
+Three optional attributes on the `app:{app_id}` row override the matching deployment-wide env var for that one app:
 
-- **attribute ABSENT** — the global env var is the effective list (also the default state for newly-seen apps)
-- **attribute PRESENT with non-empty list** — use this list, ignore the global
-- **attribute is `[]`** — explicit "this app allows all", overrides even a non-empty global (the only way to carve out an unrestricted app under a restrictive deployment)
+| Attribute | Type | Overrides env var |
+|---|---|---|
+| `allowed_channel_ids` | list | `ALLOWED_CHANNEL_IDS` |
+| `allowed_user_ids` | list | `ALLOWED_USER_IDS` |
+| `persona_message` | string | `PERSONA_MESSAGE` |
 
-Resolution happens in `_process` using the row returned from `AppMetadataStore.record(...)` (which uses `ReturnValues=ALL_NEW` so the metadata write *also* hands back any pre-set ACL attributes — no separate GetItem). On DynamoDB read failure, `record(...)` returns `None` and the bot falls back to the global env var so transient DDB issues don't take it offline.
+Same resolution contract for all three (in `app._process` via the helper `_effective`):
 
-The `{}` substitution in `ALLOWED_CHANNEL_MESSAGE` / `ALLOWED_USER_MESSAGE` uses the **effective** list — so when an app has a per-app override, the block message points at the per-app channel/user, not the global one. Message *templates themselves* remain global; making them per-app is a future addition if operators ask.
+- **attribute ABSENT** — the global env var is the effective value (also the default state for newly-seen apps)
+- **attribute PRESENT** — use this value, ignore the global
+- **empty value preserved as PRESENT** — `[]` for the lists means "this app explicitly allows all" (overrides a restrictive global); `""` for the persona means "this app has no persona" (overrides a non-empty global persona)
+
+Resolution happens on the same DynamoDB roundtrip as the metadata write: `AppMetadataStore.record(...)` uses `ReturnValues=ALL_NEW` so the response carries any pre-set override attributes — no separate GetItem. On DynamoDB read failure, `record(...)` returns `None` and the bot falls back to the global env var so transient DDB issues don't take it offline.
+
+For ACL: the `{}` substitution in `ALLOWED_CHANNEL_MESSAGE` / `ALLOWED_USER_MESSAGE` uses the **effective** list, so when an app has a per-app override the block message points at the per-app channel/user, not the global one. Message *templates themselves* remain global.
+
+`SYSTEM_MESSAGE` intentionally has NO per-app override — it carries operator policy that should stay consistent across the deployment.
 
 ### Receiver / worker split via Lambda async self-invoke
 
@@ -259,7 +276,8 @@ Per-module coverage:
 - **Removing the negative-result cache in `CredentialsStore`**. A misconfigured app sending a burst of events would otherwise hit SSM `GetParameters` once per request — easy to blow through SSM throttle quotas. Negative results (missing app) are cached for the same TTL window as positive ones for this reason.
 - **Loosening `scripts/apps.py delete` confirmation** (e.g., changing it to a y/n yes-prompt or auto-yes by default). Re-typing the `app_id` is what protects against muscle-memory deletes that would simultaneously evict SSM secrets AND DDB metadata — and there's no undo. `--yes` exists for scripted use; that's the only escape hatch.
 - **Letting `scripts/apps.py` accept secrets as positional CLI args**. Anything in `argv` lands in shell history, `ps`, and CI logs. The CLI takes secrets only via `getpass` prompt or env var pointer (`--signing-secret-env=NAME`), never as a literal arg. Don't add a `--signing-secret VALUE` flag, even "for convenience."
-- **Conflating "attribute absent" with "attribute is `[]`" in per-app ACL resolution**. The three-state contract (`absent → fall back to global`, `present → ignore global`, `[] → explicit allow all`) is the only way to express "this single app is unrestricted under an otherwise restrictive deployment." Collapsing absent and `[]` to the same meaning silently loses the override semantics — `_effective` in `_process` and `set_allowlist`/`unset_allowlist` in `AppMetadataStore` must keep them distinct.
+- **Conflating "attribute absent" with "attribute is `[]` / `\"\"`" in per-app override resolution**. The three-state contract (`absent → fall back to global`, `present → ignore global`, `[]` / `""` → explicit "allow all" / "no persona") is the only way to express "this single app's behavior is the override, not the deployment-wide default." Collapsing absent and the empty value to the same meaning silently loses the override semantics — `_effective` in `_process`, `set_allowlist` / `unset_allowlist`, and `set_persona` / `unset_persona` in `AppMetadataStore` must keep them distinct.
+- **Adding a per-app override for `SYSTEM_MESSAGE`**. `SYSTEM_MESSAGE` carries operator security/policy that gets *appended* to the base task rules in `agent._build_system_prompt`. Splitting it per-app lets one misconfigured app weaken the policy for that workspace while the global stays correct elsewhere — exactly the failure mode the global existence prevents. `PERSONA_MESSAGE` (answer style/tone) has a per-app override; `SYSTEM_MESSAGE` deliberately does not.
 - **Switching `record(...)` away from `ReturnValues=ALL_NEW`**. The runtime relies on the write returning the full row so it can resolve per-app ACL on the same DynamoDB roundtrip. Dropping `ALL_NEW` either adds a separate GetItem per event (latency + cost) or — worse — silently regresses ACL to global-only because `app_row` becomes empty.
 - **Failing closed when `record(...)` raises**. The current contract is fail-open to global ACL — a transient DynamoDB outage degrades to "global env-var rules apply" rather than "the bot rejects everyone." Locking down on read failure would create an outage amplifier; the existing global env vars are the safety net.
 - **Removing `dynamodb:UpdateItem` from the Lambda IAM**. `AppMetadataStore.record()` plus `set_allowlist`/`unset_allowlist` all go through `update_item`. Without the permission `record()` swallows the `AccessDeniedException` and returns `None`, so the bot keeps responding but `app:{api_app_id}` rows never appear and per-app ACL silently degrades to global. `dedup:`/`ctx:` paths use `put_item` and stay healthy, which makes the missing-metadata state easy to overlook.
