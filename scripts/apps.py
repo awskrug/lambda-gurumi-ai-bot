@@ -80,6 +80,15 @@ from src.config import Settings  # noqa: E402
 _KINDS = ("signing_secret", "bot_token")
 _DDB_PREFIX = "app:"
 
+# Emoji status indicators for `apps list`. Picked from the geometric-shapes
+# emoji block (U+1F7E0–U+1F7EB) so `unicodedata.east_asian_width` returns
+# `W` and `_visual_width` gives the correct 2-column count — the green
+# checkmark (✅) and red cross (❌) emojis are classified `N` (neutral),
+# which would silently throw off table alignment.
+_STATUS_OK = "🟢"
+_STATUS_MISSING = "🔴"
+_STATUS_PARTIAL = "🟡"
+
 
 def _parse_id_list(raw: str) -> list[str]:
     """Parse comma-separated IDs. Strips whitespace, drops empties.
@@ -213,16 +222,18 @@ def _ssm_param_names(prefix: str, app_id: str) -> tuple[str, str]:
 
 
 def _ssm_status(entry: dict[str, Any]) -> str:
-    """ok / none / partial(...). Used in `list` output."""
+    """Emoji status for the KEYS column in `apps list`. Partial states
+    keep a short text suffix so the operator sees which secret is missing
+    without running `apps get`."""
     has_sig = "signing_secret" in entry
     has_tok = "bot_token" in entry
     if has_sig and has_tok:
-        return "ok"
+        return _STATUS_OK
     if not has_sig and not has_tok:
-        return "none"
+        return _STATUS_MISSING
     if has_sig:
-        return "partial(no bot_token)"
-    return "partial(no signing_secret)"
+        return f"{_STATUS_PARTIAL} no bot_token"
+    return f"{_STATUS_PARTIAL} no signing_secret"
 
 
 def _list_ssm_apps(ssm, prefix: str) -> dict[str, dict[str, Any]]:
@@ -332,18 +343,18 @@ def cmd_list(args, *, ssm, table, prefix: str, settings=None) -> int:
             [
                 app_id,
                 _ssm_status(ssm_entry),
-                "ok" if md else "none",
+                _STATUS_OK if md else _STATUS_MISSING,
                 _resolve_name(md),
                 _format_ts(md.get("last_seen_at")),
             ]
         )
 
     if args.json:
-        keys = ["app_id", "ssm", "metadata", "name", "last_seen"]
+        keys = ["app_id", "keys", "meta", "app_info", "last_seen"]
         print(json.dumps([dict(zip(keys, r)) for r in rows], ensure_ascii=False))
         return 0
 
-    _print_table(["APP_ID", "SSM", "METADATA", "NAME", "LAST_SEEN"], rows)
+    _print_table(["APP_ID", "KEYS", "META", "APP_INFO", "LAST_SEEN"], rows)
     return 0
 
 
@@ -397,16 +408,39 @@ def cmd_get(args, *, ssm, table, prefix: str, settings=None) -> int:
             print(f"    set with: scripts/apps.py set {app_id}")
     print()
     print("DynamoDB metadata:")
-    if md_item:
-        print(f"  display_name:   {md_item.get('display_name', '-')}")
-        print(f"  team_name:      {md_item.get('team_name', '-')}")
-        print(f"  team_domain:    {md_item.get('team_domain', '-')}")
-        print(f"  bot_user_name:  {md_item.get('bot_user_name', '-')}")
-        print(f"  team_id:        {md_item.get('team_id', '-')}")
-        print(f"  first_seen_at:  {_format_ts(md_item.get('first_seen_at'))}")
-        print(f"  last_seen_at:   {_format_ts(md_item.get('last_seen_at'))}")
-    else:
+    if not md_item:
         print("  (no row — this app hasn't sent an event yet)")
+        return 0
+    print(f"  display_name:   {md_item.get('display_name', '-')}")
+    print(f"  team_name:      {md_item.get('team_name', '-')}")
+    print(f"  team_domain:    {md_item.get('team_domain', '-')}")
+    print(f"  bot_user_name:  {md_item.get('bot_user_name', '-')}")
+    print(f"  team_id:        {md_item.get('team_id', '-')}")
+    print(f"  first_seen_at:  {_format_ts(md_item.get('first_seen_at'))}")
+    print(f"  last_seen_at:   {_format_ts(md_item.get('last_seen_at'))}")
+
+    # Per-app overrides — distinguish ABSENT (falls back to global env var)
+    # from PRESENT-but-empty (explicit override that wins over the global).
+    # Run `apps acl get` / `apps persona get` for the effective resolution
+    # view that includes the global side-by-side.
+    print()
+    print("Per-app overrides:")
+    if ALLOWED_CHANNEL_IDS_ATTR in md_item:
+        print(f"  allowed_channel_ids:  {list(md_item[ALLOWED_CHANNEL_IDS_ATTR])}")
+    else:
+        print("  allowed_channel_ids:  (not set — global ALLOWED_CHANNEL_IDS applies)")
+    if ALLOWED_USER_IDS_ATTR in md_item:
+        print(f"  allowed_user_ids:     {list(md_item[ALLOWED_USER_IDS_ATTR])}")
+    else:
+        print("  allowed_user_ids:     (not set — global ALLOWED_USER_IDS applies)")
+    if PERSONA_MESSAGE_ATTR in md_item:
+        persona = str(md_item[PERSONA_MESSAGE_ATTR])
+        if persona == "":
+            print('  persona_message:      "" (explicit no-persona override)')
+        else:
+            print(f"  persona_message:      {_abbrev(persona)}")
+    else:
+        print("  persona_message:      (not set — global PERSONA_MESSAGE applies)")
     return 0
 
 

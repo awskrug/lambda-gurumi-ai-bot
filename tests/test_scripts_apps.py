@@ -159,10 +159,20 @@ def test_format_ts_handles_string_int():
 
 def test_ssm_status_branches():
     f = apps_cli._ssm_status
-    assert f({"signing_secret": object(), "bot_token": object()}) == "ok"
-    assert f({}) == "none"
+    assert f({"signing_secret": object(), "bot_token": object()}) == apps_cli._STATUS_OK
+    assert f({}) == apps_cli._STATUS_MISSING
+    # Partial states embed the missing-key hint after the warning emoji.
+    assert apps_cli._STATUS_PARTIAL in f({"signing_secret": object()})
     assert "no bot_token" in f({"signing_secret": object()})
     assert "no signing_secret" in f({"bot_token": object()})
+
+
+def test_status_emojis_are_terminal_wide():
+    """`_visual_width` must give 2 for each status emoji — otherwise a row
+    with an emoji status would shift later columns leftward and break
+    alignment with rows that don't have one."""
+    for emoji in (apps_cli._STATUS_OK, apps_cli._STATUS_MISSING, apps_cli._STATUS_PARTIAL):
+        assert apps_cli._visual_width(emoji) == 2, f"{emoji!r} not classified as terminal-wide"
 
 
 def test_list_ssm_apps_skips_unrelated_keys():
@@ -207,11 +217,11 @@ def test_cmd_list_shows_orphans_in_either_direction(capsys):
     rc = apps_cli.cmd_list(_ns(json=False), ssm=ssm, table=table, prefix=PREFIX)
     assert rc == 0
     out = capsys.readouterr().out
-    # A1: ok / ok
-    assert "A1" in out and "ok" in out and "T1" in out
-    # A2: SSM gone, metadata still there
-    assert "A2" in out and "none" in out  # SSM=none for A2
-    # A3: SSM present, no metadata yet
+    # A1: KEYS=ok, META=ok
+    assert "A1" in out and apps_cli._STATUS_OK in out and "T1" in out
+    # A2: KEYS gone (red), metadata still there (green)
+    assert "A2" in out and apps_cli._STATUS_MISSING in out
+    # A3: KEYS present, no metadata yet
     assert "A3" in out
 
 
@@ -238,10 +248,10 @@ def test_cmd_list_json_output_machine_readable(capsys):
     assert rc == 0
     parsed = json.loads(capsys.readouterr().out)
     assert parsed[0]["app_id"] == "A1"
-    assert parsed[0]["ssm"] == "ok"
-    assert parsed[0]["metadata"] == "ok"
-    # NAME column falls through to team_id when no team_name is populated yet.
-    assert parsed[0]["name"] == "T1"
+    assert parsed[0]["keys"] == apps_cli._STATUS_OK
+    assert parsed[0]["meta"] == apps_cli._STATUS_OK
+    # APP_INFO falls through to team_id when no team_name is populated yet.
+    assert parsed[0]["app_info"] == "T1"
 
 
 # --------------------------------------------------------------------------- #
@@ -1398,7 +1408,7 @@ def test_cmd_list_json_uses_name_field(capsys):
     assert rc == 0
     parsed = json.loads(capsys.readouterr().out)
     assert parsed[0]["app_id"] == "A1"
-    assert parsed[0]["name"] == "Custom"
+    assert parsed[0]["app_info"] == "Custom"
 
 
 @mock_aws
@@ -1420,6 +1430,78 @@ def test_cmd_get_shows_extended_metadata(capsys):
     assert "my_bot" in out
     assert "acme" in out
     assert "Production" in out
+
+
+@mock_aws
+def test_cmd_get_shows_per_app_overrides_when_set(capsys):
+    """`get` must surface ALL state for an app — identification fields AND
+    per-app overrides. Operators shouldn't have to remember to run three
+    separate commands (`get`, `acl get`, `persona get`) just to inspect."""
+    table = _create_ddb_table()
+    table.put_item(Item={
+        "id": "app:A1",
+        "team_name": "Acme",
+        "allowed_channel_ids": ["C1", "C2"],
+        "allowed_user_ids": ["U1"],
+        "persona_message": "친근한 어시스턴트",
+    })
+    rc = apps_cli.cmd_get(_ns(app_id="A1", json=False), ssm=_FakeSSM(), table=table, prefix=PREFIX)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "C1" in out and "C2" in out
+    assert "U1" in out
+    assert "친근한 어시스턴트" in out
+    assert "Per-app overrides" in out
+
+
+@mock_aws
+def test_cmd_get_distinguishes_explicit_empty_overrides(capsys):
+    """`[]` and `""` are explicit overrides distinct from absent — the
+    `get` output must label them so the operator doesn't read them as
+    'not set' (which would imply falling back to the global)."""
+    table = _create_ddb_table()
+    table.put_item(Item={
+        "id": "app:A1",
+        "allowed_channel_ids": [],
+        "allowed_user_ids": [],
+        "persona_message": "",
+    })
+    rc = apps_cli.cmd_get(_ns(app_id="A1", json=False), ssm=_FakeSSM(), table=table, prefix=PREFIX)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[]" in out  # explicit empty list shows as []
+    assert "no-persona" in out  # explicit empty string shows distinct label
+    # And we must NOT mislabel them as "not set":
+    assert "allowed_channel_ids:  (not set" not in out
+    assert "allowed_user_ids:     (not set" not in out
+    assert "persona_message:      (not set" not in out
+
+
+@mock_aws
+def test_cmd_get_overrides_absent_falls_back_label(capsys):
+    """When override attributes are absent, the output explicitly says
+    they fall back to the global env var."""
+    table = _create_ddb_table()
+    table.put_item(Item={"id": "app:A1", "team_name": "Acme"})
+    rc = apps_cli.cmd_get(_ns(app_id="A1", json=False), ssm=_FakeSSM(), table=table, prefix=PREFIX)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ALLOWED_CHANNEL_IDS applies" in out
+    assert "ALLOWED_USER_IDS applies" in out
+    assert "PERSONA_MESSAGE applies" in out
+
+
+@mock_aws
+def test_cmd_get_no_row_skips_override_section(capsys):
+    """When the DDB row doesn't exist yet (app pre-provisioned but never
+    used), `get` shows the no-row notice and stops — no point printing
+    'all overrides not set' since the row itself is missing."""
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_get(_ns(app_id="A-NEW", json=False), ssm=_FakeSSM(), table=table, prefix=PREFIX)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no row" in out
+    assert "Per-app overrides" not in out
 
 
 @mock_aws
