@@ -129,25 +129,57 @@ def _domain_from_url(url: str | None) -> str | None:
 
 
 def _call_auth_test(token: str) -> dict | None:
-    """Call Slack `auth.test` with the given bot token. Returns the response
-    dict on success, None on failure (with a stderr warning).
+    """Call Slack `auth.test`, then upgrade the `user` field from the bot's
+    @handle (Default Name in the App config) to its App Display Name via
+    `users.info`. Returns the response dict on success, None on failure
+    (with a stderr warning).
 
     Network failures and Slack errors are non-fatal — the CLI's bigger
-    purpose (writing secrets / metadata) should still succeed. Use the
-    returned dict's `team`, `user`, `url` fields to label the app."""
+    purpose (writing secrets / metadata) should still succeed. The
+    `users.info` upgrade requires the bot to have `users:read` scope; if
+    it doesn't, the @handle from auth.test stays in `user`.
+    """
     from slack_sdk import WebClient
     from slack_sdk.errors import SlackApiError
 
     try:
         client = WebClient(token=token)
         res = client.auth_test()
-        return dict(res.data) if res.get("ok") else None
     except SlackApiError as exc:
         print(f"warning: auth.test failed: {exc.response.get('error', exc)}", file=sys.stderr)
         return None
     except Exception as exc:  # noqa: BLE001
         print(f"warning: auth.test call failed: {exc}", file=sys.stderr)
         return None
+    if not res.get("ok"):
+        return None
+    data = dict(res.data)
+
+    # auth.test's `user` is the bot's @handle in this workspace (e.g.
+    # "brucebot" or workspace-renamed "sreassistant2"). Operators usually
+    # recognize the App Display Name (e.g. "Bruce Bot") instead — fetch
+    # it via users.info on the bot's user_id. Fail silently when the
+    # token lacks `users:read` so the rest of the metadata still lands.
+    user_id = data.get("user_id")
+    if user_id:
+        try:
+            info = client.users_info(user=user_id)
+        except SlackApiError:
+            info = None
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is not None and info.get("ok"):
+            user_obj = info.get("user", {}) or {}
+            profile = user_obj.get("profile", {}) or {}
+            display = (
+                profile.get("display_name")
+                or user_obj.get("real_name")
+                or profile.get("real_name")
+            )
+            if display:
+                data["user"] = display
+
+    return data
 
 
 def _enrich_from_auth_test(store: AppMetadataStore, app_id: str, info: dict) -> None:

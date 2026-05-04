@@ -1059,6 +1059,116 @@ def test_resolve_name_priority():
     assert f({"display_name": "Custom", "team_name": "Acme", "bot_user_name": "bot"}) == "Custom"
 
 
+class _FakeWebClient:
+    """Mocks the slack_sdk WebClient surface that `_call_auth_test` uses."""
+
+    def __init__(self, token: str, *, auth_resp=None, users_resp=None,
+                 auth_raises=None, users_raises=None):
+        self.token = token
+        self._auth_resp = auth_resp
+        self._users_resp = users_resp
+        self._auth_raises = auth_raises
+        self._users_raises = users_raises
+        self.auth_test_calls = 0
+        self.users_info_calls = []
+
+    def auth_test(self):
+        self.auth_test_calls += 1
+        if self._auth_raises:
+            raise self._auth_raises
+        return _FakeSlackResponse(self._auth_resp)
+
+    def users_info(self, *, user):
+        self.users_info_calls.append(user)
+        if self._users_raises:
+            raise self._users_raises
+        return _FakeSlackResponse(self._users_resp)
+
+
+class _FakeSlackResponse:
+    """Mimics slack_sdk's SlackResponse: dict-like + .get() + .data."""
+
+    def __init__(self, data):
+        self.data = data or {}
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+
+def _patch_slack_sdk(monkeypatch, fake_client):
+    """Patch slack_sdk.WebClient so `_call_auth_test` uses our fake."""
+    import slack_sdk
+    monkeypatch.setattr(slack_sdk, "WebClient", lambda token: fake_client)
+
+
+def test_call_auth_test_upgrades_user_handle_to_display_name(monkeypatch):
+    """Regression: `auth.test`'s `user` field is the @handle. Operators
+    expect the App Display Name (e.g. "Bruce Bot"), so `_call_auth_test`
+    follows up with `users.info` and replaces `user` when it gets a
+    real_name / display_name."""
+    fake = _FakeWebClient(
+        "xoxb-x",
+        auth_resp={
+            "ok": True, "team": "Acme", "user": "sreassistant2",
+            "user_id": "U123", "url": "https://acme.slack.com/",
+        },
+        users_resp={
+            "ok": True,
+            "user": {
+                "real_name": "Bruce Bot",
+                "profile": {"display_name": "", "real_name": "Bruce Bot"},
+            },
+        },
+    )
+    _patch_slack_sdk(monkeypatch, fake)
+
+    data = apps_cli._call_auth_test("xoxb-x")
+
+    assert data["user"] == "Bruce Bot"  # upgraded from @handle
+    assert data["team"] == "Acme"
+    assert fake.users_info_calls == ["U123"]
+
+
+def test_call_auth_test_prefers_display_name_over_real_name(monkeypatch):
+    """When the workspace admin set a custom Display name on the bot,
+    that wins over real_name."""
+    fake = _FakeWebClient(
+        "xoxb-x",
+        auth_resp={"ok": True, "team": "T", "user": "h", "user_id": "U1", "url": ""},
+        users_resp={
+            "ok": True,
+            "user": {
+                "real_name": "Bruce Bot",
+                "profile": {"display_name": "Bruce 🤖", "real_name": "Bruce Bot"},
+            },
+        },
+    )
+    _patch_slack_sdk(monkeypatch, fake)
+    assert apps_cli._call_auth_test("xoxb-x")["user"] == "Bruce 🤖"
+
+
+def test_call_auth_test_falls_back_to_handle_when_users_info_fails(monkeypatch):
+    """Bot may lack `users:read` scope. Don't error — keep the @handle."""
+    from slack_sdk.errors import SlackApiError
+
+    fake = _FakeWebClient(
+        "xoxb-x",
+        auth_resp={"ok": True, "team": "T", "user": "brucebot", "user_id": "U1", "url": ""},
+        users_raises=SlackApiError("missing_scope", _FakeSlackResponse({"error": "missing_scope"})),
+    )
+    _patch_slack_sdk(monkeypatch, fake)
+    assert apps_cli._call_auth_test("xoxb-x")["user"] == "brucebot"
+
+
+def test_call_auth_test_returns_none_when_auth_fails(monkeypatch):
+    fake = _FakeWebClient(
+        "xoxb-x",
+        auth_resp={"ok": False, "error": "invalid_auth"},
+    )
+    _patch_slack_sdk(monkeypatch, fake)
+    assert apps_cli._call_auth_test("xoxb-x") is None
+
+
 def test_domain_from_url():
     f = apps_cli._domain_from_url
     assert f(None) is None
