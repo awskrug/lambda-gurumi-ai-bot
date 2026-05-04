@@ -21,3 +21,5 @@ def test_generate_image_returns_permalink():
     out = generate_image(ctx, prompt="cat")
     assert out == {"permalink": "https://slack/abc", "title": "t"}
     llm.generate_image.assert_called_once_with("cat")
+    upload_kwargs = client.files_upload_v2.call_args.kwargs
+    assert upload_kwargs["title"] == ctx.settings.image_model

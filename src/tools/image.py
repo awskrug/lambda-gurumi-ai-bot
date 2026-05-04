@@ -18,10 +18,11 @@ from src.tools.registry import ToolContext, default_registry, tool
 )
 def generate_image(ctx: ToolContext, prompt: str) -> dict[str, str]:
     image_bytes = ctx.llm.generate_image(prompt)
+    model_name = ctx.settings.image_model
     upload = ctx.slack_client.files_upload_v2(
         channel=ctx.channel,
         thread_ts=ctx.thread_ts,
-        title="Generated image",
+        title=model_name,
         filename="generated.png",
         file=image_bytes,
     )
