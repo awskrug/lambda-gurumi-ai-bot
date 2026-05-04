@@ -137,6 +137,12 @@ python scripts/apps.py persona set A0123ABC "당신은 친근한 어시스턴트
 python scripts/apps.py persona set A0123ABC --from-file persona.txt    # 멀티라인
 python scripts/apps.py persona set A0123ABC ""                         # 명시적 페르소나 없음
 python scripts/apps.py persona unset A0123ABC
+
+# 앱 식별 (apps list NAME 컬럼)
+python scripts/apps.py refresh A0123ABC                                # auth.test 로 team/bot 갱신
+python scripts/apps.py name set A0123ABC "Production - Acme"           # 운영자 라벨 (최우선)
+python scripts/apps.py name unset A0123ABC                             # 자동 채워진 team/bot 으로 복귀
+# `apps set` 은 기본으로 auth.test 호출해서 즉시 team_name/bot_user_name 채움. --no-verify 로 스킵.
 ```
 
 차단 메시지(`ALLOWED_CHANNEL_MESSAGE` 등)의 `{}` 치환은 *effective* 리스트의

@@ -40,6 +40,11 @@ Usage:
     python scripts/apps.py persona set A0123ABC --from-file persona.txt
     python scripts/apps.py persona unset A0123ABC
 
+    # Make `list` recognizable
+    python scripts/apps.py refresh A0123ABC                  # auth.test → team/bot fields
+    python scripts/apps.py name set A0123ABC "Production Bot - Acme"
+    python scripts/apps.py name unset A0123ABC
+
 After Slack-side rotation, run `set` against the same app_id — SSM
 overwrite is enabled, the cached `App` in the Lambda will rebuild within
 one `SSM_CACHE_TTL_SECONDS` window automatically.
@@ -93,6 +98,67 @@ def _metadata_store(table) -> AppMetadataStore:
     `table_name` / `region` are unused once `table=` is injected, so the
     empty strings here are inert."""
     return AppMetadataStore(table_name="", region="", table=table)
+
+
+def _fetch_bot_token(ssm, prefix: str, app_id: str) -> str | None:
+    """Fetch a single bot_token from SSM. Returns None if missing.
+
+    Used by `refresh` / `set --verify` to call Slack `auth.test`. We avoid
+    printing the value anywhere — it's passed to `slack_sdk` and discarded."""
+    name = f"{prefix}/{app_id}/bot_token"
+    try:
+        res = ssm.get_parameter(Name=name, WithDecryption=True)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ParameterNotFound":
+            return None
+        raise
+    return res.get("Parameter", {}).get("Value")
+
+
+def _domain_from_url(url: str | None) -> str | None:
+    """Extract `acme` from `https://acme.slack.com/`. Returns None when the
+    URL is missing, unparseable, or not under `*.slack.com`."""
+    if not url:
+        return None
+    from urllib.parse import urlparse
+
+    host = urlparse(url).hostname or ""
+    if not host.endswith(".slack.com"):
+        return None
+    return host.rsplit(".slack.com", 1)[0]
+
+
+def _call_auth_test(token: str) -> dict | None:
+    """Call Slack `auth.test` with the given bot token. Returns the response
+    dict on success, None on failure (with a stderr warning).
+
+    Network failures and Slack errors are non-fatal — the CLI's bigger
+    purpose (writing secrets / metadata) should still succeed. Use the
+    returned dict's `team`, `user`, `url` fields to label the app."""
+    from slack_sdk import WebClient
+    from slack_sdk.errors import SlackApiError
+
+    try:
+        client = WebClient(token=token)
+        res = client.auth_test()
+        return dict(res.data) if res.get("ok") else None
+    except SlackApiError as exc:
+        print(f"warning: auth.test failed: {exc.response.get('error', exc)}", file=sys.stderr)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: auth.test call failed: {exc}", file=sys.stderr)
+        return None
+
+
+def _enrich_from_auth_test(store: AppMetadataStore, app_id: str, info: dict) -> None:
+    """Persist team_name / bot_user_name / team_domain from an auth.test
+    response. Silent no-op if the response is missing the expected fields."""
+    store.update_app_info(
+        app_id,
+        team_name=info.get("team"),
+        bot_user_name=info.get("user"),
+        team_domain=_domain_from_url(info.get("url")),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -176,6 +242,24 @@ def _list_metadata_apps(table) -> dict[str, dict[str, Any]]:
     return apps
 
 
+def _visual_width(s: str) -> int:
+    """Terminal column count for a string. East-Asian wide / fullwidth chars
+    (Hangul, CJK ideographs, fullwidth ASCII) take 2 columns; everything else
+    takes 1. `len()` would undercount these, which is why a row containing
+    `"당근"` would visually overflow its computed cell and shift later columns
+    rightward. Stdlib only — no extra dep."""
+    import unicodedata
+
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+
+def _pad(s: str, width: int) -> str:
+    """Right-pad `s` with spaces until its *visual* width hits `width`.
+    `f"{s:<N}"` would pad to N *characters*, which is wrong for CJK."""
+    deficit = width - _visual_width(s)
+    return s + (" " * deficit if deficit > 0 else "")
+
+
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     """Print an aligned table to current sys.stdout.
 
@@ -183,15 +267,15 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
     pytest's capsys swaps sys.stdout per test, and a stale reference
     would route output past the capture, breaking output-asserting tests.
     """
-    widths = [len(h) for h in headers]
+    widths = [_visual_width(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*headers))
-    print(fmt.format(*["-" * w for w in widths]))
+            widths[i] = max(widths[i], _visual_width(str(cell)))
+    sep = "  "
+    print(sep.join(_pad(h, w) for h, w in zip(headers, widths)))
+    print(sep.join("-" * w for w in widths))
     for row in rows:
-        print(fmt.format(*[str(c) for c in row]))
+        print(sep.join(_pad(str(c), w) for c, w in zip(row, widths)))
 
 
 # --------------------------------------------------------------------------- #
@@ -217,17 +301,17 @@ def cmd_list(args, *, ssm, table, prefix: str, settings=None) -> int:
                 app_id,
                 _ssm_status(ssm_entry),
                 "ok" if md else "none",
-                str(md.get("team_id", "-") or "-"),
+                _resolve_name(md),
                 _format_ts(md.get("last_seen_at")),
             ]
         )
 
     if args.json:
-        keys = ["app_id", "ssm", "metadata", "team_id", "last_seen"]
-        print(json.dumps([dict(zip(keys, r)) for r in rows]))
+        keys = ["app_id", "ssm", "metadata", "name", "last_seen"]
+        print(json.dumps([dict(zip(keys, r)) for r in rows], ensure_ascii=False))
         return 0
 
-    _print_table(["APP_ID", "SSM", "METADATA", "TEAM_ID", "LAST_SEEN"], rows)
+    _print_table(["APP_ID", "SSM", "METADATA", "NAME", "LAST_SEEN"], rows)
     return 0
 
 
@@ -282,6 +366,10 @@ def cmd_get(args, *, ssm, table, prefix: str, settings=None) -> int:
     print()
     print("DynamoDB metadata:")
     if md_item:
+        print(f"  display_name:   {md_item.get('display_name', '-')}")
+        print(f"  team_name:      {md_item.get('team_name', '-')}")
+        print(f"  team_domain:    {md_item.get('team_domain', '-')}")
+        print(f"  bot_user_name:  {md_item.get('bot_user_name', '-')}")
         print(f"  team_id:        {md_item.get('team_id', '-')}")
         print(f"  first_seen_at:  {_format_ts(md_item.get('first_seen_at'))}")
         print(f"  last_seen_at:   {_format_ts(md_item.get('last_seen_at'))}")
@@ -327,6 +415,21 @@ def cmd_set(args, *, ssm, table, prefix: str, settings=None) -> int:
     if bot_token:
         ssm.put_parameter(Name=tok_name, Value=bot_token, Type="SecureString", Overwrite=True)
         print(f"updated SSM SecureString: {tok_name}")
+
+    # Auto-verify the new bot_token by calling Slack auth.test, then
+    # populate `team_name` / `bot_user_name` / `team_domain` so `apps list`
+    # can render a recognizable label. `--no-verify` skips when network /
+    # Slack reachability isn't available.
+    if bot_token and not getattr(args, "no_verify", False):
+        info = _call_auth_test(bot_token)
+        if info is not None:
+            store = _metadata_store(table)
+            _enrich_from_auth_test(store, app_id, info)
+            print(
+                f"verified token: team={info.get('team')!r} "
+                f"bot={info.get('user')!r} "
+                f"domain={_domain_from_url(info.get('url'))!r}"
+            )
     return 0
 
 
@@ -593,6 +696,74 @@ def cmd_persona_unset(args, *, ssm, table, prefix: str, settings=None) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# refresh / name — make `list` output recognizable
+# --------------------------------------------------------------------------- #
+
+
+def cmd_refresh(args, *, ssm, table, prefix: str, settings=None) -> int:
+    """Re-run Slack `auth.test` and update team_name / bot_user_name /
+    team_domain. Use after a Slack-side workspace rename or as a backfill
+    for apps provisioned before this command existed."""
+    app_id = args.app_id
+    token = _fetch_bot_token(ssm, prefix, app_id)
+    if not token:
+        print(f"no bot_token in SSM for {app_id}", file=sys.stderr)
+        return 1
+    info = _call_auth_test(token)
+    if info is None:
+        return 1
+    store = _metadata_store(table)
+    _enrich_from_auth_test(store, app_id, info)
+    print(
+        f"refreshed {app_id}: team={info.get('team')!r} "
+        f"bot={info.get('user')!r} "
+        f"domain={_domain_from_url(info.get('url'))!r}"
+    )
+    return 0
+
+
+def cmd_name_set(args, *, ssm, table, prefix: str, settings=None) -> int:
+    store = _metadata_store(table)
+    store.set_display_name(args.app_id, args.name)
+    print(f"set display_name for {args.app_id}: {args.name!r}")
+    return 0
+
+
+def cmd_name_unset(args, *, ssm, table, prefix: str, settings=None) -> int:
+    store = _metadata_store(table)
+    store.unset_display_name(args.app_id)
+    print(f"unset display_name for {args.app_id} (auto-populated team/bot fields will fill in)")
+    return 0
+
+
+def _resolve_name(row: dict | None) -> str:
+    """Pick the most useful single-line label for an app.
+
+    Priority (most operator-meaningful first):
+      1. `display_name` — operator-set explicit alias
+      2. `"team_name / bot_user_name"` — both auto-populated from auth.test
+      3. `team_name` alone — partial auto-populate
+      4. `team_id` alone — only known from event payload, no auth.test yet
+      5. `"-"` — nothing known yet
+    """
+    if not row:
+        return "-"
+    display = row.get("display_name")
+    if display:
+        return str(display)
+    team_name = row.get("team_name")
+    bot_user = row.get("bot_user_name")
+    if team_name and bot_user:
+        return f"{team_name} / {bot_user}"
+    if team_name:
+        return str(team_name)
+    team_id = row.get("team_id")
+    if team_id:
+        return str(team_id)
+    return "-"
+
+
+# --------------------------------------------------------------------------- #
 # entrypoint
 # --------------------------------------------------------------------------- #
 
@@ -631,6 +802,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--bot-token-env",
         default=None,
         help="Read bot_token from this env var instead of prompting",
+    )
+    p_set.add_argument(
+        "--no-verify",
+        action="store_true",
+        dest="no_verify",
+        help="Skip the post-write Slack auth.test call (use when offline / Slack unreachable)",
     )
     p_set.set_defaults(func=cmd_set)
 
@@ -718,6 +895,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_persona_unset.add_argument("app_id")
     p_persona_unset.set_defaults(func=cmd_persona_unset)
+
+    p_refresh = sub.add_parser(
+        "refresh",
+        help="Re-call Slack auth.test for an app and update team/bot identification fields",
+    )
+    p_refresh.add_argument("app_id")
+    p_refresh.set_defaults(func=cmd_refresh)
+
+    # `name` is a single-attribute group (operator-set display label),
+    # parallel to `acl` and `persona` for visual consistency.
+    p_name = sub.add_parser(
+        "name",
+        help="Operator-set display label that takes precedence over auto-populated team/bot info",
+    )
+    name_sub = p_name.add_subparsers(dest="name_cmd", required=True)
+    p_name_set = name_sub.add_parser("set", help="Set a custom display name")
+    p_name_set.add_argument("app_id")
+    p_name_set.add_argument("name")
+    p_name_set.set_defaults(func=cmd_name_set)
+    p_name_unset = name_sub.add_parser("unset", help="Remove the custom display name")
+    p_name_unset.add_argument("app_id")
+    p_name_unset.set_defaults(func=cmd_name_unset)
+
     return parser
 
 

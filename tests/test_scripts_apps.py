@@ -98,6 +98,13 @@ class _FakeSSM:
                 invalid.append(n)
         return {"DeletedParameters": deleted, "InvalidParameters": invalid}
 
+    def get_parameter(self, *, Name, WithDecryption):  # noqa: N803
+        if Name not in self.params:
+            from botocore.exceptions import ClientError as _CE
+
+            raise _CE({"Error": {"Code": "ParameterNotFound"}}, "GetParameter")
+        return {"Parameter": {"Name": Name, "Value": self.params[Name].get("Value", "")}}
+
 
 def _create_ddb_table():
     client = boto3.client("dynamodb", region_name=REGION)
@@ -233,7 +240,8 @@ def test_cmd_list_json_output_machine_readable(capsys):
     assert parsed[0]["app_id"] == "A1"
     assert parsed[0]["ssm"] == "ok"
     assert parsed[0]["metadata"] == "ok"
-    assert parsed[0]["team_id"] == "T1"
+    # NAME column falls through to team_id when no team_name is populated yet.
+    assert parsed[0]["name"] == "T1"
 
 
 # --------------------------------------------------------------------------- #
@@ -991,6 +999,317 @@ def test_cmd_persona_get_json_output(capsys):
     assert parsed["per_app"] == "PER-APP"
     assert parsed["global"] == "GLOBAL"
     assert parsed["effective"] == "PER-APP"
+
+
+# --------------------------------------------------------------------------- #
+# refresh / name / list-NAME — make app rows recognizable in `apps list`
+# --------------------------------------------------------------------------- #
+
+
+def test_visual_width_handles_cjk_and_ascii():
+    """Hangul / CJK chars take 2 terminal columns, ASCII takes 1."""
+    f = apps_cli._visual_width
+    assert f("") == 0
+    assert f("ascii") == 5
+    assert f("당근") == 4              # 2 wide chars
+    assert f("당근 / chatgpt") == 14   # 4 + 1 + 1 + 1 + 7 = 14
+    assert f("nalbam / gurumi") == 15
+
+
+def test_pad_uses_visual_width_not_len():
+    """`_pad` must reach a TERMINAL column count, not a character count —
+    otherwise CJK rows undershoot and later columns shift left."""
+    assert apps_cli._pad("ascii", 10) == "ascii     "        # 5 chars + 5 spaces = visual 10
+    assert apps_cli._pad("당근", 10) == "당근      "         # visual 4 + 6 spaces = visual 10
+    assert apps_cli._pad("당근 / kaptain", 20) == "당근 / kaptain      "  # visual 14 + 6 spaces = visual 20
+    # No truncation on overflow — return the string as-is rather than corrupt it.
+    assert apps_cli._pad("toolong", 3) == "toolong"
+
+
+def test_print_table_aligns_cjk_and_ascii_rows(capsys):
+    """Regression: when a column mixes CJK and ASCII rows, every cell in the
+    next column must start at the same terminal column. Compute row offsets
+    by re-measuring with `_visual_width` instead of trusting `len`."""
+    apps_cli._print_table(
+        ["NAME", "TS"],
+        [
+            ["당근 / chatgpt", "2026-05-04"],
+            ["nalbam / gurumi", "2026-05-04"],
+            ["당근 / sreassistant2", "2026-05-04"],
+        ],
+    )
+    out = capsys.readouterr().out.splitlines()
+    # All non-separator rows must share the same offset of the second column.
+    data_lines = [out[0], out[2], out[3], out[4]]  # header + 3 data rows
+    offsets = [apps_cli._visual_width(line.split("2026-05-04")[0]) for line in data_lines[1:]]
+    # Header offset is `_visual_width("NAME") + padding + sep`. We just need
+    # the data offsets to all match each other.
+    assert len(set(offsets)) == 1, f"misaligned offsets: {offsets}"
+
+
+def test_resolve_name_priority():
+    """display_name > team_name+bot > team_name > team_id > -."""
+    f = apps_cli._resolve_name
+    assert f(None) == "-"
+    assert f({}) == "-"
+    assert f({"team_id": "T1"}) == "T1"
+    assert f({"team_id": "T1", "team_name": "Acme"}) == "Acme"
+    assert f({"team_id": "T1", "team_name": "Acme", "bot_user_name": "bot"}) == "Acme / bot"
+    # display_name wins even if team info is also present
+    assert f({"display_name": "Custom", "team_name": "Acme", "bot_user_name": "bot"}) == "Custom"
+
+
+def test_domain_from_url():
+    f = apps_cli._domain_from_url
+    assert f(None) is None
+    assert f("") is None
+    assert f("https://acme.slack.com/") == "acme"
+    assert f("https://acme.slack.com") == "acme"
+    assert f("https://example.com") is None  # not slack.com
+
+
+def test_cmd_set_calls_auth_test_by_default(monkeypatch):
+    """The post-write verify is on by default — populates team_name etc.
+    so the operator immediately sees what app got configured."""
+
+    @mock_aws
+    def _run():
+        table = _create_ddb_table()
+        ssm = _FakeSSM()
+        monkeypatch.setenv("SIG", "sig-val")
+        monkeypatch.setenv("TOK", "tok-val")
+
+        captured = {}
+
+        def fake_auth_test(token):
+            captured["token"] = token
+            return {"team": "Acme Corp", "user": "my_bot", "url": "https://acme.slack.com/"}
+
+        monkeypatch.setattr(apps_cli, "_call_auth_test", fake_auth_test)
+
+        rc = apps_cli.cmd_set(
+            _ns(app_id="A1", signing_secret_env="SIG", bot_token_env="TOK", no_verify=False),
+            ssm=ssm, table=table, prefix=PREFIX,
+        )
+        assert rc == 0
+        assert captured["token"] == "tok-val"
+        item = table.get_item(Key={"id": "app:A1"}).get("Item")
+        assert item["team_name"] == "Acme Corp"
+        assert item["bot_user_name"] == "my_bot"
+        assert item["team_domain"] == "acme"
+
+    _run()
+
+
+def test_cmd_set_no_verify_skips_auth_test(monkeypatch):
+    @mock_aws
+    def _run():
+        table = _create_ddb_table()
+        ssm = _FakeSSM()
+        monkeypatch.setenv("SIG", "sig-val")
+        monkeypatch.setenv("TOK", "tok-val")
+
+        def boom(_token):
+            raise AssertionError("auth.test must not be called when --no-verify is set")
+
+        monkeypatch.setattr(apps_cli, "_call_auth_test", boom)
+
+        rc = apps_cli.cmd_set(
+            _ns(app_id="A1", signing_secret_env="SIG", bot_token_env="TOK", no_verify=True),
+            ssm=ssm, table=table, prefix=PREFIX,
+        )
+        assert rc == 0
+        # SSM written, but no DDB metadata enrichment.
+        assert table.get_item(Key={"id": "app:A1"}).get("Item") is None
+
+    _run()
+
+
+def test_cmd_set_auth_test_failure_does_not_break_secret_write(monkeypatch):
+    """auth.test failures must be a warning, not a hard error — the SSM
+    writes already succeeded and rolling back would be more confusing."""
+    @mock_aws
+    def _run():
+        table = _create_ddb_table()
+        ssm = _FakeSSM()
+        monkeypatch.setenv("SIG", "sig-val")
+        monkeypatch.setenv("TOK", "tok-val")
+        monkeypatch.setattr(apps_cli, "_call_auth_test", lambda _t: None)  # simulate failure
+
+        rc = apps_cli.cmd_set(
+            _ns(app_id="A1", signing_secret_env="SIG", bot_token_env="TOK", no_verify=False),
+            ssm=ssm, table=table, prefix=PREFIX,
+        )
+        # Secrets still written; DDB metadata not populated.
+        assert rc == 0
+        assert ssm.params[f"{PREFIX}/A1/bot_token"]["Value"] == "tok-val"
+        assert table.get_item(Key={"id": "app:A1"}).get("Item") is None
+
+    _run()
+
+
+def test_cmd_set_signing_only_does_not_call_auth_test(monkeypatch):
+    """When only signing_secret is set (no bot_token to verify), there's
+    nothing to call auth.test with — must skip cleanly."""
+    @mock_aws
+    def _run():
+        table = _create_ddb_table()
+        ssm = _FakeSSM()
+        monkeypatch.setenv("SIG", "sig-val")
+        monkeypatch.delenv("TOK", raising=False)
+
+        def boom(_token):
+            raise AssertionError("auth.test must not run without bot_token")
+
+        monkeypatch.setattr(apps_cli, "_call_auth_test", boom)
+
+        rc = apps_cli.cmd_set(
+            _ns(app_id="A1", signing_secret_env="SIG", bot_token_env="TOK", no_verify=False),
+            ssm=ssm, table=table, prefix=PREFIX,
+        )
+        assert rc == 0
+
+    _run()
+
+
+@mock_aws
+def test_cmd_refresh_populates_team_and_bot_fields(monkeypatch):
+    table = _create_ddb_table()
+    ssm = _FakeSSM()
+    ssm.params[f"{PREFIX}/A1/bot_token"] = {
+        "Value": "tok-val", "Type": "SecureString", "Version": 1,
+        "LastModifiedDate": datetime.now(tz=timezone.utc),
+    }
+    monkeypatch.setattr(
+        apps_cli, "_call_auth_test",
+        lambda _t: {"team": "Acme", "user": "bot", "url": "https://acme.slack.com/"},
+    )
+
+    rc = apps_cli.cmd_refresh(_ns(app_id="A1"), ssm=ssm, table=table, prefix=PREFIX)
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["team_name"] == "Acme"
+    assert item["bot_user_name"] == "bot"
+
+
+@mock_aws
+def test_cmd_refresh_missing_token_returns_error(capsys):
+    """No bot_token in SSM = nothing to call auth.test with."""
+    table = _create_ddb_table()
+    ssm = _FakeSSM()
+    rc = apps_cli.cmd_refresh(_ns(app_id="A-NEW"), ssm=ssm, table=table, prefix=PREFIX)
+    assert rc == 1
+    assert "no bot_token" in capsys.readouterr().err
+
+
+@mock_aws
+def test_cmd_refresh_auth_test_failure_returns_error(monkeypatch):
+    table = _create_ddb_table()
+    ssm = _FakeSSM()
+    ssm.params[f"{PREFIX}/A1/bot_token"] = {
+        "Value": "tok", "Type": "SecureString", "Version": 1,
+        "LastModifiedDate": datetime.now(tz=timezone.utc),
+    }
+    monkeypatch.setattr(apps_cli, "_call_auth_test", lambda _t: None)
+    rc = apps_cli.cmd_refresh(_ns(app_id="A1"), ssm=ssm, table=table, prefix=PREFIX)
+    assert rc == 1
+
+
+@mock_aws
+def test_cmd_name_set_writes_display_name(capsys):
+    table = _create_ddb_table()
+    rc = apps_cli.cmd_name_set(
+        _ns(app_id="A1", name="Production Bot"),
+        ssm=None, table=table, prefix=PREFIX,
+    )
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert item["display_name"] == "Production Bot"
+
+
+@mock_aws
+def test_cmd_name_unset_removes_display_name_keeping_other_fields():
+    table = _create_ddb_table()
+    table.put_item(Item={
+        "id": "app:A1",
+        "display_name": "Old Name",
+        "team_name": "Acme",
+        "team_id": "T1",
+    })
+    rc = apps_cli.cmd_name_unset(_ns(app_id="A1"), ssm=None, table=table, prefix=PREFIX)
+    assert rc == 0
+    item = table.get_item(Key={"id": "app:A1"}).get("Item")
+    assert "display_name" not in item
+    assert item["team_name"] == "Acme"  # untouched
+
+
+@mock_aws
+def test_cmd_list_uses_name_column_with_priority(capsys):
+    """Verify each rung of _resolve_name's priority shows up in the table."""
+    table = _create_ddb_table()
+    ssm = _FakeSSM()
+    now = datetime.now(tz=timezone.utc)
+    # Apps populated to varying degrees:
+    table.put_item(Item={"id": "app:A1", "display_name": "Custom Label", "team_name": "Acme"})
+    table.put_item(Item={"id": "app:A2", "team_name": "BetaCorp", "bot_user_name": "beta_bot"})
+    table.put_item(Item={"id": "app:A3", "team_name": "GammaInc"})
+    table.put_item(Item={"id": "app:A4", "team_id": "T-DELTA"})
+    table.put_item(Item={"id": "app:A5"})  # nothing identifying
+    # All have SSM secrets so they show up in list:
+    for app_id in ("A1", "A2", "A3", "A4", "A5"):
+        for kind in ("signing_secret", "bot_token"):
+            ssm.params[f"{PREFIX}/{app_id}/{kind}"] = {
+                "Value": "v", "Type": "SecureString", "Version": 1, "LastModifiedDate": now,
+            }
+
+    rc = apps_cli.cmd_list(_ns(json=False), ssm=ssm, table=table, prefix=PREFIX)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Custom Label" in out
+    assert "BetaCorp / beta_bot" in out
+    assert "GammaInc" in out
+    assert "T-DELTA" in out
+    # A5 has no identifying info → "-" (column should still render)
+    assert "A5" in out
+
+
+@mock_aws
+def test_cmd_list_json_uses_name_field(capsys):
+    table = _create_ddb_table()
+    ssm = _FakeSSM()
+    table.put_item(Item={"id": "app:A1", "display_name": "Custom", "team_name": "Acme"})
+    ssm.params[f"{PREFIX}/A1/signing_secret"] = {
+        "Value": "s", "Version": 1, "LastModifiedDate": datetime.now(tz=timezone.utc),
+    }
+    ssm.params[f"{PREFIX}/A1/bot_token"] = {
+        "Value": "t", "Version": 1, "LastModifiedDate": datetime.now(tz=timezone.utc),
+    }
+    rc = apps_cli.cmd_list(_ns(json=True), ssm=ssm, table=table, prefix=PREFIX)
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed[0]["app_id"] == "A1"
+    assert parsed[0]["name"] == "Custom"
+
+
+@mock_aws
+def test_cmd_get_shows_extended_metadata(capsys):
+    table = _create_ddb_table()
+    ssm = _FakeSSM()
+    table.put_item(Item={
+        "id": "app:A1",
+        "team_id": "T1",
+        "team_name": "Acme Corp",
+        "bot_user_name": "my_bot",
+        "team_domain": "acme",
+        "display_name": "Production",
+    })
+    rc = apps_cli.cmd_get(_ns(app_id="A1", json=False), ssm=ssm, table=table, prefix=PREFIX)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Acme Corp" in out
+    assert "my_bot" in out
+    assert "acme" in out
+    assert "Production" in out
 
 
 @mock_aws

@@ -48,6 +48,13 @@ python scripts/apps.py persona set A0123ABC --from-file persona.txt   # multi-li
 python scripts/apps.py persona set A0123ABC ""                   # explicit no-persona (overrides global)
 python scripts/apps.py persona unset A0123ABC                    # remove override → back to global
 
+# Make `apps list` recognizable: populate team/bot fields via Slack auth.test
+python scripts/apps.py refresh A0123ABC                          # auth.test → team_name, bot_user_name, team_domain
+python scripts/apps.py name set A0123ABC "Production Bot - Acme" # operator-set label, takes precedence
+python scripts/apps.py name unset A0123ABC                       # back to auto-populated team/bot
+# `apps set` already runs auth.test by default after writing the bot_token;
+# pass `--no-verify` to skip when offline / Slack unreachable.
+
 # Or directly via aws-cli (no masking, no confirmation):
 aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/signing_secret \
     --type SecureString --value "$SLACK_SIGNING_SECRET"
@@ -138,7 +145,7 @@ When credentials are missing, the request returns HTTP 200 with a structured `re
 
 `src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so a blank-app code path can't pollute the registry.
 
-`scripts/apps.py` is the operator CLI for both stores — `list` / `get` / `set` / `delete` for secrets + metadata, plus `acl get` / `acl set` / `acl unset` for per-app ACL overrides. It uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` / `aws dynamodb update-item` so secret rotation, partial updates, ACL overrides, and orphan detection stay consistent.
+`scripts/apps.py` is the operator CLI — `list` / `get` / `set` / `delete` for secrets + metadata, `acl` and `persona` groups for per-app overrides, and `refresh` / `name` for `apps list` readability. `set` calls Slack `auth.test` after writing the bot_token (skip with `--no-verify`) so team/bot identification fields populate immediately. Operator-set `display_name` (via `apps name set`) takes precedence over the auto-populated `team_name / bot_user_name` shown in `apps list`. The CLI uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` / `aws dynamodb update-item` so secret rotation, partial updates, identification, ACL overrides, and orphan detection stay consistent.
 
 ### Per-app overrides (ACL + persona)
 

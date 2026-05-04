@@ -8,6 +8,21 @@ TTL only acts on items that explicitly carry the configured attribute,
 so permanent rows coexist with TTL'd `dedup:` and `ctx:` rows in the
 same table.
 
+App identification fields
+=========================
+The CLI populates these to make `apps list` readable at a glance — none
+of them affect runtime behavior:
+
+  - `team_name`      — Slack workspace name (from `auth.test`)
+  - `bot_user_name`  — bot's user handle in that workspace (from `auth.test`)
+  - `team_domain`    — workspace subdomain, e.g. "acme" (from `auth.test`)
+  - `display_name`   — operator-set human label, takes precedence over
+                       the auto-populated team_name/bot_user_name
+
+`auth.test` runs from the operator's CLI (`apps refresh` or, by default,
+on every `apps set`), never from the Lambda runtime — the worker stays
+focused on processing events.
+
 Per-app overrides
 =================
 Three optional attributes on the row override the matching deployment-wide
@@ -192,3 +207,68 @@ class AppMetadataStore:
             )
         except ClientError as exc:
             logger.warning("app metadata unset_persona failed for %s: %s", app_id, exc)
+
+    def update_app_info(
+        self,
+        app_id: str,
+        *,
+        team_name: str | None = None,
+        bot_user_name: str | None = None,
+        team_domain: str | None = None,
+    ) -> None:
+        """Write Slack app identification fields (typically from `auth.test`).
+
+        Each kwarg is optional — pass only what you have. Values overwrite
+        any existing value (workspaces and bot user names can change, so we
+        don't use `if_not_exists`).
+        """
+        if not app_id:
+            raise ValueError("app_id is required")
+        set_clauses: list[str] = []
+        attr_names: dict[str, str] = {}
+        attr_values: dict[str, Any] = {}
+        if team_name is not None:
+            set_clauses.append("#tn = :tn")
+            attr_names["#tn"] = "team_name"
+            attr_values[":tn"] = team_name
+        if bot_user_name is not None:
+            set_clauses.append("#bu = :bu")
+            attr_names["#bu"] = "bot_user_name"
+            attr_values[":bu"] = bot_user_name
+        if team_domain is not None:
+            set_clauses.append("#td = :td")
+            attr_names["#td"] = "team_domain"
+            attr_values[":td"] = team_domain
+        if not set_clauses:
+            return
+        self._get_table().update_item(
+            Key={"id": f"app:{app_id}"},
+            UpdateExpression=f"SET {', '.join(set_clauses)}",
+            ExpressionAttributeNames=attr_names,
+            ExpressionAttributeValues=attr_values,
+        )
+
+    def set_display_name(self, app_id: str, name: str) -> None:
+        """Operator-supplied human label for the app, takes precedence over
+        the auto-populated team_name/bot_user_name in `apps list` output."""
+        if not app_id:
+            raise ValueError("app_id is required")
+        if not isinstance(name, str):
+            raise TypeError(f"display name must be str, got {type(name).__name__}")
+        self._get_table().update_item(
+            Key={"id": f"app:{app_id}"},
+            UpdateExpression="SET display_name = :v",
+            ExpressionAttributeValues={":v": name},
+        )
+
+    def unset_display_name(self, app_id: str) -> None:
+        """Remove the operator-set display name; auto-populated fields fill in."""
+        if not app_id:
+            raise ValueError("app_id is required")
+        try:
+            self._get_table().update_item(
+                Key={"id": f"app:{app_id}"},
+                UpdateExpression="REMOVE display_name",
+            )
+        except ClientError as exc:
+            logger.warning("app metadata unset_display_name failed for %s: %s", app_id, exc)

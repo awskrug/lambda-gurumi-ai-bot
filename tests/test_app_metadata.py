@@ -432,3 +432,97 @@ def test_record_returned_row_includes_existing_persona():
     assert row is not None
     assert row[PERSONA_MESSAGE_ATTR] == "친근한 어시스턴트"
     assert row["team_id"] == "T1"
+
+
+# --------------------------------------------------------------------------- #
+# update_app_info / set_display_name / unset_display_name — `apps list`
+# identification fields, populated by the CLI.
+# --------------------------------------------------------------------------- #
+
+
+@mock_aws
+def test_update_app_info_writes_all_fields():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.update_app_info(
+        "A1", team_name="Acme Corp", bot_user_name="my_bot", team_domain="acme",
+    )
+    item = store.get("A1")
+    assert item["team_name"] == "Acme Corp"
+    assert item["bot_user_name"] == "my_bot"
+    assert item["team_domain"] == "acme"
+
+
+@mock_aws
+def test_update_app_info_subset_leaves_others_alone():
+    """Passing only some fields updates those only — caller can refresh
+    one field without clobbering the others."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.update_app_info("A1", team_name="Original", bot_user_name="bot1", team_domain="orig")
+    store.update_app_info("A1", team_name="Renamed Corp")  # only team_name
+    item = store.get("A1")
+    assert item["team_name"] == "Renamed Corp"
+    assert item["bot_user_name"] == "bot1"
+    assert item["team_domain"] == "orig"
+
+
+@mock_aws
+def test_update_app_info_empty_call_is_noop():
+    """All kwargs None → don't touch DynamoDB at all (avoids spurious
+    UpdateItem calls when caller has nothing to write)."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.update_app_info("A1")
+    assert store.get("A1") is None  # no row created
+
+
+@mock_aws
+def test_update_app_info_creates_row_when_metadata_absent():
+    """The CLI calls this BEFORE the bot has ever processed an event for
+    a fresh app, so update_item must create the row from scratch."""
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.update_app_info("A-NEW", team_name="Acme", bot_user_name="bot")
+    item = store.get("A-NEW")
+    assert item is not None
+    assert item["team_name"] == "Acme"
+    assert "first_seen_at" not in item
+
+
+@mock_aws
+def test_update_app_info_rejects_empty_app_id():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    with pytest.raises(ValueError, match="app_id is required"):
+        store.update_app_info("", team_name="X")
+
+
+@mock_aws
+def test_set_display_name_writes_and_can_be_unset():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.set_display_name("A1", "Production Bot")
+    assert store.get("A1")["display_name"] == "Production Bot"
+
+    store.unset_display_name("A1")
+    item = store.get("A1")
+    assert "display_name" not in item
+
+
+@mock_aws
+def test_set_display_name_rejects_non_string():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    with pytest.raises(TypeError, match="display name must be str"):
+        store.set_display_name("A1", 42)
+
+
+@mock_aws
+def test_unset_display_name_on_missing_attr_is_noop():
+    _create_table()
+    store = AppMetadataStore(table_name=TABLE, region=REGION)
+    store.record("A1")
+    store.unset_display_name("A1")  # never was set
+    item = store.get("A1")
+    assert "display_name" not in item
