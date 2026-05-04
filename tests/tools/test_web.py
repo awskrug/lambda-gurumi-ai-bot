@@ -375,7 +375,6 @@ def test_fetch_webpage_jina_body_over_cap_falls_back_to_raw(monkeypatch):
     _public_dns(monkeypatch)
     settings = Settings(
         slack_bot_token="xoxb-test",
-        slack_signing_secret="sig",
         llm_provider="openai",
         llm_model="gpt-4o-mini",
         image_provider="openai",

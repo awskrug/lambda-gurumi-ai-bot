@@ -24,9 +24,16 @@ provider:
     # via os.getenv("AWS_REGION", ...). Do not add an AWS_REGION_NAME alias
     # here; no code reads it, so it was removed as dead config.
     DYNAMODB_TABLE_NAME: ${self:service}-${sls:stage}
-    # --- secrets: Slack ---
-    SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
-    SLACK_SIGNING_SECRET: ${env:SLACK_SIGNING_SECRET}
+    # --- multi-tenant Slack credentials (per-app, fetched at request time) ---
+    # Each Slack app's signing_secret + bot_token live as SecureString
+    # parameters in SSM at {SSM_PARAMS_PREFIX}/{api_app_id}/signing_secret
+    # and {SSM_PARAMS_PREFIX}/{api_app_id}/bot_token. Operator provisions
+    # these via `aws ssm put-parameter` (or Terraform / CDK) before the
+    # corresponding Slack app sends events. NO global SLACK_BOT_TOKEN /
+    # SLACK_SIGNING_SECRET env vars — the lookup is per request, keyed on
+    # the api_app_id parsed from the inbound payload.
+    SSM_PARAMS_PREFIX: ${env:SSM_PARAMS_PREFIX, '/gurumi-bot/apps'}
+    SSM_CACHE_TTL_SECONDS: ${env:SSM_CACHE_TTL_SECONDS, '300'}
     # --- secrets: LLM provider keys ---
     OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
     XAI_API_KEY: ${env:XAI_API_KEY, ''}
@@ -92,6 +99,19 @@ provider:
             - lambda:InvokeFunction
           Resource:
             - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${self:service}-${sls:stage}-mention"
+        # Per-app Slack credentials in SSM Parameter Store. Resource arn
+        # uses the parameter NAME path (with leading slash). The wildcard
+        # matches both `/gurumi-bot/apps/{app_id}/signing_secret` and
+        # `/.../bot_token`. KMS perms are not needed when the parameters
+        # use the default `alias/aws/ssm` key — SSM handles decryption
+        # transparently. If the operator switches to a CMK they must add
+        # an explicit `kms:Decrypt` allow on that key here.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:GetParameters
+          Resource:
+            - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/gurumi-bot/apps/*"
 
 plugins:
   - serverless-python-requirements

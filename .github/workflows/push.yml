@@ -49,9 +49,13 @@ jobs:
 
       - name: Deploy to AWS Lambda 🚀
         env:
-          # --- secrets: Slack ---
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+          # --- multi-tenant Slack credentials live in SSM Parameter Store ---
+          # Per-app `signing_secret` + `bot_token` are provisioned ahead of
+          # time at {SSM_PARAMS_PREFIX}/{api_app_id}/... and resolved per
+          # request inside the Lambda. NO global SLACK_BOT_TOKEN /
+          # SLACK_SIGNING_SECRET CI secrets are needed.
+          SSM_PARAMS_PREFIX: ${{ vars.SSM_PARAMS_PREFIX }}
+          SSM_CACHE_TTL_SECONDS: ${{ vars.SSM_CACHE_TTL_SECONDS }}
           # --- secrets: LLM provider keys ---
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}

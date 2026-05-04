@@ -43,10 +43,28 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 
 ## 환경 변수
 
+> **Slack 시크릿은 환경변수가 아니라 SSM Parameter Store에 둔다.** 봇은
+> 멀티 테넌트로 동작하며 요청마다 `api_app_id` 로 시크릿을 조회합니다.
+> 새 Slack 앱을 등록할 때마다 두 개의 SecureString 파라미터를 미리 만들어
+> 둬야 합니다 (앱이 이벤트를 보내기 전에):
+>
+> ```bash
+> aws ssm put-parameter --type SecureString \
+>   --name /gurumi-bot/apps/A0123ABC/signing_secret --value "$SIGNING"
+> aws ssm put-parameter --type SecureString \
+>   --name /gurumi-bot/apps/A0123ABC/bot_token --value "$BOT_TOKEN"
+> ```
+>
+> 미설정 상태로 이벤트가 들어오면 구조화 로그에 `request.unknown_app` 으로
+> 기록되고 HTTP 200 으로 응답해 Slack 재시도 폭주를 방지합니다.
+> `SLACK_BOT_TOKEN` env var 는 `localtest.py` 가 Slack 도구를 실제로 호출할
+> 때만 쓰이는 *로컬 전용 편의 변수* 입니다.
+
 | 변수 | 필수 | 기본값 | 설명 |
 |------|------|--------|------|
-| `SLACK_BOT_TOKEN` | ✅ | — | `xoxb-…` |
-| `SLACK_SIGNING_SECRET` | ✅ | — | Slack Signing Secret |
+| `SSM_PARAMS_PREFIX` | | `/gurumi-bot/apps` | 멀티테넌트 시크릿 SSM 경로 prefix. IAM resource ARN(`serverless.yml`)과 매치 필요 |
+| `SSM_CACHE_TTL_SECONDS` | | `300` | 시크릿 in-process 캐시 TTL (≥10). 로테이션은 이 시간 내 반영 |
+| `SLACK_BOT_TOKEN` | (localtest only) | — | `localtest.py` 에서만 사용. Lambda 런타임은 SSM 만 본다 |
 | `OPENAI_API_KEY` | OpenAI 사용 시 | — | OpenAI API 키 |
 | `XAI_API_KEY` | xAI 사용 시 | — | xAI (Grok) API 키 — https://console.x.ai |
 | `TAVILY_API_KEY` | | — | 설정 시 Tavily 웹 검색 활성화 |
@@ -129,8 +147,8 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 
 ### 2. GitHub 저장소 설정
 
-- **Secrets**: `AWS_ACCOUNT_ID`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택)
-- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `JINA_READER_BASE`
+- **Secrets**: `AWS_ACCOUNT_ID`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택). Slack 시크릿은 SSM Parameter Store 에 별도 등록 — CI 시크릿 아님.
+- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `JINA_READER_BASE`, `SSM_PARAMS_PREFIX`, `SSM_CACHE_TTL_SECONDS`
 
 ### 3. 배포
 

@@ -10,7 +10,6 @@ from src.tools.registry import ToolContext
 def _settings(**overrides) -> Settings:
     base = {
         "slack_bot_token": "xoxb-test",
-        "slack_signing_secret": "sig",
         "llm_provider": "openai",
         "llm_model": "gpt-4o-mini",
         "image_provider": "openai",

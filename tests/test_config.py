@@ -23,6 +23,7 @@ def _clear_env(monkeypatch):
         "MAX_HISTORY_CHARS", "BOT_CURSOR", "SYSTEM_MESSAGE", "PERSONA_MESSAGE", "TAVILY_API_KEY", "XAI_API_KEY", "LOG_LEVEL",
         "DEFAULT_TIMEZONE", "MAX_DOC_CHARS", "MAX_DOC_PAGES", "MAX_DOC_BYTES",
         "MAX_WEB_CHARS", "MAX_WEB_BYTES", "MAX_WEB_LINKS", "JINA_READER_BASE",
+        "SSM_PARAMS_PREFIX", "SSM_CACHE_TTL_SECONDS",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -89,19 +90,43 @@ def test_allowed_user_ids_parsed_from_env(monkeypatch, reload_config):
     assert s.allowed_user_message == "허용된 유저만 응답합니다."
 
 
-def test_require_slack_credentials_raises_when_missing(monkeypatch, reload_config):
+def test_ssm_params_prefix_default(monkeypatch, reload_config):
     _clear_env(monkeypatch)
+    monkeypatch.delenv("SSM_PARAMS_PREFIX", raising=False)
     s = reload_config()
-    with pytest.raises(RuntimeError):
-        s.require_slack_credentials()
+    assert s.ssm_params_prefix == "/gurumi-bot/apps"
 
 
-def test_require_slack_credentials_ok(monkeypatch, reload_config):
+def test_ssm_params_prefix_override(monkeypatch, reload_config):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-x")
-    monkeypatch.setenv("SLACK_SIGNING_SECRET", "secret")
+    monkeypatch.setenv("SSM_PARAMS_PREFIX", "/myorg/slack")
     s = reload_config()
-    s.require_slack_credentials()  # no raise
+    assert s.ssm_params_prefix == "/myorg/slack"
+
+
+def test_ssm_params_prefix_blank_falls_back_to_default(monkeypatch, reload_config):
+    """Empty env var must not be propagated as the prefix — that would
+    silently anchor SSM lookups at the root and produce confusing errors."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SSM_PARAMS_PREFIX", "   ")
+    s = reload_config()
+    assert s.ssm_params_prefix == "/gurumi-bot/apps"
+
+
+def test_ssm_cache_ttl_default(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("SSM_CACHE_TTL_SECONDS", raising=False)
+    s = reload_config()
+    assert s.ssm_cache_ttl_seconds == 300
+
+
+def test_ssm_cache_ttl_clamped_to_minimum(monkeypatch, reload_config):
+    """A pathologically small TTL would burn SSM API quota — clamp to
+    the configured minimum (10s)."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("SSM_CACHE_TTL_SECONDS", "1")
+    s = reload_config()
+    assert s.ssm_cache_ttl_seconds == 10
 
 
 def test_persona_and_system_messages_default_none(monkeypatch, reload_config):

@@ -84,8 +84,13 @@ def _https_url_env(name: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
+    # NOTE: `slack_bot_token` is kept ONLY for `localtest.py`'s convenience —
+    # it lets the local CLI build a real WebClient when an operator wants to
+    # exercise Slack-reading tools. The Lambda runtime path does NOT use this
+    # field; per-app bot tokens are looked up from SSM Parameter Store via
+    # `src.credentials.CredentialsStore` keyed on `api_app_id`. Leaving this
+    # field empty in production is correct.
     slack_bot_token: str
-    slack_signing_secret: str
     llm_provider: str
     llm_model: str
     image_provider: str
@@ -94,6 +99,8 @@ class Settings:
     response_language: str
     dynamodb_table_name: str
     aws_region: str
+    ssm_params_prefix: str = "/gurumi-bot/apps"
+    ssm_cache_ttl_seconds: int = 300
     allowed_channel_ids: list[str] = field(default_factory=list)
     allowed_channel_message: str = ""
     allowed_user_ids: list[str] = field(default_factory=list)
@@ -132,7 +139,6 @@ class Settings:
         xai_key = os.getenv("XAI_API_KEY", "").strip() or None
         return cls(
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN", "").strip(),
-            slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET", "").strip(),
             llm_provider=llm_provider,
             llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini").strip(),
             image_provider=image_provider,
@@ -141,6 +147,8 @@ class Settings:
             response_language=response_language,
             dynamodb_table_name=os.getenv("DYNAMODB_TABLE_NAME", "lambda-gurumi-bot-dev").strip(),
             aws_region=os.getenv("AWS_REGION", "us-east-1").strip(),
+            ssm_params_prefix=os.getenv("SSM_PARAMS_PREFIX", "/gurumi-bot/apps").strip() or "/gurumi-bot/apps",
+            ssm_cache_ttl_seconds=_int_env("SSM_CACHE_TTL_SECONDS", 300, minimum=10),
             allowed_channel_ids=_list_env("ALLOWED_CHANNEL_IDS"),
             allowed_channel_message=os.getenv("ALLOWED_CHANNEL_MESSAGE", "구루미에게 질문은 {} 채널을 이용해 주세요~").strip(),
             allowed_user_ids=_list_env("ALLOWED_USER_IDS"),
@@ -164,8 +172,3 @@ class Settings:
             max_web_links=_int_env("MAX_WEB_LINKS", 20, minimum=0),
             jina_reader_base=_https_url_env("JINA_READER_BASE", "https://r.jina.ai"),
         )
-
-    def require_slack_credentials(self) -> None:
-        """Lazy validation — call from request handlers, not at import time."""
-        if not self.slack_bot_token or not self.slack_signing_secret:
-            raise RuntimeError("SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET are required")

@@ -1,32 +1,43 @@
 """AWS Lambda entrypoint for the Slack mention bot.
 
-Two execution paths share this handler via a `_worker` flag in the event
-payload:
+Multi-tenant routing
+====================
 
-  Receiver path (Slack → API Gateway → Lambda):
-    1. lambda_handler short-circuits Slack retries (X-Slack-Retry-Num header).
-    2. Bolt verifies the Slack signature and dispatches to app_mention /
-       message handlers.
-    3. Handler acks, then fires a fire-and-forget `lambda:Invoke` against
-       this same function with `InvocationType=Event` and `_worker=True`.
-    4. HTTP response returns to API Gateway within a few hundred ms, so
-       the 29s API Gateway integration timeout is irrelevant — even a
-       10-minute agent run never blocks the HTTP response.
+This Lambda serves multiple distinct Slack apps. Each app's secrets
+(`signing_secret` + `bot_token`) live in SSM Parameter Store under
+`{SSM_PARAMS_PREFIX}/{api_app_id}/...` and are looked up per request via
+`CredentialsStore` (with a 5-min TTL cache to absorb the per-request SSM
+cost on warm containers). DynamoDB row `app:{api_app_id}` records when
+each app was first seen and last seen — populated lazily on the first
+event we successfully process from that app, so a registry of installed
+apps materializes automatically with no separate registration flow.
 
-  Worker path (Lambda async self-invoke):
-    1. `_worker=True` routes straight into _process_worker.
-    2. Deduplicates on client_msg_id via DynamoDB conditional put. This
-       same dedup absorbs both Slack's own retry burst (on the receiver
-       side) AND Lambda async's built-in 2x retry on worker failure — all
-       paths converge on the same dedup:{msg_id} key.
-    3. Checks channel allowlist + per-user throttle.
-    4. Sets typing status + sends a placeholder message.
-    5. Loads thread history from DynamoDB and runs the native-tool-calling
-       agent, then streams/posts the reply back via Slack Web API.
-    6. Persists updated conversation back to DynamoDB.
+Receiver path (Slack → API Gateway → Lambda):
+  1. lambda_handler short-circuits Slack retries (X-Slack-Retry-Num).
+  2. Parses the request body to extract `api_app_id`. If the body is a
+     URL-verification handshake (no api_app_id), echo the challenge
+     directly without signature verification — the body carries no
+     actionable payload, so allowing this without a known signing_secret
+     is the cleanest way to break the chicken-and-egg.
+  3. Looks up the app's secrets in SSM. Missing → structured warn log
+     + HTTP 200 (so Slack doesn't retry an unrecoverable misconfig).
+  4. Dispatches to a per-app cached Bolt App that verifies the signature
+     with that app's signing_secret and routes to the event handlers.
+  5. Each handler ack()s, then fires a fire-and-forget self-invoke with
+     `_worker=True` plus `api_app_id` so the worker can fetch its own
+     bot token from SSM (we don't ship secrets through the async invoke
+     payload — Lambda invoke payloads can show up in CloudTrail).
+
+Worker path (Lambda async self-invoke):
+  1. `_worker=True` skips Bolt; we re-fetch `bot_token` from SSM keyed
+     on the carried `api_app_id` and run the full agent.
+  2. Same dedup row absorbs Slack's retry burst on the receiver side
+     AND Lambda async's built-in 2x retry on worker failure — all paths
+     converge on the same `dedup:{client_msg_id}` key.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -38,7 +49,9 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_sdk import WebClient
 
 from src.agent import SlackMentionAgent
+from src.app_metadata import AppMetadataStore
 from src.config import Settings
+from src.credentials import CredentialsStore
 from src.dedup import ConversationStore, DedupStore
 from src.llms import get_llm
 from src.logging_utils import get_logger, log_event, set_request_id
@@ -60,7 +73,14 @@ logger = get_logger("app")
 _llm = None
 _dedup: DedupStore | None = None
 _conversations: ConversationStore | None = None
-_bolt_app: App | None = None
+_credentials: CredentialsStore | None = None
+_app_metadata: AppMetadataStore | None = None
+# api_app_id -> ((signing_secret, bot_token), App). The secret tuple is
+# the cache *value* not the *key* so we can detect rotation: when
+# CredentialsStore returns a different tuple after its TTL refreshes, we
+# rebuild the App so signature verification uses the new secret without
+# requiring a container restart.
+_bolt_apps: dict[str, tuple[tuple[str, str], App]] = {}
 _lambda_client = None
 
 
@@ -122,6 +142,27 @@ def _get_conversations() -> ConversationStore:
     return _conversations
 
 
+def _get_credentials() -> CredentialsStore:
+    global _credentials
+    if _credentials is None:
+        _credentials = CredentialsStore(
+            region=settings.aws_region,
+            prefix=settings.ssm_params_prefix,
+            ttl_seconds=settings.ssm_cache_ttl_seconds,
+        )
+    return _credentials
+
+
+def _get_app_metadata() -> AppMetadataStore:
+    global _app_metadata
+    if _app_metadata is None:
+        _app_metadata = AppMetadataStore(
+            table_name=settings.dynamodb_table_name,
+            region=settings.aws_region,
+        )
+    return _app_metadata
+
+
 def _get_lambda_client():
     global _lambda_client
     if _lambda_client is None:
@@ -129,21 +170,21 @@ def _get_lambda_client():
     return _lambda_client
 
 
-def _enqueue_worker(event: dict, is_dm: bool) -> None:
-    """Fire-and-forget async self-invoke.
+def _enqueue_worker(event: dict, is_dm: bool, api_app_id: str) -> None:
+    """Fire-and-forget async self-invoke of the worker path.
 
-    Keeps the receiver-path handler short so the HTTP response to API
-    Gateway returns within a few hundred ms, independent of how long the
-    agent takes. When `AWS_LAMBDA_FUNCTION_NAME` isn't set (local dev /
-    tests), falls through to inline execution so the code path is still
-    exercisable outside Lambda.
+    `api_app_id` is carried through the payload so the worker can fetch
+    its own bot token from SSM. We deliberately do NOT pass tokens
+    through the payload — Lambda invoke payloads can be visible in
+    CloudTrail and downstream tooling, so secrets stay in SSM.
     """
     function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    inline_payload = {"slack_event": event, "is_dm": is_dm, "api_app_id": api_app_id}
     if not function_name:
-        _process_worker({"slack_event": event, "is_dm": is_dm})
+        _process_worker(inline_payload)
         return
     payload = json.dumps(
-        {"_worker": True, "slack_event": event, "is_dm": is_dm}, ensure_ascii=False
+        {"_worker": True, **inline_payload}, ensure_ascii=False
     ).encode("utf-8")
     try:
         _get_lambda_client().invoke(
@@ -152,27 +193,40 @@ def _enqueue_worker(event: dict, is_dm: bool) -> None:
             Payload=payload,
         )
     except Exception:
-        # If async invoke fails (IAM, throttling, network), we don't want
-        # to drop the user's message. Fall back to inline execution inside
-        # the receiver; worst case the receiver's Lambda timeout kicks in,
-        # but that's what we had before this refactor anyway.
+        # If async invoke fails (IAM, throttling, network), fall back to
+        # inline execution so the user's message isn't dropped — same
+        # behavior as before the multi-tenant refactor.
         logger.exception("async worker invoke failed, running inline")
-        _process_worker({"slack_event": event, "is_dm": is_dm})
+        _process_worker(inline_payload)
 
 
 def _process_worker(payload: dict) -> None:
     """Worker path: full agent run.
 
-    Runs either as a real async Lambda invocation (payload carried across)
-    or inline during local/test execution. We build a fresh `WebClient`
-    from the bot token because the async invocation doesn't carry Bolt's
-    injected client — the receiver's Bolt context dies as soon as the
-    receiver returns HTTP 200.
+    Re-fetches the bot token from SSM keyed on `api_app_id` carried in
+    the payload. Bolt's injected WebClient is gone by this point — it
+    lived in the receiver process — so we mint a fresh one.
     """
     slack_event = payload.get("slack_event") or {}
     is_dm = bool(payload.get("is_dm"))
+    api_app_id = payload.get("api_app_id") or ""
     channel = slack_event.get("channel")
-    client = WebClient(token=settings.slack_bot_token)
+
+    if not api_app_id:
+        log_event(logger, "worker.no_app_id", channel=channel)
+        return
+    creds = _get_credentials().get(api_app_id)
+    if creds is None:
+        log_event(
+            logger,
+            "worker.unknown_app",
+            api_app_id=api_app_id,
+            channel=channel,
+            note=f"missing SSM SecureString at {settings.ssm_params_prefix}/{api_app_id}/{{signing_secret,bot_token}}",
+        )
+        return
+
+    client = WebClient(token=creds.bot_token)
 
     def _say(text: str, thread_ts: str | None = None) -> None:
         kwargs: dict = {"channel": channel, "text": text}
@@ -180,42 +234,53 @@ def _process_worker(payload: dict) -> None:
             kwargs["thread_ts"] = thread_ts
         client.chat_postMessage(**kwargs)
 
-    _process(slack_event, client, _say, is_dm=is_dm)
+    _process(slack_event, client, _say, is_dm=is_dm, api_app_id=api_app_id)
 
 
-def _get_bolt_app() -> App:
-    global _bolt_app
-    if _bolt_app is not None:
-        return _bolt_app
-    settings.require_slack_credentials()
+def _get_bolt_app(api_app_id: str, signing_secret: str, bot_token: str) -> App:
+    """Per-app Bolt App, cached on warm containers.
+
+    Cache key is `api_app_id`; the (signing_secret, bot_token) tuple is
+    stored alongside so we can detect rotation: when CredentialsStore
+    returns a different tuple after its TTL refreshes, we rebuild the App
+    so signature verification uses the new secret.
+    """
+    cached = _bolt_apps.get(api_app_id)
+    if cached and cached[0] == (signing_secret, bot_token):
+        return cached[1]
     app = App(
-        token=settings.slack_bot_token,
-        signing_secret=settings.slack_signing_secret,
+        token=bot_token,
+        signing_secret=signing_secret,
         process_before_response=True,
+        # Skip Bolt's auth.test on init — multi-tenant containers would
+        # otherwise pay one Slack API roundtrip per app per cold container.
+        # Bolt still verifies signatures on each request, which is what we
+        # actually need from it here.
+        token_verification_enabled=False,
     )
 
     @app.event("app_mention")
-    def _on_mention(event, client, say, ack):  # noqa: ANN001
+    def _on_mention(event, body, ack):  # noqa: ANN001
         ack()
-        _enqueue_worker(event, is_dm=False)
+        _enqueue_worker(event, is_dm=False, api_app_id=(body or {}).get("api_app_id", ""))
 
     @app.event("message")
-    def _on_message(event, client, say, ack):  # noqa: ANN001
+    def _on_message(event, body, ack):  # noqa: ANN001
         ack()
         if event.get("channel_type") != "im":
             return
         if event.get("bot_id") or event.get("subtype"):
             return
-        _enqueue_worker(event, is_dm=True)
+        _enqueue_worker(event, is_dm=True, api_app_id=(body or {}).get("api_app_id", ""))
 
-    _bolt_app = app
-    return _bolt_app
+    _bolt_apps[api_app_id] = ((signing_secret, bot_token), app)
+    return app
 
 
 MENTION_RE = re.compile(r"<@[^>]+>")
 
 
-def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
+def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> None:  # noqa: ANN001
     set_request_id(str(uuid.uuid4()))
     labels = _labels()
     text = MENTION_RE.sub("", event.get("text", "")).strip()
@@ -238,6 +303,15 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
             return
     except Exception as exc:  # noqa: BLE001
         logger.warning("dedup unavailable, proceeding without it: %s", exc)
+
+    # Record this app's metadata only after dedup passes — Slack retries
+    # and our own re-deliveries shouldn't bump last_seen_at, and known-bad
+    # messages (empty text) shouldn't appear in the registry as activity.
+    if api_app_id:
+        try:
+            _get_app_metadata().record(api_app_id, team_id=event.get("team"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("app metadata record failed: %s", exc)
 
     # Channel allowlist applies to public/private channels only. DMs use
     # per-channel IDs (D-prefix) that aren't normally enrolled in the
@@ -355,7 +429,7 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     )
 
     user_name = user_name_cache.get(client, user) if user else ""
-    log_event(logger, "agent.start", user=user_name or user, channel=channel, is_dm=is_dm)
+    log_event(logger, "agent.start", user=user_name or user, channel=channel, is_dm=is_dm, api_app_id=api_app_id)
 
     try:
         result = agent.run(text)
@@ -416,6 +490,63 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     )
 
 
+def _parse_request_body(event: dict) -> dict | None:
+    """Decode an API Gateway proxy event body into a JSON dict.
+
+    Returns None for non-JSON bodies (e.g. legacy URL-encoded slash
+    commands — not used by this bot). Handles base64 transport that API
+    Gateway uses for binary content types.
+    """
+    body = event.get("body") or ""
+    if not body:
+        return None
+    if event.get("isBase64Encoded"):
+        try:
+            body = base64.b64decode(body).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _route_request(event: dict, context) -> dict:  # noqa: ANN001
+    """Receiver path entry — identifies the target app and dispatches."""
+    parsed = _parse_request_body(event)
+    if parsed is None:
+        log_event(logger, "request.unparseable_body")
+        return {"statusCode": 400, "body": ""}
+
+    # URL verification: Slack pings the endpoint when an operator registers
+    # Event Subscriptions. The body has a `challenge` to echo back, and
+    # crucially does NOT carry api_app_id — so we have no way to pick the
+    # right signing_secret. Echo the challenge directly; it's a setup-time
+    # ping with no actionable payload, so skipping signature check here
+    # is the cleanest break of the chicken-and-egg.
+    if parsed.get("type") == "url_verification":
+        return {"statusCode": 200, "body": parsed.get("challenge", "")}
+
+    api_app_id = parsed.get("api_app_id")
+    if not api_app_id:
+        log_event(logger, "request.no_app_id", body_type=parsed.get("type"))
+        return {"statusCode": 200, "body": ""}
+
+    creds = _get_credentials().get(api_app_id)
+    if creds is None:
+        log_event(
+            logger,
+            "request.unknown_app",
+            api_app_id=api_app_id,
+            note=f"missing SSM SecureString at {settings.ssm_params_prefix}/{api_app_id}/{{signing_secret,bot_token}}",
+        )
+        return {"statusCode": 200, "body": ""}
+
+    bolt_app = _get_bolt_app(api_app_id, creds.signing_secret, creds.bot_token)
+    return SlackRequestHandler(bolt_app).handle(event, context)
+
+
 def lambda_handler(event, context):  # noqa: ANN001
     # Worker path: a Lambda async self-invoke with `_worker=True` skips
     # Slack signature verification entirely. The only way to land here
@@ -431,4 +562,4 @@ def lambda_handler(event, context):  # noqa: ANN001
     normalized = {k.lower(): v for k, v in headers.items()}
     if normalized.get("x-slack-retry-num"):
         return {"statusCode": 200, "body": ""}
-    return SlackRequestHandler(_get_bolt_app()).handle(event, context)
+    return _route_request(event, context)

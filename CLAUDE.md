@@ -22,10 +22,18 @@ python -m pytest tests/test_agent.py::test_agent_runs_tool_then_returns_text -v
 python -m pytest tests/llms/test_bedrock.py -v                          # LLM provider unit tests
 python -m pytest tests/tools/test_web.py -v                             # fetch_webpage + SSRF guard
 
+# Provision per-Slack-app secrets in SSM Parameter Store BEFORE that app
+# sends events (the Lambda has no global SLACK_BOT_TOKEN — secrets are
+# resolved per request keyed on api_app_id):
+aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/signing_secret \
+    --type SecureString --value "$SLACK_SIGNING_SECRET"
+aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/bot_token \
+    --type SecureString --value "$SLACK_BOT_TOKEN"
+
 # Deploy (requires IAM OIDC role `lambda-gurumi-bot`)
 npm i -g serverless@3
 npm i serverless-python-requirements
-# export SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET / OPENAI_API_KEY / ... first
+# export OPENAI_API_KEY / XAI_API_KEY / ... first
 serverless deploy --stage dev --region us-east-1
 ```
 
@@ -96,20 +104,35 @@ Image generation is family-routed too: Titan/Nova-Canvas use `TEXT_IMAGE` task; 
 
 `_CompositeProvider` wraps two providers when text and image providers differ (e.g., OpenAI text + Bedrock image).
 
+### Multi-tenant credential resolution via SSM Parameter Store
+
+This Lambda serves multiple distinct Slack apps from a single deployment. There is no global `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` env var — secrets are looked up per request from SSM at `{SSM_PARAMS_PREFIX}/{api_app_id}/signing_secret` and `.../bot_token` (both `SecureString`). `src/credentials.py::CredentialsStore` does the GetParameters call with a 5-min TTL in-process cache (negative results cached too, so a misconfigured app's burst can't storm SSM). Rotation is reflected within one TTL window; cached `App` instances in `_bolt_apps` carry the secret tuple alongside so a fresh tuple after refresh triggers a rebuild — otherwise rotation wouldn't take effect until the container died.
+
+The receiver-path body parse is done *before* signature verification — but only to extract `api_app_id` for credential lookup. Signature verification still happens against the resolved signing_secret inside Bolt, so a forged `api_app_id` just resolves to the wrong (or no) secret and gets rejected. `url_verification` events (Slack's setup ping when an operator registers Event Subscriptions) are the one exception: the body has no `api_app_id` so we can't pick a secret, and we echo the `challenge` directly without signature check. The body carries no actionable payload, so this break of the chicken-and-egg is safe.
+
+When credentials are missing, the request returns HTTP 200 with a structured `request.unknown_app` log — Slack would otherwise retry an unrecoverable misconfiguration. Operator must populate Parameter Store before that app's events stop being dropped.
+
+`src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so the legacy / blank-app code path doesn't pollute the registry.
+
 ### Receiver / worker split via Lambda async self-invoke
 
 `lambda_handler` routes one of two ways based on the event shape:
 
-- **Receiver path** (Slack → API Gateway → Lambda): Bolt verifies the Slack signature and dispatches to the `app_mention` / `message` handlers. Each handler `ack()`s, then calls `_enqueue_worker(event, is_dm)` which issues a single `lambda:Invoke` against this same function with `InvocationType=Event` and a `{"_worker": True, ...}` payload, then returns. The receiver path is back to HTTP 200 within a few hundred ms. That's why Lambda timeout (`serverless.yml: timeout: 300`) can be much larger than the API Gateway REST integration limit (29s) — the receiver never runs long enough to care, and the HTTP response is already home before the worker even starts. Fallback: if `AWS_LAMBDA_FUNCTION_NAME` is unset (local harness) or `lambda.invoke` raises, `_enqueue_worker` runs `_process_worker` inline so the message isn't dropped.
-- **Worker path** (Lambda async self-invoke): `lambda_handler` short-circuits on `event["_worker"] is True` and calls `_process_worker`, which rebuilds a `WebClient` from the bot token (Bolt's injected client is gone — the receiver process exited) and calls `_process(...)`. The full agent run — streaming, tool calls, image generation — happens here, with Lambda's 300s budget all to itself.
+- **Receiver path** (Slack → API Gateway → Lambda): `_route_request` parses the body for `api_app_id`, resolves credentials, gets-or-builds a per-app cached Bolt `App` keyed by that `api_app_id`, and hands the request to Bolt's `SlackRequestHandler`. Bolt then verifies the Slack signature with that app's signing_secret and dispatches to the `app_mention` / `message` handlers. Each handler `ack()`s, then calls `_enqueue_worker(event, is_dm, api_app_id)` which issues a single `lambda:Invoke` against this same function with `InvocationType=Event` and a `{"_worker": True, ..., "api_app_id": "..."}` payload, then returns. The receiver path is back to HTTP 200 within a few hundred ms. That's why Lambda timeout (`serverless.yml: timeout: 300`) can be much larger than the API Gateway REST integration limit (29s) — the receiver never runs long enough to care, and the HTTP response is already home before the worker even starts. Fallback: if `AWS_LAMBDA_FUNCTION_NAME` is unset (local harness) or `lambda.invoke` raises, `_enqueue_worker` runs `_process_worker` inline so the message isn't dropped.
+- **Worker path** (Lambda async self-invoke): `lambda_handler` short-circuits on `event["_worker"] is True` and calls `_process_worker`. The worker re-resolves the bot_token from SSM keyed on the carried `api_app_id` (we deliberately do NOT ship tokens through the invoke payload — Lambda invoke payloads can show up in CloudTrail), mints a fresh `WebClient`, and calls `_process(...)`. The full agent run — streaming, tool calls, image generation — happens here, with Lambda's 300s budget all to itself.
 
 ### Slack retry → DynamoDB conditional put dedup
 
 Three converging retry sources all funnel through one key: Slack's own 3-attempt retry schedule on the receiver, AWS Lambda's built-in 2x retry on async worker failure, and any accidental re-dispatch. `lambda_handler` short-circuits when `X-Slack-Retry-Num` header is present (returns 200 OK) so Slack retries never spawn a second worker. Inside the worker, the first line of `_process()` is `DedupStore.reserve(f"dedup:{client_msg_id}")` which does `put_item(ConditionExpression="attribute_not_exists(id)")`. Duplicate key raises `ConditionalCheckFailedException` → False → silent return. This is the only race-safe dedup (get-then-put has a window). TTL 1h via `expire_at`. Lambda async worker retries on the same `_worker` payload also hit the same dedup row, so a transient worker failure that Lambda retries can't produce a second reply.
 
-### Single table, two key prefixes
+### Single table, three key prefixes
 
-`DYNAMODB_TABLE_NAME` stores both dedup reservations (`dedup:{msg_id}`) and thread conversation memory (`ctx:{thread_ts}`). GSI `user-index` (hash `user`, range `expire_at`) backs per-user throttle via `count_user_active(user)`. `ConversationStore.put` trims with `truncate_to_chars(messages, max_chars)` (drop oldest until serialized size fits).
+`DYNAMODB_TABLE_NAME` stores three categories of rows:
+- `dedup:{msg_id}` — one-shot reservation rows with `expire_at` (1h TTL).
+- `ctx:{thread_ts}` — thread conversation memory with `expire_at` (1h TTL).
+- `app:{api_app_id}` — app registry rows **without** `expire_at`. DynamoDB TTL only acts on items that explicitly carry the configured attribute, so permanent rows coexist with TTL'd rows in the same table — adding `expire_at` to an `app:` row by mistake would silently auto-evict the registry.
+
+GSI `user-index` (hash `user`, range `expire_at`) backs per-user throttle via `count_user_active(user)`. `ConversationStore.put` trims with `truncate_to_chars(messages, max_chars)` (drop oldest until serialized size fits).
 
 ### Message splitting is code-fence-aware
 
@@ -121,7 +144,7 @@ Three converging retry sources all funnel through one key: Slack's own 3-attempt
 
 ### Config is lazy, not import-time
 
-`Settings.from_env()` runs at module load but does NOT validate Slack credentials. `Settings.require_slack_credentials()` is called from `_get_bolt_app()` so the first request fails cleanly, but tests and tooling can import `app` without `SLACK_BOT_TOKEN`.
+`Settings.from_env()` runs at module load but does NOT validate Slack credentials — there are no global Slack secrets to validate in the multi-tenant model. `Settings.slack_bot_token` survives only as a `localtest.py` convenience for exercising Slack-reading tools from the CLI; the Lambda runtime path never reads it.
 
 Enum/int validation quietly falls back to defaults with a warning: invalid `LLM_PROVIDER=mystery` → `openai`, `AGENT_MAX_STEPS=not-int` → `3`, below-minimum values clamp up.
 
@@ -197,6 +220,12 @@ Per-module coverage:
 - **Removing `SlackMentionAgent`'s `finally: self.executor.close()`**. The agent creates its own `ToolExecutor` (and hence a `ThreadPoolExecutor`) unless one is injected. Without the close, every Lambda warm invocation adds new non-daemon workers to the process registry that never unwind until interpreter exit.
 - **Narrowing `ToolExecutor.execute`'s exception catch back to a stdlib allowlist**. Provider SDKs raise their own (`openai.APIError`, `anthropic.APIError`, `httpx.HTTPError`) that don't inherit from `ValueError`/`TypeError`; when they escape the executor the whole agent loop aborts instead of handing the failure back to the LLM as `{"ok": False, ...}` for recovery.
 - **Applying channel allowlist to DMs**. `_process()` skips `channel_allowed` when `is_dm=True` — DM channel IDs are D-prefixed and not normally in `ALLOWED_CHANNEL_IDS`, so enforcing there would instantly lock out every user's direct-message path the moment an operator set a channel allowlist.
+- **Shipping bot tokens through the Lambda invoke payload**. `_enqueue_worker` carries only `api_app_id`; the worker re-fetches secrets from SSM. Lambda invoke payloads can show up in CloudTrail and downstream tooling — never put a `bot_token` or `signing_secret` in the JSON we hand to `lambda:Invoke`.
+- **Caching `Bolt App` by `api_app_id` alone** (without the secret tuple as part of the cache value). Rotation in Parameter Store would then never take effect on warm containers — the cached `App` would keep verifying with the old `signing_secret` until the container died. Keep the `((signing_secret, bot_token), App)` shape in `_bolt_apps` so `_get_bolt_app` rebuilds when the tuple changes.
+- **Verifying signature on `url_verification`**. The setup-time ping has no `api_app_id` in the body, so we can't pick a `signing_secret` to verify with. The body is just `{type, token, challenge}` with no actionable payload — echo `challenge` directly. Adding signature verification here would require either a global secret (defeats multi-tenant) or trying every known secret (ugly + leaks app-existence information).
+- **Writing `expire_at` on `app:` rows**. The DynamoDB table TTL only deletes items that explicitly carry the configured attribute, which is exactly what makes the registry rows persistent. `AppMetadataStore.record` deliberately writes `first_seen_at` + `last_seen_at` + `team_id` and nothing else — adding `expire_at` would make the registry self-evict.
+- **Recording app metadata before dedup**. Slack retries and Lambda async retries both arrive with the same `client_msg_id`; if metadata is recorded before `DedupStore.reserve`, every retry bumps `last_seen_at` and inflates apparent activity. Keep the `record(...)` call after the dedup check passes.
+- **Removing the negative-result cache in `CredentialsStore`**. A misconfigured app sending a burst of events would otherwise hit SSM `GetParameters` once per request — easy to blow through SSM throttle quotas. Negative results (missing app) are cached for the same TTL window as positive ones for this reason.
 
 ## Excluded (Phase 2+)
 
