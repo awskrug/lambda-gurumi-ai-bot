@@ -22,9 +22,19 @@ python -m pytest tests/test_agent.py::test_agent_runs_tool_then_returns_text -v
 python -m pytest tests/llms/test_bedrock.py -v                          # LLM provider unit tests
 python -m pytest tests/tools/test_web.py -v                             # fetch_webpage + SSRF guard
 
-# Provision per-Slack-app secrets in SSM Parameter Store BEFORE that app
-# sends events (the Lambda has no global SLACK_BOT_TOKEN — secrets are
-# resolved per request keyed on api_app_id):
+# Manage per-Slack-app credentials via the operator CLI (preferred — masks
+# secret input, never prints values, requires app_id confirmation on delete).
+# The Lambda has no global SLACK_BOT_TOKEN — secrets are resolved per request
+# keyed on api_app_id, so each app needs both SecureStrings provisioned BEFORE
+# its first event.
+python scripts/apps.py list                         # all apps + status (DDB + SSM)
+python scripts/apps.py get A0123ABC                 # one app's status (no values printed)
+python scripts/apps.py set A0123ABC                 # interactive getpass prompts
+SIG=... TOK=... python scripts/apps.py set A0123ABC \
+    --signing-secret-env=SIG --bot-token-env=TOK    # scripted (no shell history leak)
+python scripts/apps.py delete A0123ABC              # confirm by re-typing app_id
+
+# Or directly via aws-cli (no masking, no confirmation):
 aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/signing_secret \
     --type SecureString --value "$SLACK_SIGNING_SECRET"
 aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/bot_token \
@@ -113,6 +123,8 @@ The receiver-path body parse is done *before* signature verification — but onl
 When credentials are missing, the request returns HTTP 200 with a structured `request.unknown_app` log — Slack would otherwise retry an unrecoverable misconfiguration. Operator must populate Parameter Store before that app's events stop being dropped.
 
 `src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so the legacy / blank-app code path doesn't pollute the registry.
+
+`scripts/apps.py` is the operator CLI for both stores — `list` / `get` / `set` / `delete`. It uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` so secret rotation, partial updates, and orphan detection stay consistent.
 
 ### Receiver / worker split via Lambda async self-invoke
 
@@ -226,6 +238,8 @@ Per-module coverage:
 - **Writing `expire_at` on `app:` rows**. The DynamoDB table TTL only deletes items that explicitly carry the configured attribute, which is exactly what makes the registry rows persistent. `AppMetadataStore.record` deliberately writes `first_seen_at` + `last_seen_at` + `team_id` and nothing else — adding `expire_at` would make the registry self-evict.
 - **Recording app metadata before dedup**. Slack retries and Lambda async retries both arrive with the same `client_msg_id`; if metadata is recorded before `DedupStore.reserve`, every retry bumps `last_seen_at` and inflates apparent activity. Keep the `record(...)` call after the dedup check passes.
 - **Removing the negative-result cache in `CredentialsStore`**. A misconfigured app sending a burst of events would otherwise hit SSM `GetParameters` once per request — easy to blow through SSM throttle quotas. Negative results (missing app) are cached for the same TTL window as positive ones for this reason.
+- **Loosening `scripts/apps.py delete` confirmation** (e.g., changing it to a y/n yes-prompt or auto-yes by default). Re-typing the `app_id` is what protects against muscle-memory deletes that would simultaneously evict SSM secrets AND DDB metadata — and there's no undo. `--yes` exists for scripted use; that's the only escape hatch.
+- **Letting `scripts/apps.py` accept secrets as positional CLI args**. Anything in `argv` lands in shell history, `ps`, and CI logs. The CLI takes secrets only via `getpass` prompt or env var pointer (`--signing-secret-env=NAME`), never as a literal arg. Don't add a `--signing-secret VALUE` flag, even "for convenience."
 
 ## Excluded (Phase 2+)
 

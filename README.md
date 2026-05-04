@@ -46,7 +46,20 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 > **Slack 시크릿은 환경변수가 아니라 SSM Parameter Store에 둔다.** 봇은
 > 멀티 테넌트로 동작하며 요청마다 `api_app_id` 로 시크릿을 조회합니다.
 > 새 Slack 앱을 등록할 때마다 두 개의 SecureString 파라미터를 미리 만들어
-> 둬야 합니다 (앱이 이벤트를 보내기 전에):
+> 둬야 합니다 (앱이 이벤트를 보내기 전에). 운영 CLI(`scripts/apps.py`)가
+> 권장 경로 — 시크릿 마스킹 입력, 값 출력 없음, `delete` 시 `app_id`
+> 재입력 확인:
+>
+> ```bash
+> python scripts/apps.py list                       # 등록된 앱 + SSM/DDB 상태
+> python scripts/apps.py get A0123ABC               # 단일 앱 상세
+> python scripts/apps.py set A0123ABC               # getpass 인터랙티브
+> SIG=… TOK=… python scripts/apps.py set A0123ABC \
+>   --signing-secret-env=SIG --bot-token-env=TOK    # 스크립트용
+> python scripts/apps.py delete A0123ABC            # app_id 재입력 후 양쪽 삭제
+> ```
+>
+> 또는 직접 awscli (확인 절차·마스킹 없음):
 >
 > ```bash
 > aws ssm put-parameter --type SecureString \
