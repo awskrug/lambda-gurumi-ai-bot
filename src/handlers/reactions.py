@@ -112,18 +112,44 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
     else:
         effective_users = list(runtime.settings.allowed_user_ids)
 
-    # Find the original asker. The bot always replies inside a thread,
-    # so the parent message's user is the asker. conversations.replies
-    # accepts any in-thread ts and returns oldest_first — limit=1 yields
-    # the parent.
+    # Find the original asker. The bot always replies inside a thread —
+    # `handlers.message._process` posts with `thread_ts=event.thread_ts
+    # or event.ts`, so the bot message either is or sits inside a thread.
+    # We can't pass the bot message ts to conversations.replies directly:
+    # Slack only treats the parent (thread root) ts as a valid lookup key.
+    # Instead:
+    #   1. conversations.history(latest=msg_ts, oldest=msg_ts, inclusive=True)
+    #      returns the bot message, which carries `thread_ts` (parent ts)
+    #      whenever it's a thread reply.
+    #   2. conversations.replies(ts=parent_ts, limit=1) returns the parent
+    #      message — first (oldest_first) — whose `user` is the asker.
     original_asker = ""
+    parent_ts = ""
     try:
-        resp = client.conversations_replies(channel=channel, ts=message_ts, limit=1)
-        messages = (resp.get("messages") if hasattr(resp, "get") else []) or []
-        if messages:
-            original_asker = messages[0].get("user", "") or ""
+        hist = client.conversations_history(
+            channel=channel,
+            latest=message_ts,
+            oldest=message_ts,
+            inclusive=True,
+            limit=1,
+        )
+        hist_messages = (hist.get("messages") if hasattr(hist, "get") else []) or []
+        if hist_messages:
+            bot_msg = hist_messages[0]
+            # `thread_ts` is set on thread replies AND on a thread root
+            # that has any replies. Either way, lookup the parent.
+            parent_ts = bot_msg.get("thread_ts") or bot_msg.get("ts") or ""
     except Exception as exc:  # noqa: BLE001
-        runtime.logger.warning("conversations.replies failed: %s", exc)
+        runtime.logger.warning("conversations.history failed: %s", exc)
+
+    if parent_ts and parent_ts != message_ts:
+        try:
+            resp = client.conversations_replies(channel=channel, ts=parent_ts, limit=1)
+            messages = (resp.get("messages") if hasattr(resp, "get") else []) or []
+            if messages:
+                original_asker = messages[0].get("user", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            runtime.logger.warning("conversations.replies failed: %s", exc)
 
     allowed = (
         (original_asker and reactor == original_asker)
@@ -137,6 +163,8 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
             channel=channel,
             ts=message_ts,
             api_app_id=api_app_id,
+            original_asker=original_asker or "(lookup_failed)",
+            parent_ts=parent_ts or "(none)",
         )
         return
 

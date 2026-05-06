@@ -35,7 +35,10 @@ Receiver의 pre-filter와 worker의 dispatch가 **같은 `REACTION_HANDLERS` dic
 
 봇 메시지에 `:x:` reaction이 달렸을 때 다음 두 조건 중 하나라도 만족하면 메시지가 삭제됩니다:
 
-1. **원 질문자**: 봇이 답한 thread를 시작한 사용자. `conversations.replies(channel, ts=message_ts, limit=1)`로 thread parent를 lookup해서 user_id 비교.
+1. **원 질문자**: 봇이 답한 thread를 시작한 사용자. 두 단계 lookup으로 결정:
+   - `conversations.history(latest=msg_ts, oldest=msg_ts, inclusive=True, limit=1)` → 봇 메시지를 가져와 그 `thread_ts` 필드(원 질문 ts)를 추출
+   - `conversations.replies(ts=parent_ts, limit=1)` → thread root parent 메시지의 `user`가 원 질문자
+   - 한 번의 `conversations.replies(ts=봇답변ts)` 호출로는 안 됨 — Slack은 thread reply의 ts를 valid lookup key로 인정하지 않아 빈 결과를 반환합니다.
 2. **`ALLOWED_USER_IDS`에 있는 유저**: per-app override → 글로벌 env var 순서로 resolve.
 
 ### 두 조건의 OR
@@ -52,12 +55,14 @@ receiver pre-filter가 `REACTION_HANDLERS` 키와 비교 → 등록되지 않은
 
 `item_user`가 payload에서 누락된 경우(드물지만)에는 체크를 건너뛰고 `chat.delete` 자체가 enforce하게 둡니다.
 
-### `conversations.replies` 실패 시
+### `conversations.history` / `conversations.replies` 실패 시
 
-원 질문자 lookup이 실패해도(missing scope, network) `ALLOWED_USER_IDS` 체크는 그대로 진행됩니다. 즉:
+두 단계 lookup 중 어느 쪽이든 실패해도(missing scope, network) `ALLOWED_USER_IDS` 체크는 그대로 진행됩니다. 즉:
 
 - ops user는 영향 없음
 - 일반 유저는 자기 질문에 대한 답변도 지울 수 없게 됨 (fail-closed)
+
+`reaction.unauthorized` 로그에는 `original_asker`(빈 문자열이면 `(lookup_failed)`)와 `parent_ts`가 함께 기록되므로, scope 누락으로 lookup이 실패하는지 진단하기 쉽습니다.
 
 ### `ALLOWED_USER_IDS = []`의 의미 (메시지 흐름과 다름)
 

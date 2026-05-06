@@ -122,20 +122,52 @@ def test_process_worker_routes_reaction_event_to_process_reaction(app_module, mo
 class _RecordingClient:
     """WebClient stand-in for reaction tests.
 
-    Captures auth_test / conversations_replies / chat_delete calls and
-    returns scripted responses.
+    Models the two-step asker lookup the handler does:
+      1. conversations_history(latest=msg_ts, oldest=msg_ts) → bot
+         message with `thread_ts` field pointing at the parent
+      2. conversations_replies(ts=parent_ts) → parent message whose
+         `user` is the original asker
+
+    Knobs:
+      - bot_user_id          : auth.test().user_id
+      - thread_parent_user   : asker user_id returned by step 2
+                               (None ⇒ replies returns empty messages)
+      - parent_ts            : the bot message's thread_ts field (defaults
+                               to a different-from-msg-ts value so the
+                               handler's two-step lookup actually runs)
+      - history_raises       : conversations_history raises
+      - replies_raises       : conversations_replies raises
+      - delete_raises        : chat_delete raises
     """
 
-    def __init__(self, bot_user_id="U-BOT", thread_parent_user="U-ASKER", replies_raises=False, delete_raises=False):
+    def __init__(
+        self,
+        bot_user_id="U-BOT",
+        thread_parent_user="U-ASKER",
+        parent_ts="1700000000.000000",
+        history_raises=False,
+        replies_raises=False,
+        delete_raises=False,
+    ):
         self.bot_user_id = bot_user_id
         self.thread_parent_user = thread_parent_user
+        self.parent_ts = parent_ts
+        self.history_raises = history_raises
         self.replies_raises = replies_raises
         self.delete_raises = delete_raises
         self.deleted = []
+        self.history_calls = []
         self.replies_calls = []
 
     def auth_test(self):
         return {"user_id": self.bot_user_id}
+
+    def conversations_history(self, channel, latest, oldest, inclusive, limit):
+        self.history_calls.append({"channel": channel, "ts": latest})
+        if self.history_raises:
+            raise RuntimeError("missing_scope")
+        # The bot message: ts is the message itself, thread_ts is the parent.
+        return {"messages": [{"ts": latest, "user": self.bot_user_id, "thread_ts": self.parent_ts}]}
 
     def conversations_replies(self, channel, ts, limit=1):
         self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
@@ -143,7 +175,7 @@ class _RecordingClient:
             raise RuntimeError("missing_scope")
         if self.thread_parent_user is None:
             return {"messages": []}
-        return {"messages": [{"user": self.thread_parent_user, "ts": "1700000000.000000"}]}
+        return {"messages": [{"user": self.thread_parent_user, "ts": ts}]}
 
     def chat_delete(self, channel, ts):
         if self.delete_raises:
@@ -336,6 +368,58 @@ def test_process_reaction_chat_delete_failure_logged_not_raised(app_module, monk
 
     # Should NOT raise — handler swallows and logs.
     _reactions._process_reaction(event, client, api_app_id="A1")
+
+
+def test_process_reaction_two_step_lookup_finds_thread_root_asker(app_module, monkeypatch):
+    """The bot replies inside a thread, so reactions land on a thread reply.
+    `conversations.replies(ts=reply_ts)` doesn't return the parent — Slack
+    only honors thread-root ts. The handler must:
+      1. conversations.history(latest=msg_ts, oldest=msg_ts) → bot message
+         with `thread_ts` field pointing at the parent
+      2. conversations.replies(ts=parent_ts, limit=1) → the parent message
+         whose `user` is the asker
+    Verify both calls happen and reactor=asker → delete fires."""
+    import dataclasses
+
+    _reset_bot_user_id_cache(app_module)
+    override = dataclasses.replace(_runtime.settings, allowed_user_ids=[])
+    monkeypatch.setattr(_runtime, "settings", override)
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _RecordingMetadata())
+
+    client = _RecordingClient(
+        thread_parent_user="U-REACTOR",
+        parent_ts="1699999999.000000",  # parent ts ≠ message_ts
+    )
+    event = _reaction_event(user="U-REACTOR")
+    _reactions._process_reaction(event, client, api_app_id="A1")
+
+    # Step 1: history fetched the bot message itself (latest == message_ts)
+    assert client.history_calls == [{"channel": "C1", "ts": "1700000000.000100"}]
+    # Step 2: replies fetched with the PARENT ts from history, NOT message_ts
+    assert client.replies_calls == [{"channel": "C1", "ts": "1699999999.000000", "limit": 1}]
+    # Asker matched → deleted
+    assert client.deleted == [{"channel": "C1", "ts": "1700000000.000100"}]
+
+
+def test_process_reaction_history_failure_falls_back_to_allowlist(app_module, monkeypatch):
+    """conversations.history failure (missing scope) should not abort —
+    the ALLOWED_USER_IDS check still runs. Mirror behavior for the
+    replies failure case."""
+    import dataclasses
+
+    _reset_bot_user_id_cache(app_module)
+    override = dataclasses.replace(_runtime.settings, allowed_user_ids=["U-OPS"])
+    monkeypatch.setattr(_runtime, "settings", override)
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _RecordingMetadata())
+
+    client = _RecordingClient(history_raises=True)
+    # U-OPS is in allowlist → still allowed even when history lookup is unavailable.
+    _reactions._process_reaction(_reaction_event(user="U-OPS", event_ts="3.1"), client, api_app_id="A1")
+    assert client.deleted == [{"channel": "C1", "ts": "1700000000.000100"}]
+    # No replies call since history failed before we knew the parent_ts.
+    assert client.replies_calls == []
 
 
 def test_process_reaction_replies_failure_falls_back_to_allowlist(app_module, monkeypatch):

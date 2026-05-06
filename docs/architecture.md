@@ -326,6 +326,8 @@ Enum/int 검증은 조용히 fallback + 경고:
 
 별도 문서 [docs/reactions.md](reactions.md) 참조 — `:x:` 권한 모델, 필요한 Slack scope, 새 reaction handler 추가 절차.
 
+원 질문자 lookup이 두 단계인 이유: Slack의 `conversations.replies`는 thread *parent* ts만 valid key로 받습니다. 봇은 항상 thread reply로 답하므로 reaction이 달린 ts는 thread reply의 ts입니다. 따라서 먼저 `conversations.history(latest=msg_ts, oldest=msg_ts)`로 봇 메시지의 `thread_ts` 필드(parent ts)를 알아낸 다음 `conversations.replies(ts=parent_ts, limit=1)`로 parent message의 user를 가져옵니다.
+
 ## 미구현 / Phase 2+
 
 - **Bedrock Knowledge Base (S3 Vectors + RAG)** ingestion pipeline. IAM policy + `sync-notion.yml`/`sync-awsdocs.yml` workflow 스캐폴딩은 있지만, `serverless.yml`이 `S3Bucket`/`KnowledgeBase`/`DataSource`를 provisioning하지 않고 ingestion 스크립트(`scripts/notion/export.py`, `scripts/awsdocs/sync.sh`)도 삭제된 상태. workflow 활성화 시 fail.
