@@ -29,6 +29,7 @@ from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_sdk import WebClient
 
 from src import runtime
+from src.handlers import message, reactions
 from src.logging_utils import log_event
 
 
@@ -92,7 +93,6 @@ def _process_worker(payload: dict) -> None:
     client = WebClient(token=creds.bot_token)
 
     if slack_event.get("type") == "reaction_added":
-        from src.handlers import reactions
         reactions._process_reaction(slack_event, client, api_app_id=api_app_id)
         return
 
@@ -102,7 +102,6 @@ def _process_worker(payload: dict) -> None:
             kwargs["thread_ts"] = thread_ts
         client.chat_postMessage(**kwargs)
 
-    from src.handlers import message
     message._process(slack_event, client, _say, is_dm=is_dm, api_app_id=api_app_id)
 
 
@@ -150,7 +149,6 @@ def _get_bolt_app(api_app_id: str, signing_secret: str, bot_token: str) -> App:
         # the worker dispatches on — adding a new reaction in one place
         # automatically opens the receiver filter for it. The worker
         # re-checks on its side (defense-in-depth).
-        from src.handlers import reactions
         if event.get("reaction") not in reactions.REACTION_HANDLERS:
             return
         if (event.get("item") or {}).get("type") != "message":
