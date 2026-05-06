@@ -363,11 +363,11 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
     # level gate at all. Operator opts in via ALLOWED_USER_IDS (or per-app
     # override); empty list means everyone is allowed.
     if effective_users and user not in effective_users:
-        msg = settings.allowed_user_message or ""
-        if msg and "{}" in msg:
-            msg = msg.replace("{}", f"<@{effective_users[0]}>")
-        if msg:
-            say(text=msg, thread_ts=thread_ts)
+        # msg = settings.allowed_user_message or ""
+        # if msg and "{}" in msg:
+        #     msg = msg.replace("{}", f"<@{effective_users[0]}>")
+        # if msg:
+        #     say(text=msg, thread_ts=thread_ts)
         log_event(logger, "user.blocked", user=user, channel=channel, api_app_id=api_app_id)
         return
 
