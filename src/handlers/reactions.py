@@ -118,22 +118,28 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
     # We can't pass the bot message ts to conversations.replies directly:
     # Slack only treats the parent (thread root) ts as a valid lookup key.
     # Instead:
-    #   1. conversations.history(latest=msg_ts, oldest=msg_ts, inclusive=True)
-    #      returns the bot message, which carries `thread_ts` (parent ts)
-    #      whenever it's a thread reply.
-    #   2. conversations.replies(ts=parent_ts, limit=1) returns the parent
-    #      message — first (oldest_first) — whose `user` is the asker.
+    #   1. conversations.history(latest=msg_ts, inclusive=True, limit=1)
+    #      returns the bot message; we read its `thread_ts` (parent ts).
+    #      We deliberately omit `oldest` — passing oldest=latest hits a
+    #      Slack quirk where the bracket can return zero messages even
+    #      with inclusive=True. `latest+inclusive+limit=1` reliably
+    #      returns the message at-or-before that ts (which is the
+    #      message itself).
+    #   2. conversations.replies(ts=parent_ts, limit=1) returns the
+    #      parent message — first (oldest_first) — whose `user` is the
+    #      asker.
     original_asker = ""
     parent_ts = ""
+    history_messages_count = -1  # -1 = call failed; 0+ = number of messages returned
     try:
         hist = client.conversations_history(
             channel=channel,
             latest=message_ts,
-            oldest=message_ts,
             inclusive=True,
             limit=1,
         )
         hist_messages = (hist.get("messages") if hasattr(hist, "get") else []) or []
+        history_messages_count = len(hist_messages)
         if hist_messages:
             bot_msg = hist_messages[0]
             # `thread_ts` is set on thread replies AND on a thread root
@@ -165,6 +171,7 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
             api_app_id=api_app_id,
             original_asker=original_asker or "(lookup_failed)",
             parent_ts=parent_ts or "(none)",
+            history_messages_count=history_messages_count,
         )
         return
 

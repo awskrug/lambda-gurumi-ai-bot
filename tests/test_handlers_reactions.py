@@ -162,7 +162,7 @@ class _RecordingClient:
     def auth_test(self):
         return {"user_id": self.bot_user_id}
 
-    def conversations_history(self, channel, latest, oldest, inclusive, limit):
+    def conversations_history(self, channel, latest, inclusive, limit):
         self.history_calls.append({"channel": channel, "ts": latest})
         if self.history_raises:
             raise RuntimeError("missing_scope")
