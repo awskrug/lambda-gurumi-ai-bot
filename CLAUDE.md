@@ -1,338 +1,134 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+이 파일은 Claude Code(claude.ai/code)가 이 저장소의 코드를 변경할 때 알아야 할 invariant 모음입니다. 일반 사용법은 [README.md](README.md), 깊은 설계 자료는 [docs/](docs/)를 보세요.
 
-## Commands
+## 핵심 파이프라인 — 절대 우회/단축 금지
 
-```bash
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-cp .env.example .env.local   # fill in values
-
-# Local CLI runner (no Slack connection needed; streaming is default)
-python localtest.py "질문"
-python localtest.py --no-stream "질문"   # wait for full answer, then print
-python localtest.py --quiet-steps "질문" # hide intermediate step logs
-python localtest.py                       # interactive stdin (Ctrl+D)
-
-# Tests
-python -m pytest
-python -m pytest --cov=src --cov-report=term-missing
-python -m pytest tests/test_agent.py::test_agent_runs_tool_then_returns_text -v
-python -m pytest tests/llms/test_bedrock.py -v                          # LLM provider unit tests
-python -m pytest tests/tools/test_web.py -v                             # fetch_webpage + SSRF guard
-
-# Manage per-Slack-app credentials via the operator CLI (preferred — masks
-# secret input, never prints values, requires app_id confirmation on delete).
-# The Lambda has no global SLACK_BOT_TOKEN — secrets are resolved per request
-# keyed on api_app_id, so each app needs both SecureStrings provisioned BEFORE
-# its first event.
-python scripts/apps.py list                         # all apps + status (DDB + SSM)
-python scripts/apps.py get A0123ABC                 # one app's status (no values printed)
-python scripts/apps.py set A0123ABC                 # interactive getpass prompts
-SIG=... TOK=... python scripts/apps.py set A0123ABC \
-    --signing-secret-env=SIG --bot-token-env=TOK    # scripted (no shell history leak)
-python scripts/apps.py delete A0123ABC              # confirm by re-typing app_id
-
-# Per-app channel/user allowlist overrides (DynamoDB):
-python scripts/apps.py acl get A0123ABC                          # show per-app + global + effective
-python scripts/apps.py acl set A0123ABC --channels=C1,C2         # restrict to C1,C2 for THIS app only
-python scripts/apps.py acl set A0123ABC --channels=""            # explicit allow-all (overrides restrictive global)
-python scripts/apps.py acl set A0123ABC --users=U1,U2            # restrict users
-python scripts/apps.py acl unset A0123ABC --channels --users     # remove overrides → back to global env var
-
-# Per-app PERSONA_MESSAGE override (string):
-python scripts/apps.py persona get A0123ABC                      # show per-app + global + effective
-python scripts/apps.py persona set A0123ABC "당신은 친근한 어시스턴트"  # short form
-python scripts/apps.py persona set A0123ABC --from-file persona.txt   # multi-line via file
-python scripts/apps.py persona set A0123ABC ""                   # explicit no-persona (overrides global)
-python scripts/apps.py persona unset A0123ABC                    # remove override → back to global
-
-# Make `apps list` recognizable: populate team/bot fields via Slack auth.test
-python scripts/apps.py refresh A0123ABC                          # auth.test → team_name, bot_user_name, team_domain
-python scripts/apps.py name set A0123ABC "Production Bot - Acme" # operator-set label, takes precedence
-python scripts/apps.py name unset A0123ABC                       # back to auto-populated team/bot
-# `apps set` already runs auth.test by default after writing the bot_token;
-# pass `--no-verify` to skip when offline / Slack unreachable.
-
-# Or directly via aws-cli (no masking, no confirmation):
-aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/signing_secret \
-    --type SecureString --value "$SLACK_SIGNING_SECRET"
-aws ssm put-parameter --name /gurumi-bot/apps/A0123ABC/bot_token \
-    --type SecureString --value "$SLACK_BOT_TOKEN"
-
-# Deploy (requires IAM OIDC role `lambda-gurumi-bot`)
-npm i -g serverless@3
-npm i serverless-python-requirements
-# export OPENAI_API_KEY / XAI_API_KEY / ... first
-serverless deploy --stage dev --region us-east-1
-```
-
-Lambda entrypoint: `app.lambda_handler`. Slack events land at `POST /slack/events` via API Gateway.
-
-## Core agent pipeline — DO NOT bypass or shortcut
-
-Every user turn flows through the same four phases, in order:
+모든 사용자 메시지는 다음 4단계를 **순서대로** 통과합니다:
 
 ```
-질문 (user message)
-  ↓
-의도·계획 (intent + plan — one LLM hop; native function calling emits
-           tool_calls in the same response when tools are needed)
-  ↓
-툴 사용 (tool execution — repeats as the LLM keeps calling tools)
-  ↓
-응답 (compose the final answer once the LLM stops requesting tools)
+질문 → 의도·계획 (LLM hop, native function calling) → 툴 사용 (반복) → 응답 (LLM hop)
 ```
 
-"의도 파악" and "계획" are a single step in code: one call to
-`LLMProvider.chat(..., tools=registry.specs())`. The LLM's response
-carries both the interpretation of the user request AND the proposed
-tool_calls (if any) in one shot. Do NOT split this into a separate
-intent-classifier hop — that adds a full LLM roundtrip for no gain
-and diverges from native function-calling semantics.
+"의도 파악"과 "계획"은 **한 번의 LLM 호출**입니다 — 응답이 두 정보(요청 해석 + 다음 tool_calls)를 동시에 담아 옵니다. `LLMProvider.chat(..., tools=registry.specs())` 한 번. 별도 intent classifier hop을 넣지 마세요.
 
-**Design rules — invariants for future changes:**
+**불변 규칙**:
 
-1. **Intent is always an LLM decision.** Never use keyword heuristics
-   (e.g., `"그려"`/`"draw"` → image generator) to bypass the agent.
-   The LLM reads the message and emits `tool_calls` to reflect intent.
-2. **No phase shortcuts.** Even for "obvious" image requests, we still
-   go through the full hop: LLM plan → `generate_image` tool_call → tool
-   execution → LLM compose. Skipping the compose step to save seconds
-   means the bot can't caption, follow up, or react to tool errors.
-3. **Tool orchestration happens inside the agent loop**, not in
-   the message handler. `src/handlers/message.py` wires Slack
-   concerns (placeholder, streaming, history). `src/agent.py` owns
-   the loop. Don't push intent detection out of the agent.
-4. **Slowness is a streaming / infrastructure problem, not a
-   pipeline-shortcut problem.** If the loop is slow, fix it with
-   async invocation, model choice, or streaming UX — not by
-   stripping phases.
+1. **의도는 항상 LLM 결정.** 키워드 휴리스틱(예: `"그려"`/`"draw"` → 이미지)으로 우회 금지. LLM이 메시지를 읽고 `tool_calls`로 의도를 표현합니다.
+2. **단계 단축 금지.** 명확해 보이는 이미지 요청도 `LLM 계획 → generate_image tool_call → tool 실행 → LLM 응답 합성` 전 과정을 거칩니다. 응답 합성을 건너뛰면 caption·후속 대응·tool 에러 처리가 사라집니다.
+3. **Tool orchestration은 agent 루프 안에서.** `src/handlers/message.py`는 Slack 관련만(placeholder, streaming, history). `src/agent.py`가 루프를 owns. 의도 탐지를 agent 밖으로 빼지 마세요.
+4. **속도 문제는 streaming/infrastructure 문제.** 파이프라인 단축이 아니라 async invocation, 모델 선택, streaming UX로 해결.
 
-## Architecture — the non-obvious parts
+## 모듈 layout
 
-### Module layout — flow-by-flow split
-
-`app.py` is just the Lambda entrypoint (`serverless.yml: handler: app.lambda_handler`). All real logic lives under `src/`:
+`app.py`는 Lambda entrypoint(`serverless.yml: handler: app.lambda_handler`)만. 진짜 로직은 `src/`:
 
 ```
-app.py                   ← lambda_handler — dispatches to router on _worker / receiver path
-src/runtime.py           ← process-wide singletons (DDB/SSM/Lambda clients, Bolt cache,
-                           bot_user_id cache) + accessors + settings + logger
-src/router.py            ← receiver path (parse → resolve creds → Bolt) + worker path
-                           (_process_worker → branch on event type) + per-app Bolt cache
-src/handlers/message.py  ← _process for app_mention + DM message events
-                           (allowlists, per-app override, agent run, streaming, history)
-src/handlers/reactions.py ← _process_reaction dispatch + REACTION_HANDLERS dict +
-                           per-reaction handlers (currently `:x:` → chat.delete)
+app.py                       ← lambda_handler — _worker / receiver / X-Slack-Retry-Num 분기
+src/runtime.py               ← 싱글톤 (DDB/SSM/Lambda 클라이언트, Bolt 캐시, bot_user_id) + accessors + settings + logger
+src/router.py                ← receiver path + worker path + per-app Bolt 캐시
+src/handlers/message.py      ← _process — app_mention/DM 처리 (allowlist, agent, streaming)
+src/handlers/reactions.py    ← _process_reaction + REACTION_HANDLERS dict + 핸들러 (현재 :x: → chat.delete)
 ```
 
-`app.py` ≤ 100 lines is intentional — the Lambda entrypoint is a deployment contract, the actual logic must be reachable from `src/` so other entrypoints (local CLI, future event sources) don't have to import the Lambda module.
+`app.py`는 의도적으로 ~70줄. Lambda entrypoint는 deployment contract라서 위치/이름 불변. 실제 로직은 `src/`로 이동해 다른 entrypoint(local CLI, 향후 이벤트 소스)가 Lambda 모듈을 import할 필요 없게.
 
-**Cross-module reference rule (load-bearing for tests).** Inside the new `src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py`: address shared state via `from src import runtime` then `runtime.X()` — NOT `from src.runtime import X`. The `from X import Y` form binds `Y` at import time, which makes `monkeypatch.setattr(src.runtime, "Y", fake)` invisible to the importer (it still holds the original function object). Late binding through the module attribute is what makes the test suite's per-test stubs (for `_get_dedup`, `_get_credentials`, `settings`, etc.) work. The same applies to test files — they patch `_runtime`, `_router`, `_message`, `_reactions` (the module objects), not whatever those modules re-exported.
+전체 architecture는 [docs/architecture.md](docs/architecture.md) 참조.
 
-### Agent loop uses NATIVE function calling, not JSON prompting
+## Cross-module 호출 규약 — load-bearing
 
-`src/agent.py` passes `registry.specs()` directly to `LLMProvider.chat(tools=...)`. The provider (`src/llms/`) translates that to OpenAI `tools=[{type:"function",function:{...}}]` or Bedrock `tools=[{name, description, input_schema}]` (Claude) / `toolConfig` (Nova). There is **no JSON-in-prompt parsing** — tool calls arrive as structured objects. Loop terminates when `stop_reason != "tool_use"` or `max_steps` hit. On max_steps, a forced compose step (`_compose_without_tools`) runs with `tools=None`.
+`src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py` 안에서 공유 상태 접근은 **모듈 객체 import + 속성 lookup** 패턴으로만:
 
-Duplicate tool-call suppression: `_call_signature` = `name + sha1(args_json)`. A repeated signature within the loop is short-circuited with `{"ok": False, "error": "duplicate call skipped"}` and handed back to the LLM so it can move on.
+```python
+# ✅ Late binding — monkeypatch가 동작
+from src import runtime
+def some_handler(...):
+    dedup = runtime._get_dedup()
 
-### Three LLM provider families, one Protocol
+# ❌ Early binding — monkeypatch 무력화
+from src.runtime import _get_dedup
+def some_handler(...):
+    dedup = _get_dedup()  # 테스트 patch가 안 보임
+```
 
-`LLMProvider` is a Protocol implemented by `OpenAIProvider`, `XAIProvider`, and `BedrockProvider`. OpenAI and xAI share the OpenAI wire format, so they both extend `_OpenAICompatProvider` and reuse the module-level helpers (`_to_openai_wire_messages`, `_parse_openai_completion`, `_consume_openai_stream`) rather than duplicating stream/tool_calls handling.
+이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding. 이후 `monkeypatch.setattr(src.runtime, "Y", fake)`가 실행돼도 caller가 들고 있는 reference는 옛 객체. 테스트 398개의 절반 이상이 이 패턴에 의존합니다.
 
-- **OpenAIProvider**: default OpenAI endpoint. `_token_params` switches between `max_tokens` (legacy chat) and `max_completion_tokens` (gpt-5 / o1 / o3 / o4 reasoning).
-- **XAIProvider**: `base_url="https://api.x.ai/v1"`, explicit `api_key`. Grok chat models accept the legacy `max_tokens + temperature` combo, so we never use `max_completion_tokens` here. Image generation omits `size` (xAI uses `aspect_ratio` / `resolution`) and always requests `response_format="b64_json"` so we can decode bytes locally.
-- **BedrockProvider**: routes internally on model family prefix (Bedrock IDs and their `us./eu./apac./global.` inference-profile variants are both accepted):
-  - `anthropic.claude*` → `invoke_model` with Messages API shape, `content[].type=="tool_use"` parsing.
-  - `amazon.nova*` → `converse` / `converse_stream` with `toolConfig` + `output.message.content[].toolUse`.
-  - Unknown → Claude path without tools.
+테스트도 같은 규칙 — `_runtime`, `_router`, `_message`, `_reactions` 모듈 객체에 patch.
 
-`_to_anthropic_messages` / `_to_nova_messages` translate our canonical role/tool_calls/tool messages to each backend's shape. `tool` role becomes an Anthropic `tool_result` content block inside a user message; Nova becomes a `toolResult` content block.
+## 코드 변경 시 깨지기 쉬운 것들
 
-Image generation is family-routed too: Titan/Nova-Canvas use `TEXT_IMAGE` task; Stability uses `text_prompts`. See `_build_image_body`.
+**Agent 루프**:
+- `_CompositeProvider` 분기를 `get_llm`에서 제거 → mixed-provider(OpenAI 텍스트 + Bedrock 이미지) 깨짐
+- `SlackMentionAgent`의 `finally: self.executor.close()` 제거 → 매 warm 호출마다 ThreadPoolExecutor leak (interpreter 종료까지 unwind 안 됨)
+- `ToolExecutor.execute` 예외 처리를 stdlib만 잡도록 좁힘 → provider SDK 예외(`openai.APIError` 등)가 escape해서 agent 루프 abort
+- `BedrockProvider.describe_image`의 Nova 분기 제거 → Nova vision이 ValidationException으로 fail (chat()은 family-route하지만 vision도 똑같이 해야 함)
 
-`_CompositeProvider` wraps two providers when text and image providers differ (e.g., OpenAI text + Bedrock image).
+**LLM provider**:
+- 새 tool을 `@tool` 데코레이터 없이 등록 → `ToolRegistry.specs()`와 dispatch가 silently desync
 
-### Multi-tenant credential resolution via SSM Parameter Store
+**Dedup / 단일 테이블**:
+- `DedupStore.reserve`를 read-then-write로 변경 → 동시 worker 두 개가 같은 메시지 처리 가능 (race)
+- `id` prefix 스키마(`dedup:` / `ctx:` / `app:`) 깨면 다른 종류 행이 충돌
+- `app:{api_app_id}` 행에 `expire_at` 추가 → DynamoDB TTL이 영구 행을 자동 evict (앱 레지스트리 사라짐)
 
-This Lambda serves multiple distinct Slack apps from a single deployment. There is no global `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` env var — secrets are looked up per request from SSM at `{SSM_PARAMS_PREFIX}/{api_app_id}/signing_secret` and `.../bot_token` (both `SecureString`). `src/credentials.py::CredentialsStore` does the GetParameters call with a 5-min TTL in-process cache (negative results cached too, so a misconfigured app's burst can't storm SSM). Rotation is reflected within one TTL window; cached `App` instances in `_bolt_apps` carry the secret tuple alongside so a fresh tuple after refresh triggers a rebuild — otherwise rotation wouldn't take effect until the container died.
+**App metadata**:
+- `AppMetadataStore.record(...)`에서 `ReturnValues=ALL_NEW` 제거 → per-app override resolution이 별도 GetItem이 되거나(latency+cost) silently regress하여 항상 글로벌
+- `record(...)` raise 시 fail-closed로 변경 → DynamoDB outage가 봇 전체를 막음 (현재는 글로벌 env var fallback)
+- Metadata recording을 dedup 통과 전으로 옮김 → Slack/Lambda retry가 last_seen_at을 inflate
+- Lambda IAM에서 `dynamodb:UpdateItem` 제거 → `record()`가 silent fail, `app:` 행이 안 생기고 per-app override가 글로벌로 silent regression
 
-The receiver-path body parse is done *before* signature verification — but only to extract `api_app_id` for credential lookup. Signature verification still happens against the resolved signing_secret inside Bolt, so a forged `api_app_id` just resolves to the wrong (or no) secret and gets rejected. `url_verification` events (Slack's setup ping when an operator registers Event Subscriptions) are the one exception: the body has no `api_app_id` so we can't pick a secret, and we echo the `challenge` directly without signature check. The body carries no actionable payload, so this break of the chicken-and-egg is safe.
+**멀티테넌트 credential resolution**:
+- Lambda invoke payload에 bot_token/signing_secret 포함 → CloudTrail 등에 시크릿 노출. `_enqueue_worker`는 `api_app_id`만 운반.
+- `_bolt_apps` 캐시 키를 `api_app_id`만으로 사용(secret 튜플 빠뜨림) → Parameter Store rotation이 컨테이너 죽기 전까지 반영 안 됨
+- `url_verification`에 시그니처 검증 추가 → 글로벌 secret 필요(멀티테넌트 깨짐) 또는 known secrets 전수 시도(앱 존재 leak). Body가 actionable payload 없으니 challenge echo가 정답.
+- `CredentialsStore`의 negative-result 캐시 제거 → 미설정 앱의 트래픽 burst가 SSM `GetParameters` quota를 burn
 
-When credentials are missing, the request returns HTTP 200 with a structured `request.unknown_app` log — Slack would otherwise retry an unrecoverable misconfiguration. Operator must populate Parameter Store before that app's events stop being dropped.
+**Per-app override 3-state 계약**:
+- "속성 absent" vs "속성 = `[]` / `\"\"`"를 같은 의미로 collapse → override 의도 손실. `absent → 글로벌 fallback`, `present → 글로벌 무시`, `[]/"" → 명시적 빈값 오버라이드` 세 상태를 모두 distinct하게 유지.
+- `SYSTEM_MESSAGE`에 per-app override 추가 → 한 앱이 보안 정책을 약화시킬 수 있음. `SYSTEM_MESSAGE`는 운영자 정책이라 글로벌 전용. `PERSONA_MESSAGE`(스타일/톤)만 per-app.
 
-`src/app_metadata.py::AppMetadataStore` lazily upserts an `app:{api_app_id}` row into the same DynamoDB table on every successful event (after dedup passes). The row has NO `expire_at` attribute, so the table-level TTL never deletes it — a registry of installed apps materializes automatically. Recording is gated on `if api_app_id:` inside `_process` so a blank-app code path can't pollute the registry.
+**Reaction 처리**:
+- `_get_bot_user_id` 권한 체크 우회 → 다른 봇/사람 메시지에 `chat.delete` 시도 → 403. `auth.test` 결과는 success만 캐시(failure는 매번 retry)
+- 메시지 흐름과 reaction 흐름의 `ALLOWED_USER_IDS=[]` 의미를 통일 → 의도된 비대칭 깨짐. 메시지=open by default(`[]`=모두 허용), reaction-delete=closed by default(`[]`=원 질문자만)
+- Reaction handler가 공통 dispatcher 우회 → dedup/request_id/item.type 체크 skip. 새 reaction은 항상 `REACTION_HANDLERS`에 등록하고 `_process_reaction`을 통하도록.
 
-`scripts/apps.py` is the operator CLI — `list` / `get` / `set` / `delete` for secrets + metadata, `acl` and `persona` groups for per-app overrides, and `refresh` / `name` for `apps list` readability. `set` calls Slack `auth.test` after writing the bot_token (skip with `--no-verify`) so team/bot identification fields populate immediately. Operator-set `display_name` (via `apps name set`) takes precedence over the auto-populated `team_name / bot_user_name` shown in `apps list`. The CLI uses `getpass` for interactive secret input (no shell-history leak), refuses to print secret values, and requires re-typing the `app_id` to confirm a `delete`. Reuse it instead of raw `aws ssm put-parameter` / `aws dynamodb update-item` so secret rotation, partial updates, identification, ACL overrides, and orphan detection stay consistent.
+**Channel allowlist + DM 비대칭**:
+- DM에 channel allowlist 적용 → DM 채널 ID(`D...`)는 보통 `ALLOWED_CHANNEL_IDS`에 enroll 안 되니, allowlist 설정 순간 모든 DM 차단. `_process()`는 `is_dm=True`일 때 channel 체크 건너뜀.
 
-### Per-app overrides (ACL + persona)
+**Slack 응답 처리**:
+- `LoggerAdapter.info(extra=…)`로 변경 → Python 3.12에서 `LoggerAdapter.process()`가 `extra`를 덮어씀. `log_event`는 `logger.logger`(underlying `Logger`)로 dispatch 유지.
+- `MessageFormatter` 분할 우선순위(코드펜스 → 문단 → 문장 → hard slice) 변경 → 코드블록이 잘리거나 문맥 없는 chunk
 
-Three optional attributes on the `app:{app_id}` row override the matching deployment-wide env var for that one app:
+**SSRF 가드**:
+- `_validate_public_https_url` 제거 (`fetch_webpage`) → RFC1918 / cloud metadata(`169.254.169.254`) fetch 가능
+- `fetch_webpage` raw fallback의 `_NoRedirectHandler` 제거 → 302가 사설 호스트로 우회
+- Slack file fetch host allowlist(`SLACK_FILE_HOSTS`) 제거 → 봇 토큰으로 임의 URL fetch
+- DNS rebinding 한계 인지: `_validate_public_https_url`의 pre-flight `getaddrinfo`와 실제 TCP connect는 별개 lookup. Lambda는 VPC 밖이라 영향 제한적이지만 VPC/private-subnet egress 추가 시 재검토 필요.
 
-| Attribute | Type | Overrides env var |
-|---|---|---|
-| `allowed_channel_ids` | list | `ALLOWED_CHANNEL_IDS` |
-| `allowed_user_ids` | list | `ALLOWED_USER_IDS` |
-| `persona_message` | string | `PERSONA_MESSAGE` |
+운영 정책에 가까운 것들(예: `scripts/apps.py delete`의 `app_id` 재입력 확인 약화)은 [docs/operations.md](docs/operations.md)에 정리되어 있습니다.
 
-Same resolution contract for all three (in `app._process` via the helper `_effective`):
+## Testing — 패치 경로 invariant
 
-- **attribute ABSENT** — the global env var is the effective value (also the default state for newly-seen apps)
-- **attribute PRESENT** — use this value, ignore the global
-- **empty value preserved as PRESENT** — `[]` for the lists means "this app explicitly allows all" (overrides a restrictive global); `""` for the persona means "this app has no persona" (overrides a non-empty global persona)
+테스트 파일과 책임:
 
-Resolution happens on the same DynamoDB roundtrip as the metadata write: `AppMetadataStore.record(...)` uses `ReturnValues=ALL_NEW` so the response carries any pre-set override attributes — no separate GetItem. On DynamoDB read failure, `record(...)` returns `None` and the bot falls back to the global env var so transient DDB issues don't take it offline.
+| 파일 | 대상 |
+|------|------|
+| `tests/test_app.py` | `app.lambda_handler` (worker/receiver/retry 분기) |
+| `tests/test_router.py` | `src.router` (receiver path, worker path, Bolt 캐시) |
+| `tests/test_handlers_message.py` | `src.handlers.message._process` |
+| `tests/test_handlers_reactions.py` | `src.handlers.reactions` (dispatcher + `:x:` 핸들러) |
+| `tests/llms/`, `tests/tools/` | provider/tool 단위 테스트 |
+| `tests/_helpers.py` | 공유 픽스처 (`_FakeCreds`, `_FakeDedup`, `_NullMetadata`) |
+| `tests/tools/_helpers.py` | tool 테스트 공유 픽스처 (`_ctx`, `_settings`, `_streamed_read`) |
 
-For ACL: the `{}` substitution in `ALLOWED_CHANNEL_MESSAGE` / `ALLOWED_USER_MESSAGE` uses the **effective** list, so when an app has a per-app override the block message points at the per-app channel/user, not the global one. Message *templates themselves* remain global.
+**패치 경로 규약**: 테스트는 `from src import router as _router; from src import runtime as _runtime; from src.handlers import message as _message; from src.handlers import reactions as _reactions` 식으로 모듈 객체를 import하고, 그 객체에 patch (`monkeypatch.setattr(_runtime, "_get_dedup", ...)`).
 
-`SYSTEM_MESSAGE` intentionally has NO per-app override — it carries operator policy that should stay consistent across the deployment.
+`monkeypatch.setattr(app_module, "...")` 식으로 다른 모듈에 있는 상태를 patch하면 *동작 안 합니다* — Cross-module 호출 규약 참조.
 
-### Receiver / worker split via Lambda async self-invoke
-
-`lambda_handler` routes one of two ways based on the event shape:
-
-- **Receiver path** (Slack → API Gateway → Lambda): `_route_request` parses the body for `api_app_id`, resolves credentials, gets-or-builds a per-app cached Bolt `App` keyed by that `api_app_id`, and hands the request to Bolt's `SlackRequestHandler`. Bolt then verifies the Slack signature with that app's signing_secret and dispatches to the `app_mention` / `message` handlers. Each handler `ack()`s, then calls `_enqueue_worker(event, is_dm, api_app_id)` which issues a single `lambda:Invoke` against this same function with `InvocationType=Event` and a `{"_worker": True, ..., "api_app_id": "..."}` payload, then returns. The receiver path is back to HTTP 200 within a few hundred ms. That's why Lambda timeout (`serverless.yml: timeout: 300`) can be much larger than the API Gateway REST integration limit (29s) — the receiver never runs long enough to care, and the HTTP response is already home before the worker even starts. Fallback: if `AWS_LAMBDA_FUNCTION_NAME` is unset (local harness) or `lambda.invoke` raises, `_enqueue_worker` runs `_process_worker` inline so the message isn't dropped.
-- **Worker path** (Lambda async self-invoke): `lambda_handler` short-circuits on `event["_worker"] is True` and calls `_process_worker`. The worker re-resolves the bot_token from SSM keyed on the carried `api_app_id` (we deliberately do NOT ship tokens through the invoke payload — Lambda invoke payloads can show up in CloudTrail), mints a fresh `WebClient`, and calls `_process(...)`. The full agent run — streaming, tool calls, image generation — happens here, with Lambda's 300s budget all to itself.
-
-### Slack retry → DynamoDB conditional put dedup
-
-Three converging retry sources all funnel through one key: Slack's own 3-attempt retry schedule on the receiver, AWS Lambda's built-in 2x retry on async worker failure, and any accidental re-dispatch. `lambda_handler` short-circuits when `X-Slack-Retry-Num` header is present (returns 200 OK) so Slack retries never spawn a second worker. Inside the worker, the first line of `_process()` is `DedupStore.reserve(f"dedup:{client_msg_id}")` which does `put_item(ConditionExpression="attribute_not_exists(id)")`. Duplicate key raises `ConditionalCheckFailedException` → False → silent return. This is the only race-safe dedup (get-then-put has a window). TTL 1h via `expire_at`. Lambda async worker retries on the same `_worker` payload also hit the same dedup row, so a transient worker failure that Lambda retries can't produce a second reply.
-
-### Single table, three key prefixes
-
-`DYNAMODB_TABLE_NAME` stores three categories of rows:
-- `dedup:{msg_id}` — one-shot reservation rows with `expire_at` (1h TTL).
-- `ctx:{thread_ts}` — thread conversation memory with `expire_at` (1h TTL).
-- `app:{api_app_id}` — app registry rows **without** `expire_at`. DynamoDB TTL only acts on items that explicitly carry the configured attribute, so permanent rows coexist with TTL'd rows in the same table — adding `expire_at` to an `app:` row by mistake would silently auto-evict the registry.
-
-GSI `user-index` (hash `user`, range `expire_at`) backs per-user throttle via `count_user_active(user)`. `ConversationStore.put` trims with `truncate_to_chars(messages, max_chars)` (drop oldest until serialized size fits).
-
-### Message splitting is code-fence-aware
-
-`MessageFormatter.split_message` (in `src/slack_helpers.py`) splits on `\`\`\`` first (so complete code blocks survive), then on `\n\n`, then on `.!?` sentence boundaries, then hard slice. `_merge_small` rejoins adjacent small chunks up to `max_len`. First chunk goes via `chat_update` on the placeholder message; the rest via `chat_postMessage(thread_ts=…)`. If `chat_update` fails (`msg_too_long` etc.), that chunk falls back to a new message.
-
-### Public web fetching is SSRF-gated
-
-`fetch_webpage` uses `_validate_public_https_url` (in `src/tools/web.py`) to enforce `https`, reject IP literals, and drop DNS results resolving to any non-public address (private / loopback / link-local / reserved / multicast / unspecified / non-global — CGNAT `100.64.0.0/10` included). The Jina Reader path (`{JINA_READER_BASE}/{percent-encoded url}`) does the actual network hop against the target; the raw fallback (and only the raw fallback, since the Jina path uses Jina's own fetch) goes direct with a `_NoRedirectHandler` that refuses 3xx, so a redirect into RFC1918 space can't slip past the pre-flight DNS check. Body size is capped by `MAX_WEB_BYTES` on both paths; if Jina exceeds the cap we fall through to raw (the direct fetch may be smaller than Jina's markdown-ified output). Web helpers live in `src/tools/web.py`. Every tool submodule registers itself into `default_registry` at import time; `src/tools/__init__.py` imports the submodules so importing the package is enough to make every built-in tool available.
-
-### Config is lazy, not import-time
-
-`Settings.from_env()` runs at module load but does NOT validate Slack credentials — there are no global Slack secrets to validate in the multi-tenant model. `Settings.slack_bot_token` survives only as a `localtest.py` convenience for exercising Slack-reading tools from the CLI; the Lambda runtime path never reads it.
-
-Enum/int validation quietly falls back to defaults with a warning: invalid `LLM_PROVIDER=mystery` → `openai`, `AGENT_MAX_STEPS=not-int` → `3`, below-minimum values clamp up.
-
-### Streaming runs on every LLM hop
-
-`OpenAIProvider.chat(on_delta=...)` switches into `stream=True` and forwards content deltas as they arrive. When the model starts a `tool_calls` delta (preamble like "Let me search..."), forwarding is suppressed — that pre-tool commentary would leak into the final reply. Tool_calls are accumulated across chunks and returned alongside the content. The agent passes `self.on_stream` into every `chat()` call, so when the LLM decides to answer directly (no tools) the user sees tokens immediately. A separate `stream_chat()` path handles the forced compose at `max_steps` and the Bedrock paths that don't support tool+stream natively.
-
-Stream throttling is handled inside `StreamingMessage.append()` (`min_interval=0.6s`). `StreamingMessage` also rolls into a fresh `chat_postMessage` when the fallback buffer approaches `max_len`, and `stop()` splits an oversized final answer using `MessageFormatter` so no single update hits Slack's `msg_too_long` error.
-
-### Structured logging with request_id
-
-`src/logging_utils.py` installs a JSON handler on root. `set_request_id(uuid)` is called at the start of each `_process`. `log_event(logger, "agent.done", steps=..., tokens_in=...)` emits records whose `extra_fields` dict survives into the JSON payload — useful for CloudWatch Insights queries. Because `logging.LoggerAdapter.process()` in Python 3.12 overwrites `extra=`, `log_event` dispatches via `logger.logger` (the underlying `Logger`) instead of the adapter.
-
-### `reaction_added` — bot self-delete on `:x:`
-
-A reactor of `:x:` on a bot-authored message can delete that message. The handler is dispatch-table driven so adding more reactions stays a one-line change.
-
-Flow: Slack `reaction_added` → Bolt `_on_reaction_added` (receiver pre-filter against `REACTION_HANDLERS` keys + `item.type == "message"`) → `_enqueue_worker` → `_process_worker` branches on `event["type"] == "reaction_added"` → `_process_reaction` (common: `request_id`, `item.type` re-check, `event_ts`-keyed dedup) → registered handler. The receiver filter and the worker dispatch read the same `REACTION_HANDLERS` dict, so registering a new reaction automatically opens the receiver path for it.
-
-`_handle_reaction_x_delete`:
-- Verifies the target message was authored by THIS bot. `event.item_user == _get_bot_user_id(client, api_app_id)`. `_get_bot_user_id` calls `auth.test` once per `api_app_id` and caches in `_bot_user_ids`. When `item_user` is missing from the payload, the check is skipped and `chat.delete` itself enforces (it 403s on foreign messages).
-- Authorization: reactor must be either (a) the original asker — the user whose message started the thread the bot answered in, looked up via `conversations.replies(channel, ts=message_ts, limit=1)` (parent comes first, oldest_first), or (b) a user in the effective `ALLOWED_USER_IDS` (per-app override > global env var, same three-state contract as the message path). `[]` for the per-app list means the original-asker check is the only authorization path for this app — different semantics from the message path's "[] means everyone."
-- `conversations.replies` failure (missing scope, network) does not abort — the ALLOWED_USER_IDS check still runs.
-- Required Slack OAuth scopes (in addition to existing `chat:write`): `reactions:read` (event subscription), `channels:history` / `groups:history` / `im:history` / `mpim:history` (one or more, depending on where the bot operates) for the asker lookup. `chat:write` already covers self-delete.
-- Required Slack Event Subscription: `reaction_added`.
-
-### Extension points
-
-**Add a new tool.** Create `src/tools/<name>.py` with one or more functions decorated by `@tool(default_registry, name="...", description="...", parameters={...})`. Add `<name>` to the side-effect import block in `src/tools/__init__.py`. Add `tests/tools/test_<name>.py`. That's it — the agent loop sees the new tool because `default_registry` is populated at import time.
-
-**Add a new LLM provider.** Create `src/llms/<name>.py` with a class that satisfies the `LLMProvider` Protocol (`chat`, `stream_chat`, `describe_image`, `generate_image`). Add a branch to `src/llms/factory.py`'s `get_llm`, and if the provider introduces new model families extend `_VALID_PROVIDERS` in `src/config.py`. Add `tests/llms/test_<name>.py`.
-
-**Add a new reaction handler.** Write `_handle_reaction_<name>(event, client, api_app_id)` in `src/handlers/reactions.py` and add `"<reaction>": _handle_reaction_<name>` to `REACTION_HANDLERS` in the same file. The dispatcher (`_process_reaction`) covers `request_id`, `item.type == "message"` filtering, and per-event dedup; the handler owns its own target validation, authorization model, and action. The receiver pre-filter (`router._on_reaction_added`) reads the same dict so unregistered reactions never burn a Lambda async invoke. Add `tests/test_handlers_reactions.py` cases mirroring the `_handle_reaction_x_delete` set.
-
-None of these extensions requires editing the dispatcher itself.
-
-## Deployment
-
-`serverless.yml` provisions:
-- Lambda: python3.12, x86_64, 5120MB, 300s timeout. The 300s value only applies to the worker path — the receiver path returns HTTP 200 within a few hundred ms via `_enqueue_worker`'s async self-invoke. The API Gateway REST integration timeout (29s) is only relevant to the receiver, which finishes long before that, so extending the worker budget to 300s (or further, up to Lambda's 900s cap) is safe. Tool timeouts (e.g. `generate_image` 240s) are sized so that compose + upload + history-save fit in the worker's remaining budget. (x86_64 matches the Ubuntu GitHub Actions runner so pip installs wheels — including native ones like `pydantic_core` — that run on the Lambda runtime. Switching to arm64 requires a Docker-based build path via serverless-python-requirements and is deferred.)
-- IAM (runtime Lambda role) also grants `lambda:InvokeFunction` on this function's own ARN so `_enqueue_worker` can fire the async self-invoke.
-- DynamoDB: hash `id`, GSI `user-index` (user + expire_at, KEYS_ONLY), TTL `expire_at`.
-- IAM (runtime Lambda role): `dynamodb:GetItem/PutItem/Query` on table + GSI, `bedrock:InvokeModel*`/`Converse*`.
-
-### GitHub Actions workflows
-
-Three files under `.github/workflows/`:
-
-- `push.yml` — on `push` to `main` (and `workflow_dispatch`). Runs `pytest --cov=src`, sets up Node 20 + Serverless v3, assumes the OIDC role `lambda-gurumi-bot`, then `serverless deploy --stage dev --region us-east-1`.
-- `sync-notion.yml`, `sync-awsdocs.yml` — `workflow_dispatch` only (schedule commented out), each gated by `vars.ENABLE_SYNC_NOTION` / `ENABLE_SYNC_AWSDOCS`. Both call `aws cloudformation describe-stacks` expecting outputs `S3Bucket` / `KnowledgeBaseId` / `DataSourceId` that `serverless.yml` does not define, and invoke ingestion scripts (`scripts/notion/export.py`, `scripts/awsdocs/sync.sh`) that have been deleted. **They fail if enabled.** See "Excluded (Phase 2+)".
-
-### OIDC role (`.github/aws-role/`)
-
-Separate from the Lambda runtime role. `trust-policy.json` allows both `repo:awskrug/lambda-gurumi-bot:*` and `repo:nalbam/lambda-gurumi-bot:*`. `role-policy.json` is intentionally wider than current needs — it already grants `s3vectors:*`, `bedrock:*KnowledgeBase*`, `bedrock:*DataSource*`, `bedrock:*Agent*` (scoped to `lambda-gurumi-bot-*`) so Phase-2 KB work can land without IAM changes.
-
-## Testing
-
-`pytest.ini` pins `testpaths = tests`, `filterwarnings = ignore::DeprecationWarning`. Key approach:
-
-- Tests mirror source layout: `tests/llms/` for each `src/llms/*` submodule, `tests/tools/` for each `src/tools/*` submodule, `tests/test_router.py` + `tests/test_handlers_message.py` + `tests/test_handlers_reactions.py` for the routing/handler split, and `tests/test_app.py` for `lambda_handler` itself. Top-level `tests/test_agent.py`, `test_config.py`, `test_dedup.py`, `test_logging_utils.py`, `test_slack_helpers.py` cover the non-packaged modules.
-- Shared fixtures live in `_helpers.py` next to the tests that use them: `tests/tools/_helpers.py` (`_ctx`, `_settings`, `_streamed_read`) for tool tests; `tests/_helpers.py` (`_FakeCreds`, `_FakeDedup`, `_NullMetadata`) for routing/handler tests. File-local fixtures stay in their owning test file.
-- Tests address modules through their canonical objects (`from src import router as _router; from src import runtime as _runtime; from src.handlers import message as _message; from src.handlers import reactions as _reactions`) and patch attributes on those objects (`monkeypatch.setattr(_runtime, "_get_dedup", ...)`). Patching `app_module` for state that lives elsewhere does NOT work — see the "Cross-module reference rule" above.
-- `moto[dynamodb]` for `DedupStore` / `ConversationStore` integration tests.
-- Network patches target the submodule where `urllib` / `socket` is imported, not the package: `patch("src.tools.slack.urllib.request.urlopen")` for Slack file fetch, `patch("src.tools.search.urllib.request.urlopen")` for `search_web`, `patch("src.tools.web.urllib.request.urlopen")` and `monkeypatch.setattr("src.tools.web.socket.getaddrinfo", …)` for `fetch_webpage`.
-- `ScriptedLLM` (in `tests/test_agent.py`) emits predefined `LLMResult` sequences to drive the agent loop without any network.
-- Provider tests use `MagicMock` clients — no real OpenAI / Bedrock / xAI calls.
-- `tests/test_config.py` builds `Settings` from `monkeypatch`-controlled env without reloading the module.
-- `reportlab` (dev-only) synthesizes real PDFs for `read_attached_document` parser coverage.
-
-Per-module coverage (categories now mirror the flow split):
-
-- `app.py` minimal — just `lambda_handler` dispatch (the four `tests/test_app.py` tests cover the worker / receiver / Slack-retry branches)
-- `src/router.py` covered by `tests/test_router.py` (receiver + worker + Bolt cache)
-- `src/handlers/message.py` covered by `tests/test_handlers_message.py` (the `_process` flow end-to-end is hit only in production; tests stub agent / streaming / history)
-- `src/handlers/reactions.py` covered by `tests/test_handlers_reactions.py` (`_process_reaction` dispatch + `_handle_reaction_x_delete` authorization model)
-- `src/runtime.py` exercised transitively by every routing/handler test (singleton accessors + `_get_bot_user_id`)
-- `agent.py` 96%, `config.py` 97%, `dedup.py` 80%, `slack_helpers.py` 86%, `logging_utils.py` 97%
-- `llms/`: `base.py` 70%, `openai_wire.py` 96%, `openai.py` 100%, `xai.py` 100%, `bedrock.py` 78%, `composite.py` 87%, `factory.py` 94%
-- `tools/`: `registry.py` 100%, `slack.py` 87%, `search.py` 93%, `web.py` 97%, `image.py` 100%, `time.py` 100%
-
-## Things that are easy to break
-
-- **Dropping the `_CompositeProvider` branch** in `get_llm` breaks mixed-provider setups (OpenAI text + Bedrock image).
-- **Changing `DedupStore.reserve` to a read-then-write pattern** reintroduces the retry race.
-- **Losing the `id` prefix scheme** (`dedup:` vs `ctx:`) collides the two store types.
-- **Switching to `LoggerAdapter.info(extra=…)`** — in Python 3.12 the adapter's `process()` overwrites `extra`; keep going through `logger.logger` for `extra_fields`.
-- **Removing the SSRF host allowlist** (`SLACK_FILE_HOSTS`) shared by `read_attached_images` and `read_attached_document` (`_fetch_slack_file`) opens up arbitrary URL fetch with the bot token.
-- **Adding a tool without updating `ToolRegistry.specs()`** — the `@tool` decorator handles both dispatch and LLM schema from a single declaration; inline dict tricks will silently desync.
-- **Removing the SSRF guard (`_validate_public_https_url`) on `fetch_webpage`** re-opens fetch to RFC1918 space and cloud-metadata endpoints (e.g. `169.254.169.254`).
-- **Enabling redirects on the `fetch_webpage` raw fallback** — a 302 to a private host bypasses the pre-flight DNS check; keep `_NoRedirectHandler` installed.
-- **DNS rebinding on `fetch_webpage` raw fallback**. The pre-flight `getaddrinfo` check and the eventual TCP connect are two separate DNS lookups; a TTL=0 attacker can flip between them. Lambda's environment makes the attack hard and impact is bounded (no VPC by default), but don't treat `_validate_public_https_url` as a guarantee that the actual connection hits the same IP. If you ever add VPC/private-subnet egress, revisit this.
-- **Dropping the Nova branch in `BedrockProvider.describe_image`**. Nova chat models speak the Converse API with an `image` content block — sending Claude's Messages body at a Nova model ID fails with `ValidationException`. `chat()` already family-routes; the vision entrypoint must do the same.
-- **Removing `SlackMentionAgent`'s `finally: self.executor.close()`**. The agent creates its own `ToolExecutor` (and hence a `ThreadPoolExecutor`) unless one is injected. Without the close, every Lambda warm invocation adds new non-daemon workers to the process registry that never unwind until interpreter exit.
-- **Narrowing `ToolExecutor.execute`'s exception catch back to a stdlib allowlist**. Provider SDKs raise their own (`openai.APIError`, `anthropic.APIError`, `httpx.HTTPError`) that don't inherit from `ValueError`/`TypeError`; when they escape the executor the whole agent loop aborts instead of handing the failure back to the LLM as `{"ok": False, ...}` for recovery.
-- **Applying channel allowlist to DMs**. `_process()` skips `channel_allowed` when `is_dm=True` — DM channel IDs are D-prefixed and not normally in `ALLOWED_CHANNEL_IDS`, so enforcing there would instantly lock out every user's direct-message path the moment an operator set a channel allowlist.
-- **Shipping bot tokens through the Lambda invoke payload**. `_enqueue_worker` carries only `api_app_id`; the worker re-fetches secrets from SSM. Lambda invoke payloads can show up in CloudTrail and downstream tooling — never put a `bot_token` or `signing_secret` in the JSON we hand to `lambda:Invoke`.
-- **Caching `Bolt App` by `api_app_id` alone** (without the secret tuple as part of the cache value). Rotation in Parameter Store would then never take effect on warm containers — the cached `App` would keep verifying with the old `signing_secret` until the container died. Keep the `((signing_secret, bot_token), App)` shape in `_bolt_apps` so `_get_bolt_app` rebuilds when the tuple changes.
-- **Verifying signature on `url_verification`**. The setup-time ping has no `api_app_id` in the body, so we can't pick a `signing_secret` to verify with. The body is just `{type, token, challenge}` with no actionable payload — echo `challenge` directly. Adding signature verification here would require either a global secret (defeats multi-tenant) or trying every known secret (ugly + leaks app-existence information).
-- **Writing `expire_at` on `app:` rows**. The DynamoDB table TTL only deletes items that explicitly carry the configured attribute, which is exactly what makes the registry rows persistent. `AppMetadataStore.record` deliberately writes `first_seen_at` + `last_seen_at` + `team_id` and nothing else — adding `expire_at` would make the registry self-evict.
-- **Recording app metadata before dedup**. Slack retries and Lambda async retries both arrive with the same `client_msg_id`; if metadata is recorded before `DedupStore.reserve`, every retry bumps `last_seen_at` and inflates apparent activity. Keep the `record(...)` call after the dedup check passes.
-- **Removing the negative-result cache in `CredentialsStore`**. A misconfigured app sending a burst of events would otherwise hit SSM `GetParameters` once per request — easy to blow through SSM throttle quotas. Negative results (missing app) are cached for the same TTL window as positive ones for this reason.
-- **Loosening `scripts/apps.py delete` confirmation** (e.g., changing it to a y/n yes-prompt or auto-yes by default). Re-typing the `app_id` is what protects against muscle-memory deletes that would simultaneously evict SSM secrets AND DDB metadata — and there's no undo. `--yes` exists for scripted use; that's the only escape hatch.
-- **Letting `scripts/apps.py` accept secrets as positional CLI args**. Anything in `argv` lands in shell history, `ps`, and CI logs. The CLI takes secrets only via `getpass` prompt or env var pointer (`--signing-secret-env=NAME`), never as a literal arg. Don't add a `--signing-secret VALUE` flag, even "for convenience."
-- **Conflating "attribute absent" with "attribute is `[]` / `\"\"`" in per-app override resolution**. The three-state contract (`absent → fall back to global`, `present → ignore global`, `[]` / `""` → explicit "allow all" / "no persona") is the only way to express "this single app's behavior is the override, not the deployment-wide default." Collapsing absent and the empty value to the same meaning silently loses the override semantics — `_effective` in `_process`, `set_allowlist` / `unset_allowlist`, and `set_persona` / `unset_persona` in `AppMetadataStore` must keep them distinct.
-- **Adding a per-app override for `SYSTEM_MESSAGE`**. `SYSTEM_MESSAGE` carries operator security/policy that gets *appended* to the base task rules in `agent._build_system_prompt`. Splitting it per-app lets one misconfigured app weaken the policy for that workspace while the global stays correct elsewhere — exactly the failure mode the global existence prevents. `PERSONA_MESSAGE` (answer style/tone) has a per-app override; `SYSTEM_MESSAGE` deliberately does not.
-- **Switching `record(...)` away from `ReturnValues=ALL_NEW`**. The runtime relies on the write returning the full row so it can resolve per-app ACL on the same DynamoDB roundtrip. Dropping `ALL_NEW` either adds a separate GetItem per event (latency + cost) or — worse — silently regresses ACL to global-only because `app_row` becomes empty.
-- **Failing closed when `record(...)` raises**. The current contract is fail-open to global ACL — a transient DynamoDB outage degrades to "global env-var rules apply" rather than "the bot rejects everyone." Locking down on read failure would create an outage amplifier; the existing global env vars are the safety net.
-- **Removing `dynamodb:UpdateItem` from the Lambda IAM**. `AppMetadataStore.record()` plus `set_allowlist`/`unset_allowlist` all go through `update_item`. Without the permission `record()` swallows the `AccessDeniedException` and returns `None`, so the bot keeps responding but `app:{api_app_id}` rows never appear and per-app ACL silently degrades to global. `dedup:`/`ctx:` paths use `put_item` and stay healthy, which makes the missing-metadata state easy to overlook.
-- **Bypassing `_get_bot_user_id` for the `:x:`-delete authorization check**. The check exists so we don't try `chat.delete` on messages this bot didn't post — that 403s and looks like a bug to operators reading logs. Removing it (or letting `auth.test` failures be cached) means a misconfigured app could appear to "ignore" valid X reactions while actually 403'ing every delete attempt against another bot's messages. The cache is per-`api_app_id` and only stores successes — failures are explicitly NOT cached so a transient `auth.test` outage doesn't poison the lookup until container death.
-- **Conflating per-app `ALLOWED_USER_IDS=[]` semantics between the message path and the reaction path**. Same attribute, different effect by design: on the message path `[]` means "this app explicitly allows all users to talk"; on the reaction path `[]` means "the original-asker check is the only authorization path for this app, no other ops user list applies." Both are correct for their flow — the asymmetry exists because messaging is the primary user-facing surface (open by default for the app) while reaction-delete is a privileged action (closed by default to non-askers). Don't "normalize" these to the same semantics.
-- **Letting reaction handlers skip the common dispatcher**. `_process_reaction` owns `set_request_id`, `item.type` filtering, and per-event (`event_ts`-keyed) dedup. A handler that registers itself outside `REACTION_HANDLERS` and is called directly from `_on_reaction_added` would skip dedup — Slack/Lambda re-deliveries would re-fire the action. Always go through the dispatcher.
+**Network 패치도 같은 규칙**: submodule(import한 곳)에 patch — `patch("src.tools.web.urllib.request.urlopen")` 같이 (package 아님).
 
 ## Excluded (Phase 2+)
 
-- **Bedrock Knowledge Base (S3 Vectors + RAG) ingestion pipeline.** Scaffolding exists (IAM policy + `sync-notion.yml` / `sync-awsdocs.yml`), but `serverless.yml` does not provision `S3Bucket` / `KnowledgeBase` / `DataSource`, and the ingestion scripts (`scripts/notion/export.py`, `scripts/awsdocs/sync.sh`) were removed. Both must be restored to re-enable the workflows.
-- CloudWatch Alarms, X-Ray tracing, languages other than `ko` / `en`.
+- **Bedrock Knowledge Base (S3 Vectors + RAG)** ingestion pipeline. IAM policy + `sync-notion.yml`/`sync-awsdocs.yml` workflow 스캐폴딩만 있고 `serverless.yml`이 `S3Bucket`/`KnowledgeBase`/`DataSource`를 provisioning하지 않음. ingestion 스크립트도 삭제됨. Workflow 활성화 시 fail.
+- CloudWatch Alarms, X-Ray tracing
+- `ko`/`en` 외 언어

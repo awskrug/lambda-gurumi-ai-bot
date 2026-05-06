@@ -4,42 +4,39 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 
 ![Gurumi Bot](images/gurumi-bot.png)
 
-## 봇의 처리 흐름 (절대 생략하지 않는다)
+## 처리 흐름
 
-모든 사용자 메시지는 다음 네 단계를 **순서대로** 통과합니다:
+모든 사용자 메시지는 다음 4단계를 **순서대로** 통과합니다 (단축 금지 — 자세한 근거는 [CLAUDE.md](CLAUDE.md)):
 
 ```
-질문 ── 의도·계획 ── 툴 사용 (반복) ── 응답
- (user)    (LLM)        (tools)        (LLM)
+질문 → 의도·계획 → 툴 사용 (반복) → 응답
+(user)    (LLM)       (tools)         (LLM)
 ```
 
-**의도 파악과 계획은 한 번의 LLM 호출로 통합**되어 있습니다 (OpenAI / Claude / Nova 의 native function calling). 같은 응답에 "무슨 요청인지 파악한 결과" 와 "다음에 부를 tool_calls" 가 함께 담겨 옵니다. 별도의 intent 분류 hop 을 추가하지 않습니다.
-
-- **의도·계획은 LLM 이 한다.** 키워드 매칭(예: `"그려"` → 이미지)으로 우회하지 않는다. LLM 이 메시지를 읽고 `tool_calls` 로 의도를 표현한다.
-- **단계 단축 금지.** 이미지 요청처럼 명확해 보여도 `LLM 판단 → generate_image tool → LLM 응답 합성` 전 과정을 거친다. 응답 합성 단계를 건너뛰면 caption·후속 대응·에러 처리가 사라진다.
-- **Agent 루프는 `src/agent.py` 안에** 있고, `app.py` 는 Slack 관련 부분(placeholder, streaming, 히스토리) 만 담당한다.
-- **속도 문제는 파이프라인 단축이 아닌** 스트리밍·비동기·모델 선택으로 해결한다.
+의도 파악과 계획은 **한 번의 LLM 호출**로 통합 (OpenAI/Claude/Nova의 native function calling). 같은 응답에 요청 해석 + 다음 `tool_calls`가 함께 담겨 옵니다.
 
 ## 주요 기능
 
-- **이벤트**: `app_mention`, DM(`message.im`)
+- **이벤트**: `app_mention`, DM(`message.im`), `reaction_added`(`:x:`로 봇 글 삭제 — [docs/reactions.md](docs/reactions.md))
 - **Provider**: OpenAI · AWS Bedrock(Anthropic Claude 3/3.5/4.x · Amazon Nova) · xAI(Grok) 선택 가능
 - **Tools (네이티브 function calling)**
   - `read_attached_images` — 첨부 이미지 Vision 요약
-  - `read_attached_document` — 첨부 PDF/텍스트 파일 추출 (페이지·바이트·문자 상한 적용)
+  - `read_attached_document` — 첨부 PDF/텍스트 추출 (페이지·바이트·문자 상한)
   - `fetch_thread_history` — 스레드 히스토리 조회
-  - `search_web` — Tavily (TAVILY_API_KEY 설정 시) 또는 DuckDuckGo
-  - `fetch_webpage` — 공개 HTTPS 웹 페이지 본문·링크 추출 (Jina Reader 우선 + raw fallback, SSRF 가드)
+  - `search_web` — Tavily (`TAVILY_API_KEY` 설정 시) 또는 DuckDuckGo
+  - `fetch_webpage` — 공개 HTTPS 웹페이지 본문·링크 (Jina Reader 우선 + raw fallback, SSRF 가드)
   - `generate_image` — 이미지 생성 후 Slack 업로드
-  - `get_current_time` — 서버 기본 TZ(또는 `timezone` 인자) 로 현재 시각/요일 반환
+  - `get_current_time` — 서버 기본 TZ 또는 인자로 현재 시각/요일
 - **Production 기반**
-  - DynamoDB 조건부 put 으로 Slack 재시도 **중복 제거**
-  - 채널 allowlist · 유저당 동시 요청 **throttle**
+  - **멀티테넌트**: 단일 배포로 여러 Slack 앱 서빙. 시크릿은 SSM Parameter Store에서 `api_app_id` 키로 per-request resolve
+  - **앱별 오버라이드**: ACL(channel/user) + persona를 앱별로 글로벌 env var와 다르게 설정 가능
+  - **Receiver/worker 분리**: API Gateway 30초 제한과 무관하게 worker는 Lambda 300초 budget 사용 (async self-invoke)
+  - DynamoDB 조건부 put으로 Slack/Lambda 재시도 **중복 제거**
+  - 채널 allowlist + 유저당 동시 요청 **throttle**
   - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h)
-  - 긴 응답 **계층적 분할** 전송 (코드블록 → 문단 → 문장 → hard slice) + `MAX_LEN_SLACK` 기반 rolling 스트리밍
-  - `chat_postMessage` + `chat_update` 반복으로 스트리밍 (네이티브 `chat.startStream` 계열은 `enable_native=True` 옵션). 툴 실행 구간에는 `assistant_threads_setStatus` 타이핑 인디케이터만 표시, **첫 content delta 도착 시점에** placeholder 메시지를 지연 posting — 상태 UI 와 placeholder 중복 표시 방지
-  - 구조화 JSON 로깅 + request_id, agent 루프 관찰값 기록
-  - 에러 메시지 sanitize (토큰·경로 redaction)
+  - 긴 응답 **계층적 분할** (코드블록 → 문단 → 문장 → hard slice) + `MAX_LEN_SLACK` 기반 rolling 스트리밍
+  - 첫 content delta 도착 시점에 placeholder 메시지 지연 posting — status UI와 중복 방지
+  - 구조화 JSON 로깅 + request_id, 에러 메시지 sanitize
 
 ## 환경 변수
 
@@ -177,9 +174,11 @@ python localtest.py --no-stream "React 훅 설명해줘"   # 전체 답변을 �
 python localtest.py --quiet-steps "…"                # 중간 step 로그 숨김
 python localtest.py                                  # 대화형 (stdin, Ctrl+D)
 
-# 테스트 (189 테스트, 커버리지 89% — `pytest.ini` 기준)
+# 테스트 (398 테스트)
 python -m pytest --cov=src --cov-report=term-missing
-python -m pytest tests/llms/test_bedrock.py -v                      # 패키지 단위
+python -m pytest tests/test_handlers_message.py -v                  # 메시지 흐름
+python -m pytest tests/test_handlers_reactions.py -v                # reaction 흐름
+python -m pytest tests/llms/test_bedrock.py -v                      # provider 단위
 python -m pytest tests/tools/test_web.py::test_fetch_webpage_jina_happy_path -v   # 단일 케이스
 ```
 
@@ -229,90 +228,89 @@ DynamoDB 테이블 (해시키 `id`, GSI `user-index`, TTL `expire_at`) 은 Cloud
 ## 코드 구조
 
 ```
-app.py                    Lambda 엔트리 · Slack Bolt 핸들러 · `_process()` 흐름
+app.py                       Lambda entrypoint (lambda_handler만 — serverless contract)
 src/
-├── agent.py              Agent 루프 (native function calling 반복)
-├── config.py             Settings (env → dataclass, lazy validation)
-├── dedup.py              DynamoDB 기반 중복 제거 / 대화 메모리
-├── logging_utils.py      구조화 JSON 로깅 + request_id
-├── slack_helpers.py      메시지 분할·스트리밍·사용자 캐시
-├── llms/                 LLM provider 패키지
-│   ├── base.py              Protocol + 공통 타입 + _with_retry
-│   ├── openai_wire.py       OpenAI wire 공통 (OpenAI·xAI 공유)
-│   ├── openai.py            OpenAIProvider
-│   ├── xai.py               XAIProvider
-│   ├── bedrock.py           BedrockProvider (Anthropic·Nova·Stability)
-│   ├── composite.py         _CompositeProvider (text+image 분리 설정)
-│   └── factory.py           get_llm
-└── tools/                Tool 패키지
-    ├── registry.py          ToolDef · ToolRegistry · @tool · ToolExecutor
-    ├── slack.py             read_attached_images · read_attached_document · fetch_thread_history
-    ├── search.py            search_web (DuckDuckGo / Tavily)
-    ├── web.py               fetch_webpage + SSRF 가드 + HTML/Jina 파서
-    ├── image.py             generate_image
-    └── time.py              get_current_time
+├── runtime.py               싱글톤 (LLM/DDB/SSM/Lambda 클라이언트, Bolt 캐시) + accessors + settings + logger
+├── router.py                receiver path + worker path + per-app Bolt 캐시
+├── handlers/
+│   ├── message.py           _process — app_mention/DM (allowlist, agent, streaming, history)
+│   └── reactions.py         _process_reaction + REACTION_HANDLERS dict + 핸들러 (현재 :x: → chat.delete)
+├── agent.py                 Agent 루프 (native function calling 반복)
+├── credentials.py           SSM 기반 멀티테넌트 시크릿 캐시
+├── app_metadata.py          app:{api_app_id} DDB 행 — 자동 등록 + per-app override
+├── dedup.py                 DDB 조건부 put 중복 제거 + 스레드 메모리
+├── slack_helpers.py         메시지 분할·스트리밍·사용자 캐시
+├── config.py                Settings (env → dataclass, lazy validation)
+├── logging_utils.py         구조화 JSON 로깅 + request_id
+├── llms/                    LLM provider 패키지 (OpenAI · xAI · Bedrock 분기)
+└── tools/                   Tool 패키지 (@tool 데코레이터로 self-register)
 ```
 
-테스트는 소스 구조를 그대로 미러링한 `tests/llms/`, `tests/tools/` 에 있습니다.
+각 모듈 책임과 cross-module 호출 규약은 [CLAUDE.md](CLAUDE.md), 깊은 architecture는 [docs/architecture.md](docs/architecture.md)를 보세요.
 
-## 확장하기
+테스트는 소스 구조를 미러링: `tests/test_router.py`, `tests/test_handlers_message.py`, `tests/test_handlers_reactions.py`, `tests/llms/`, `tests/tools/`.
 
-새로운 tool 이나 LLM provider 는 파일 하나를 추가하는 것으로 끝납니다. 자세한 단계는 [`docs/extending.md`](docs/extending.md) 를 참고하세요.
+## 문서 모음
 
-짧게 말해:
+- **[CLAUDE.md](CLAUDE.md)** — AI agent(Claude Code)를 위한 invariant + 깨지기 쉬운 부분
+- **[docs/architecture.md](docs/architecture.md)** — 멀티테넌트 모델, receiver/worker split, dedup, streaming, LLM provider 설계 등 깊은 자료
+- **[docs/operations.md](docs/operations.md)** — `scripts/apps.py` 운영 CLI, ACL/persona 시나리오, 시크릿 로테이션, 트러블슈팅
+- **[docs/reactions.md](docs/reactions.md)** — `:x:` 권한 모델, 새 reaction 추가 방법, 필요한 Slack scope
+- **[docs/extending.md](docs/extending.md)** — 새 tool / LLM provider 추가 절차
 
-- **새 tool**: `src/tools/<name>.py` 에 `@tool(default_registry, ...)` 로 데코레이트된 함수를 정의하고, `src/tools/__init__.py` 의 side-effect import 블록에 이름을 추가하면 `default_registry` 가 자동으로 등록합니다.
-- **새 LLM provider**: `src/llms/<name>.py` 에 `LLMProvider` Protocol 을 만족하는 클래스를 작성하고 `src/llms/factory.py` 의 `get_llm` 분기에 연결합니다.
-
-## 아키텍처
+## 아키텍처 요약
 
 ```
 ┌────────────────┐  POST /slack/events
 │ Slack workspace│──────────────────┐
 └────────────────┘                  ▼
-                    ┌───────────────────────────────────┐
-                    │ API Gateway → Lambda (app.py)     │
-                    │ ├─ X-Slack-Retry-Num early return │
-                    │ └─ SlackRequestHandler (Bolt)     │
-                    └────────┬───────────────────┬──────┘
-                             │                   │
-                  ┌──────────▼─────────┐  ┌──────▼─────────┐
-                  │ app_mention handler│  │ message handler│
-                  └──────────┬─────────┘  └──────┬─────────┘
-                             └──────┬────────────┘
-                                    ▼
-                ┌───────────────────────────────────────────┐
-                │ _process()                                │
-                │  1. DedupStore.reserve (conditional put)  │
-                │  2. channel_allowed / throttle            │
-                │  3. set_thread_status + placeholder say   │
-                │  4. ConversationStore.get → history       │
-                │  5. SlackMentionAgent.run ──┐             │
-                │  6. send_long_message       │             │
-                │  7. ConversationStore.put   │             │
-                └─────────────────────────────┼─────────────┘
-                                              │
-                      ┌───────────────────────▼───────────────┐
-                      │ Agent loop (native function calling)  │
-                      │  LLM.chat(messages, tools=registry)   │
-                      │   ↓ tool_calls?                       │
-                      │  ToolExecutor.execute (per-call t/o)  │
-                      │   ↓ role=tool result                  │
-                      │  (loop up to AGENT_MAX_STEPS)         │
-                      │  streaming chat_update on final step  │
-                      └────────────┬──────────────────────────┘
-                                   │
-                   ┌───────────────┼────────────────┐
-                   ▼               ▼                ▼
-            ┌───────────┐   ┌────────────┐  ┌──────────────┐
-            │ OpenAI    │   │ Bedrock    │  │ Slack Web API│
-            │ Chat API  │   │ Messages / │  │ (tools)      │
-            │ Vision    │   │ Converse   │  └──────────────┘
-            └───────────┘   └────────────┘
-                                   ▲
-                                   │
-                            ┌──────┴─────┐
-                            │ DynamoDB   │
-                            │ (dedup+ctx)│
-                            └────────────┘
+                ┌────────────────────────────────────┐
+                │ API Gateway → Lambda (app.py)      │
+                │ ├─ X-Slack-Retry-Num early-return  │
+                │ └─ src.router._route_request       │
+                │     ├─ parse → api_app_id          │
+                │     ├─ SSM lookup (signing+token)  │
+                │     └─ per-app cached Bolt App     │
+                └─────────────┬──────────────────────┘
+            receiver path     │   ack + lambda:Invoke (async, _worker=True)
+                              ▼
+                ┌────────────────────────────────────┐
+                │ Lambda async self-invoke           │
+                │ src.router._process_worker         │
+                │   ├─ event.type == reaction_added? │
+                │   │   → handlers.reactions         │
+                │   └─ otherwise                     │
+                │       → handlers.message._process  │
+                └─────────────┬──────────────────────┘
+                              ▼
+                  ┌─────────────────────────────────┐
+                  │ Agent loop (native func call)   │
+                  │  LLM.chat(messages, tools=reg)  │
+                  │   ↓ tool_calls?                 │
+                  │  ToolExecutor.execute           │
+                  │   ↓ role=tool result            │
+                  │  (loop ≤ AGENT_MAX_STEPS)       │
+                  │  streaming chat_update          │
+                  └────────────┬────────────────────┘
+                   ┌───────────┼────────────────┐
+                   ▼           ▼                ▼
+            ┌──────────┐  ┌──────────┐  ┌─────────────┐
+            │ OpenAI   │  │ Bedrock  │  │ Slack Web   │
+            │ Chat/Vis │  │ Msg/Conv │  │ API (tools) │
+            └──────────┘  └──────────┘  └─────────────┘
+                                ▲
+                                │
+                         ┌──────┴──────┐
+                         │ DynamoDB    │
+                         │ dedup/ctx/  │
+                         │ app registry│
+                         └─────────────┘
 ```
+
+전체 플로우 다이어그램과 각 단계 설명은 [docs/architecture.md](docs/architecture.md).
+
+## 확장하기
+
+- **새 tool**: `src/tools/<name>.py` + `@tool(default_registry, ...)` + `src/tools/__init__.py` import 한 줄. 자세한 절차는 [docs/extending.md](docs/extending.md).
+- **새 LLM provider**: `src/llms/<name>.py` + `LLMProvider` Protocol 구현 + `src/llms/factory.py` 분기. [docs/extending.md](docs/extending.md).
+- **새 reaction handler**: `src/handlers/reactions.py`에 `_handle_reaction_<name>` 함수 + `REACTION_HANDLERS` dict 한 줄. [docs/reactions.md](docs/reactions.md).

@@ -2,6 +2,8 @@
 
 새 tool 또는 새 LLM provider 를 추가하는 방법을 step-by-step 으로 설명합니다. 둘 다 "파일 하나 추가 + `__init__.py` 한 줄" 수준으로 끝납니다 — agent 루프나 레지스트리 코드는 건드리지 않습니다.
 
+> 새 **reaction handler** (예: `:thumbsup:`로 별도 동작)를 추가하려면 [docs/reactions.md](reactions.md)의 "새 reaction handler 추가" 섹션을 보세요. 패턴은 비슷합니다 — 함수 한 개 + `REACTION_HANDLERS` dict 한 줄.
+
 ---
 
 ## 새 tool 추가
@@ -114,7 +116,7 @@ def test_default_registry_has_expected_tools():
 ### 6. 문서 업데이트
 
 - `README.md` 의 "Tools" 목록과 "환경 변수" 표에 추가.
-- `CLAUDE.md` 에 비자명한 동작(SSRF 가드 · 동기화 이슈 · 외부 서비스 의존) 이 있으면 "Architecture — the non-obvious parts" 에 짧게 노트.
+- 비자명한 동작(SSRF 가드 · 동기화 이슈 · 외부 서비스 의존)이 있으면 [`docs/architecture.md`](architecture.md) 의 관련 섹션에 짧게 노트. invariant 수준으로 강한 규칙(깨면 회귀)이면 [`CLAUDE.md`](../CLAUDE.md) 의 "코드 변경 시 깨지기 쉬운 것들" 에도 추가.
 
 ---
 
@@ -216,10 +218,10 @@ _VALID_PROVIDERS = {"openai", "bedrock", "xai", "mistral"}
 
 ### 5. `get_llm` 호출부 업데이트
 
-`app.py` 와 `localtest.py` 는 `api_keys` dict 에 provider-key 쌍을 담아 `get_llm` 에 넘깁니다. 새 provider 를 위해 dict 항목을 추가합니다.
+Lambda 런타임은 `src/runtime.py::_get_llm()`에서, 로컬 CLI는 `localtest.py`에서 `get_llm`을 호출합니다. 둘 다 `api_keys` dict에 provider-key 쌍을 담아 넘깁니다 — 새 provider를 위해 dict에 항목 추가.
 
 ```python
-# app.py / localtest.py — 기존
+# src/runtime.py / localtest.py — 기존
 llm = get_llm(
     provider=settings.llm_provider,
     model=settings.llm_model,
