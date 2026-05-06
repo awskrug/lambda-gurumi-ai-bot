@@ -80,7 +80,7 @@ def some_handler(...):
     dedup = _get_dedup()  # 테스트의 patch가 안 보임
 ```
 
-이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding합니다. 이후 누군가가 `monkeypatch.setattr(src.runtime, "Y", fake)`를 해도, 이미 caller가 들고 있는 reference는 바뀌지 않습니다. 모듈 객체를 import한 뒤 속성으로 접근하면 매 호출마다 속성 lookup이 일어나 patch가 즉시 반영됩니다. 테스트 398개의 절반 정도가 이 패턴에 의존합니다.
+이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding합니다. 이후 누군가가 `monkeypatch.setattr(src.runtime, "Y", fake)`를 해도, 이미 caller가 들고 있는 reference는 바뀌지 않습니다. 모듈 객체를 import한 뒤 속성으로 접근하면 매 호출마다 속성 lookup이 일어나 patch가 즉시 반영됩니다. 테스트 420개의 절반 정도가 이 패턴에 의존합니다.
 
 ## 멀티테넌트 credential resolution
 
@@ -243,16 +243,17 @@ DynamoDB read 실패 시 `record()`가 None 반환 → bot은 글로벌 env var�
 
 ## LLM provider families
 
-`LLMProvider` Protocol은 `chat`, `stream_chat`, `describe_image`, `generate_image` 네 메서드. 세 구현:
+`LLMProvider` Protocol은 `chat`, `stream_chat`, `describe_image`, `generate_image`, `edit_image` 다섯 메서드. 세 구현:
 
 - **`OpenAIProvider`**: 기본 OpenAI 엔드포인트. `_token_params`가 모델군에 따라 `max_tokens`(legacy chat) vs `max_completion_tokens`(gpt-5/o1/o3/o4 reasoning) 자동 선택.
-- **`XAIProvider`**: `base_url="https://api.x.ai/v1"`, 명시적 `api_key`. OpenAI wire 호환이라 `_OpenAICompatProvider` 공유. Grok chat은 legacy `max_tokens + temperature` 조합 사용. 이미지 생성은 `size` 대신 `aspect_ratio`/`resolution`, 항상 `response_format="b64_json"`.
+- **`XAIProvider`**: `base_url="https://api.x.ai/v1"`, 명시적 `api_key`. OpenAI wire 호환이라 `_OpenAICompatProvider` 공유. Grok chat은 legacy `max_tokens + temperature` 조합 사용. 이미지 생성은 `size` 대신 `aspect_ratio`/`resolution`, 항상 `response_format="b64_json"`. **이미지 편집은 OpenAI SDK `images.edit()`가 미지원**(xAI 공식 문서 명시)이라 `urllib`로 `/v1/images/edits` 에 raw JSON POST — `image: {url, type}` 블록(단일은 객체, 다중은 배열).
 - **`BedrockProvider`**: 모델 family prefix로 내부 라우팅. Bedrock 직접 ID와 `us./eu./apac./global.` inference-profile variant 둘 다 인식.
   - `anthropic.claude*` → `invoke_model` + Messages API
   - `amazon.nova*` → `converse`/`converse_stream` + `toolConfig`
   - 미지정 → Claude path (no tools)
+  - `edit_image`는 모든 family에서 `NotImplementedError` raise — Titan/Nova-Canvas/Stability 각각이 image-to-image에 다른 request 스키마를 쓰는데 검증된 코드 경로가 없어 silent 라우팅 대신 명시적 거부로 surface.
 
-**`_CompositeProvider`**: 텍스트와 이미지 provider가 다른 경우 (예: OpenAI 텍스트 + Bedrock 이미지) wrap. `factory.get_llm`이 자동 빌드.
+**`_CompositeProvider`**: 텍스트와 이미지 provider가 다른 경우 (예: OpenAI 텍스트 + Bedrock 이미지) wrap. `factory.get_llm`이 자동 빌드. `edit_image`도 `image` 쪽으로 위임 — 텍스트는 OpenAI, 이미지는 xAI 같은 조합에서 편집은 xAI로 라우팅됨.
 
 ### Image generation family routing
 

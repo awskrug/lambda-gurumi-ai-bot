@@ -15,7 +15,7 @@
 **불변 규칙**:
 
 1. **의도는 항상 LLM 결정.** 키워드 휴리스틱(예: `"그려"`/`"draw"` → 이미지)으로 우회 금지. LLM이 메시지를 읽고 `tool_calls`로 의도를 표현합니다.
-2. **단계 단축 금지.** 명확해 보이는 이미지 요청도 `LLM 계획 → generate_image tool_call → tool 실행 → LLM 응답 합성` 전 과정을 거칩니다. 응답 합성을 건너뛰면 caption·후속 대응·tool 에러 처리가 사라집니다.
+2. **단계 단축 금지.** 명확해 보이는 이미지 요청도 `LLM 계획 → generate_image / edit_image tool_call → tool 실행 → LLM 응답 합성` 전 과정을 거칩니다. 응답 합성을 건너뛰면 caption·후속 대응·tool 에러 처리가 사라집니다.
 3. **Tool orchestration은 agent 루프 안에서.** `src/handlers/message.py`는 Slack 관련만(placeholder, streaming, history). `src/agent.py`가 루프를 owns. 의도 탐지를 agent 밖으로 빼지 마세요.
 4. **속도 문제는 streaming/infrastructure 문제.** 파이프라인 단축이 아니라 async invocation, 모델 선택, streaming UX로 해결.
 
@@ -51,7 +51,7 @@ def some_handler(...):
     dedup = _get_dedup()  # 테스트 patch가 안 보임
 ```
 
-이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding. 이후 `monkeypatch.setattr(src.runtime, "Y", fake)`가 실행돼도 caller가 들고 있는 reference는 옛 객체. 테스트 398개의 절반 이상이 이 패턴에 의존합니다.
+이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding. 이후 `monkeypatch.setattr(src.runtime, "Y", fake)`가 실행돼도 caller가 들고 있는 reference는 옛 객체. 테스트 420개의 절반 이상이 이 패턴에 의존합니다.
 
 테스트도 같은 규칙 — `_runtime`, `_router`, `_message`, `_reactions` 모듈 객체에 patch.
 
@@ -65,6 +65,13 @@ def some_handler(...):
 
 **LLM provider**:
 - 새 tool을 `@tool` 데코레이터 없이 등록 → `ToolRegistry.specs()`와 dispatch가 silently desync
+- `XAIProvider.edit_image`를 OpenAI SDK `client.images.edit()`로 교체 → xAI 공식 문서가 명시적으로 미지원 (`/v1/images/edits`는 multipart가 아니라 JSON에 `image: {url, type}` 블록). 현재 raw urllib POST는 의도된 우회. 단일 이미지는 객체, 다중은 배열로 보내고 `response_format=b64_json` 강제.
+- `BedrockProvider.edit_image`의 `NotImplementedError`를 silent text-to-image fallback으로 바꾸기 → 사용자가 "편집"을 요청했는데 입력 이미지가 무시된 새 이미지가 반환됨. Titan/Nova-Canvas/Stability 각각 image-to-image 스키마가 다르고 검증된 코드 경로가 없으니 명시적 거부 유지.
+
+**Image edit 입력 처리** (`src/tools/image.py`):
+- `_collect_input_images`의 explicit `urls` vs `event.files` 우선순위를 섞기로 변경 → 사용자가 fetch_thread_history로 가져온 옛날 이미지를 수정하려는데 현재 첨부 이미지까지 끼어들어옴. `urls`가 주어지면 `event.files`는 무시하는 게 의도.
+- SLACK_FILE_HOSTS 가드를 `urls` 입력 경로에서 제거 → 봇 토큰으로 임의 URL fetch 가능 (SSRF). 두 입력 경로 모두 같은 가드를 통과해야 함.
+- 봇 토큰을 `ctx.settings.slack_bot_token`에서 읽기로 변경 → Lambda 런타임에서 빈 문자열이라 401. `ctx.slack_client.token` (per-app WebClient 토큰)을 써야 함 — 기존 `read_attached_images` 와 동일 invariant.
 
 **Dedup / 단일 테이블**:
 - `DedupStore.reserve`를 read-then-write로 변경 → 동시 worker 두 개가 같은 메시지 처리 가능 (race)

@@ -25,7 +25,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - `fetch_thread_history` — 스레드 히스토리 조회
   - `search_web` — Tavily (`TAVILY_API_KEY` 설정 시) 또는 DuckDuckGo
   - `fetch_webpage` — 공개 HTTPS 웹페이지 본문·링크 (Jina Reader 우선 + raw fallback, SSRF 가드)
-  - `generate_image` — 이미지 생성 후 Slack 업로드
+  - `generate_image` — 텍스트 프롬프트로 이미지 생성 후 Slack 업로드
+  - `edit_image` — 첨부된 이미지(또는 스레드 이전 이미지 URL)를 프롬프트로 편집 후 Slack 업로드. OpenAI/xAI 지원, Bedrock 미지원
   - `get_current_time` — 서버 기본 TZ 또는 인자로 현재 시각/요일
 - **Production 기반**
   - **멀티테넌트**: 단일 배포로 여러 Slack 앱 서빙. 시크릿은 SSM Parameter Store에서 `api_app_id` 키로 per-request resolve
@@ -155,6 +156,7 @@ python scripts/apps.py name unset A0123ABC                             # 자동 
 |------|--------|---------|------------|
 | 텍스트 + tool calling | `gpt-4o-mini`, `gpt-4o`, `gpt-5-*`, `o1/o3/o4` | `us.anthropic.claude-opus-4-6-v1`, `us.anthropic.claude-sonnet-4-5-...`, `amazon.nova-pro-v1:0` | `grok-4-1-fast-reasoning`, `grok-4.20-0309-reasoning`, `grok-4.20-multi-agent-0309` |
 | 이미지 생성 | `gpt-image-1`, `dall-e-3` | `amazon.nova-canvas-v1:0`, `amazon.titan-image-generator-v2:0` | `grok-imagine-image`, `grok-imagine-image-pro` |
+| 이미지 편집 (`edit_image`) | `gpt-image-1` (멀티 입력), `dall-e-2` (단일+마스크) | — (미지원, `NotImplementedError`) | `grok-imagine-image`, `grok-imagine-image-pro` (xAI 자체 `/v1/images/edits` 엔드포인트) |
 
 - Claude 는 Messages API (`tools=[{name, description, input_schema}]`), Nova 는 Converse API (`toolConfig`) 로 자동 분기됩니다.
 - xAI 는 OpenAI wire 호환이라 OpenAI Python SDK 에 `base_url="https://api.x.ai/v1"` 만 swap 해서 호출합니다. 별도 `XAIProvider` 클래스로 분리되어 있습니다.
@@ -174,7 +176,11 @@ python localtest.py --no-stream "React 훅 설명해줘"   # 전체 답변을 �
 python localtest.py --quiet-steps "…"                # 중간 step 로그 숨김
 python localtest.py                                  # 대화형 (stdin, Ctrl+D)
 
-# 테스트 (398 테스트)
+# edit_image 등 첨부 기반 도구 테스트 — 로컬 파일을 mention 첨부로 시뮬레이션
+python localtest.py --attach ./cat.png "이 사진에 모자를 씌워줘"
+python localtest.py --attach a.png --attach b.png "두 이미지를 합쳐줘"
+
+# 테스트 (420 테스트)
 python -m pytest --cov=src --cov-report=term-missing
 python -m pytest tests/test_handlers_message.py -v                  # 메시지 흐름
 python -m pytest tests/test_handlers_reactions.py -v                # reaction 흐름
@@ -182,7 +188,7 @@ python -m pytest tests/llms/test_bedrock.py -v                      # provider �
 python -m pytest tests/tools/test_web.py::test_fetch_webpage_jina_happy_path -v   # 단일 케이스
 ```
 
-`.env.local` 은 `src/config.py` 가 python-dotenv 로 자동 로드합니다. `SLACK_BOT_TOKEN` 이 placeholder 이면 `localtest.py` 가 Slack 호출을 stub 으로 대체하고 `generate_image` 결과물은 `./.uploads/` 에 파일로 저장됩니다.
+`.env.local` 은 `src/config.py` 가 python-dotenv 로 자동 로드합니다. `SLACK_BOT_TOKEN` 이 placeholder 이면 `localtest.py` 가 Slack 호출을 stub 으로 대체하고 `generate_image`/`edit_image` 결과물은 `./.uploads/` 에 파일로 저장됩니다. `--attach` 로 전달한 로컬 파일은 가짜 `https://files.slack.com/local/...` URL 로 매핑되어 SSRF 가드를 통과하면서 디스크에서 직접 읽힙니다 — 실제 Slack URL fetch 는 영향받지 않습니다.
 
 ## 배포 (Serverless Framework v3)
 

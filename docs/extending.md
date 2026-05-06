@@ -122,7 +122,7 @@ def test_default_registry_has_expected_tools():
 
 ## 새 LLM provider 추가
 
-Provider 는 `LLMProvider` Protocol 을 구현하는 클래스입니다. 텍스트 chat · streaming chat · 이미지 describe · 이미지 generate 네 메서드만 만족하면 됩니다.
+Provider 는 `LLMProvider` Protocol 을 구현하는 클래스입니다. 텍스트 chat · streaming chat · 이미지 describe · 이미지 generate · 이미지 edit 다섯 메서드를 만족해야 합니다. `_OpenAICompatProvider` 를 상속하면 네 메서드가 자동 제공되고 `edit_image` 도 OpenAI SDK `images.edit()` 기반의 기본 구현이 따라옵니다 — 다른 wire 형식이 필요한 provider 만 오버라이드합니다 (예: `XAIProvider.edit_image` 가 raw urllib 로 `/v1/images/edits` JSON POST). 이미지 편집을 지원하지 않는 provider 는 `edit_image` 에서 `NotImplementedError` 를 raise 하면 됩니다 — `ToolExecutor` 가 잡아 LLM 에 복구 가능한 에러로 surface 합니다.
 
 ### 1. 파일 만들기
 
@@ -151,7 +151,7 @@ class MistralProvider(_OpenAICompatProvider):
     API_KEY_ENV_VAR = "MISTRAL_API_KEY"
 ```
 
-OpenAI wire 호환이 아닌 provider (예: Bedrock 처럼 고유 SDK) 는 `LLMProvider` Protocol 네 메서드를 직접 구현해야 합니다. `src/llms/bedrock.py` 가 좋은 reference 입니다.
+OpenAI wire 호환이 아닌 provider (예: Bedrock 처럼 고유 SDK) 는 `LLMProvider` Protocol 다섯 메서드를 직접 구현해야 합니다. `src/llms/bedrock.py` 가 좋은 reference 입니다.
 
 ### 2. `factory.py` 에 분기 추가
 
