@@ -102,15 +102,35 @@ and diverges from native function-calling semantics.
    execution → LLM compose. Skipping the compose step to save seconds
    means the bot can't caption, follow up, or react to tool errors.
 3. **Tool orchestration happens inside the agent loop**, not in
-   `app.py`. `app.py` wires Slack concerns (placeholder, streaming,
-   history). `src/agent.py` owns the loop. Don't push intent
-   detection out of the agent.
+   the message handler. `src/handlers/message.py` wires Slack
+   concerns (placeholder, streaming, history). `src/agent.py` owns
+   the loop. Don't push intent detection out of the agent.
 4. **Slowness is a streaming / infrastructure problem, not a
    pipeline-shortcut problem.** If the loop is slow, fix it with
    async invocation, model choice, or streaming UX — not by
    stripping phases.
 
 ## Architecture — the non-obvious parts
+
+### Module layout — flow-by-flow split
+
+`app.py` is just the Lambda entrypoint (`serverless.yml: handler: app.lambda_handler`). All real logic lives under `src/`:
+
+```
+app.py                   ← lambda_handler — dispatches to router on _worker / receiver path
+src/runtime.py           ← process-wide singletons (DDB/SSM/Lambda clients, Bolt cache,
+                           bot_user_id cache) + accessors + settings + logger
+src/router.py            ← receiver path (parse → resolve creds → Bolt) + worker path
+                           (_process_worker → branch on event type) + per-app Bolt cache
+src/handlers/message.py  ← _process for app_mention + DM message events
+                           (allowlists, per-app override, agent run, streaming, history)
+src/handlers/reactions.py ← _process_reaction dispatch + REACTION_HANDLERS dict +
+                           per-reaction handlers (currently `:x:` → chat.delete)
+```
+
+`app.py` ≤ 100 lines is intentional — the Lambda entrypoint is a deployment contract, the actual logic must be reachable from `src/` so other entrypoints (local CLI, future event sources) don't have to import the Lambda module.
+
+**Cross-module reference rule (load-bearing for tests).** Inside the new `src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py`: address shared state via `from src import runtime` then `runtime.X()` — NOT `from src.runtime import X`. The `from X import Y` form binds `Y` at import time, which makes `monkeypatch.setattr(src.runtime, "Y", fake)` invisible to the importer (it still holds the original function object). Late binding through the module attribute is what makes the test suite's per-test stubs (for `_get_dedup`, `_get_credentials`, `settings`, etc.) work. The same applies to test files — they patch `_runtime`, `_router`, `_message`, `_reactions` (the module objects), not whatever those modules re-exported.
 
 ### Agent loop uses NATIVE function calling, not JSON prompting
 
@@ -213,13 +233,28 @@ Stream throttling is handled inside `StreamingMessage.append()` (`min_interval=0
 
 `src/logging_utils.py` installs a JSON handler on root. `set_request_id(uuid)` is called at the start of each `_process`. `log_event(logger, "agent.done", steps=..., tokens_in=...)` emits records whose `extra_fields` dict survives into the JSON payload — useful for CloudWatch Insights queries. Because `logging.LoggerAdapter.process()` in Python 3.12 overwrites `extra=`, `log_event` dispatches via `logger.logger` (the underlying `Logger`) instead of the adapter.
 
+### `reaction_added` — bot self-delete on `:x:`
+
+A reactor of `:x:` on a bot-authored message can delete that message. The handler is dispatch-table driven so adding more reactions stays a one-line change.
+
+Flow: Slack `reaction_added` → Bolt `_on_reaction_added` (receiver pre-filter against `REACTION_HANDLERS` keys + `item.type == "message"`) → `_enqueue_worker` → `_process_worker` branches on `event["type"] == "reaction_added"` → `_process_reaction` (common: `request_id`, `item.type` re-check, `event_ts`-keyed dedup) → registered handler. The receiver filter and the worker dispatch read the same `REACTION_HANDLERS` dict, so registering a new reaction automatically opens the receiver path for it.
+
+`_handle_reaction_x_delete`:
+- Verifies the target message was authored by THIS bot. `event.item_user == _get_bot_user_id(client, api_app_id)`. `_get_bot_user_id` calls `auth.test` once per `api_app_id` and caches in `_bot_user_ids`. When `item_user` is missing from the payload, the check is skipped and `chat.delete` itself enforces (it 403s on foreign messages).
+- Authorization: reactor must be either (a) the original asker — the user whose message started the thread the bot answered in, looked up via `conversations.replies(channel, ts=message_ts, limit=1)` (parent comes first, oldest_first), or (b) a user in the effective `ALLOWED_USER_IDS` (per-app override > global env var, same three-state contract as the message path). `[]` for the per-app list means the original-asker check is the only authorization path for this app — different semantics from the message path's "[] means everyone."
+- `conversations.replies` failure (missing scope, network) does not abort — the ALLOWED_USER_IDS check still runs.
+- Required Slack OAuth scopes (in addition to existing `chat:write`): `reactions:read` (event subscription), `channels:history` / `groups:history` / `im:history` / `mpim:history` (one or more, depending on where the bot operates) for the asker lookup. `chat:write` already covers self-delete.
+- Required Slack Event Subscription: `reaction_added`.
+
 ### Extension points
 
 **Add a new tool.** Create `src/tools/<name>.py` with one or more functions decorated by `@tool(default_registry, name="...", description="...", parameters={...})`. Add `<name>` to the side-effect import block in `src/tools/__init__.py`. Add `tests/tools/test_<name>.py`. That's it — the agent loop sees the new tool because `default_registry` is populated at import time.
 
 **Add a new LLM provider.** Create `src/llms/<name>.py` with a class that satisfies the `LLMProvider` Protocol (`chat`, `stream_chat`, `describe_image`, `generate_image`). Add a branch to `src/llms/factory.py`'s `get_llm`, and if the provider introduces new model families extend `_VALID_PROVIDERS` in `src/config.py`. Add `tests/llms/test_<name>.py`.
 
-Neither extension requires editing the registry or the agent loop.
+**Add a new reaction handler.** Write `_handle_reaction_<name>(event, client, api_app_id)` in `src/handlers/reactions.py` and add `"<reaction>": _handle_reaction_<name>` to `REACTION_HANDLERS` in the same file. The dispatcher (`_process_reaction`) covers `request_id`, `item.type == "message"` filtering, and per-event dedup; the handler owns its own target validation, authorization model, and action. The receiver pre-filter (`router._on_reaction_added`) reads the same dict so unregistered reactions never burn a Lambda async invoke. Add `tests/test_handlers_reactions.py` cases mirroring the `_handle_reaction_x_delete` set.
+
+None of these extensions requires editing the dispatcher itself.
 
 ## Deployment
 
@@ -242,10 +277,11 @@ Separate from the Lambda runtime role. `trust-policy.json` allows both `repo:aws
 
 ## Testing
 
-`pytest.ini` pins `testpaths = tests`, `filterwarnings = ignore::DeprecationWarning`. `app.py`'s `_process` path is exercised by live Slack traffic, not unit tests. Key approach:
+`pytest.ini` pins `testpaths = tests`, `filterwarnings = ignore::DeprecationWarning`. Key approach:
 
-- Tests mirror source layout: `tests/llms/` for each `src/llms/*` submodule, `tests/tools/` for each `src/tools/*` submodule. Top-level `tests/test_agent.py`, `test_config.py`, `test_dedup.py`, `test_logging_utils.py`, `test_slack_helpers.py` cover the non-packaged modules.
-- Shared tool-test fixtures (`_ctx`, `_settings`, `_streamed_read`) live in `tests/tools/_helpers.py` — individual test files import from there instead of redefining them.
+- Tests mirror source layout: `tests/llms/` for each `src/llms/*` submodule, `tests/tools/` for each `src/tools/*` submodule, `tests/test_router.py` + `tests/test_handlers_message.py` + `tests/test_handlers_reactions.py` for the routing/handler split, and `tests/test_app.py` for `lambda_handler` itself. Top-level `tests/test_agent.py`, `test_config.py`, `test_dedup.py`, `test_logging_utils.py`, `test_slack_helpers.py` cover the non-packaged modules.
+- Shared fixtures live in `_helpers.py` next to the tests that use them: `tests/tools/_helpers.py` (`_ctx`, `_settings`, `_streamed_read`) for tool tests; `tests/_helpers.py` (`_FakeCreds`, `_FakeDedup`, `_NullMetadata`) for routing/handler tests. File-local fixtures stay in their owning test file.
+- Tests address modules through their canonical objects (`from src import router as _router; from src import runtime as _runtime; from src.handlers import message as _message; from src.handlers import reactions as _reactions`) and patch attributes on those objects (`monkeypatch.setattr(_runtime, "_get_dedup", ...)`). Patching `app_module` for state that lives elsewhere does NOT work — see the "Cross-module reference rule" above.
 - `moto[dynamodb]` for `DedupStore` / `ConversationStore` integration tests.
 - Network patches target the submodule where `urllib` / `socket` is imported, not the package: `patch("src.tools.slack.urllib.request.urlopen")` for Slack file fetch, `patch("src.tools.search.urllib.request.urlopen")` for `search_web`, `patch("src.tools.web.urllib.request.urlopen")` and `monkeypatch.setattr("src.tools.web.socket.getaddrinfo", …)` for `fetch_webpage`.
 - `ScriptedLLM` (in `tests/test_agent.py`) emits predefined `LLMResult` sequences to drive the agent loop without any network.
@@ -253,9 +289,13 @@ Separate from the Lambda runtime role. `trust-policy.json` allows both `repo:aws
 - `tests/test_config.py` builds `Settings` from `monkeypatch`-controlled env without reloading the module.
 - `reportlab` (dev-only) synthesizes real PDFs for `read_attached_document` parser coverage.
 
-Per-module coverage:
+Per-module coverage (categories now mirror the flow split):
 
-- `app.py` 35% (routing and worker fan-out covered by `tests/test_app.py`; `_process` is only hit in production)
+- `app.py` minimal — just `lambda_handler` dispatch (the four `tests/test_app.py` tests cover the worker / receiver / Slack-retry branches)
+- `src/router.py` covered by `tests/test_router.py` (receiver + worker + Bolt cache)
+- `src/handlers/message.py` covered by `tests/test_handlers_message.py` (the `_process` flow end-to-end is hit only in production; tests stub agent / streaming / history)
+- `src/handlers/reactions.py` covered by `tests/test_handlers_reactions.py` (`_process_reaction` dispatch + `_handle_reaction_x_delete` authorization model)
+- `src/runtime.py` exercised transitively by every routing/handler test (singleton accessors + `_get_bot_user_id`)
 - `agent.py` 96%, `config.py` 97%, `dedup.py` 80%, `slack_helpers.py` 86%, `logging_utils.py` 97%
 - `llms/`: `base.py` 70%, `openai_wire.py` 96%, `openai.py` 100%, `xai.py` 100%, `bedrock.py` 78%, `composite.py` 87%, `factory.py` 94%
 - `tools/`: `registry.py` 100%, `slack.py` 87%, `search.py` 93%, `web.py` 97%, `image.py` 100%, `time.py` 100%
@@ -288,9 +328,11 @@ Per-module coverage:
 - **Switching `record(...)` away from `ReturnValues=ALL_NEW`**. The runtime relies on the write returning the full row so it can resolve per-app ACL on the same DynamoDB roundtrip. Dropping `ALL_NEW` either adds a separate GetItem per event (latency + cost) or — worse — silently regresses ACL to global-only because `app_row` becomes empty.
 - **Failing closed when `record(...)` raises**. The current contract is fail-open to global ACL — a transient DynamoDB outage degrades to "global env-var rules apply" rather than "the bot rejects everyone." Locking down on read failure would create an outage amplifier; the existing global env vars are the safety net.
 - **Removing `dynamodb:UpdateItem` from the Lambda IAM**. `AppMetadataStore.record()` plus `set_allowlist`/`unset_allowlist` all go through `update_item`. Without the permission `record()` swallows the `AccessDeniedException` and returns `None`, so the bot keeps responding but `app:{api_app_id}` rows never appear and per-app ACL silently degrades to global. `dedup:`/`ctx:` paths use `put_item` and stay healthy, which makes the missing-metadata state easy to overlook.
+- **Bypassing `_get_bot_user_id` for the `:x:`-delete authorization check**. The check exists so we don't try `chat.delete` on messages this bot didn't post — that 403s and looks like a bug to operators reading logs. Removing it (or letting `auth.test` failures be cached) means a misconfigured app could appear to "ignore" valid X reactions while actually 403'ing every delete attempt against another bot's messages. The cache is per-`api_app_id` and only stores successes — failures are explicitly NOT cached so a transient `auth.test` outage doesn't poison the lookup until container death.
+- **Conflating per-app `ALLOWED_USER_IDS=[]` semantics between the message path and the reaction path**. Same attribute, different effect by design: on the message path `[]` means "this app explicitly allows all users to talk"; on the reaction path `[]` means "the original-asker check is the only authorization path for this app, no other ops user list applies." Both are correct for their flow — the asymmetry exists because messaging is the primary user-facing surface (open by default for the app) while reaction-delete is a privileged action (closed by default to non-askers). Don't "normalize" these to the same semantics.
+- **Letting reaction handlers skip the common dispatcher**. `_process_reaction` owns `set_request_id`, `item.type` filtering, and per-event (`event_ts`-keyed) dedup. A handler that registers itself outside `REACTION_HANDLERS` and is called directly from `_on_reaction_added` would skip dedup — Slack/Lambda re-deliveries would re-fire the action. Always go through the dispatcher.
 
 ## Excluded (Phase 2+)
 
 - **Bedrock Knowledge Base (S3 Vectors + RAG) ingestion pipeline.** Scaffolding exists (IAM policy + `sync-notion.yml` / `sync-awsdocs.yml`), but `serverless.yml` does not provision `S3Bucket` / `KnowledgeBase` / `DataSource`, and the ingestion scripts (`scripts/notion/export.py`, `scripts/awsdocs/sync.sh`) were removed. Both must be restored to re-enable the workflows.
-- `reaction_added` event wiring and domain-specific handlers.
 - CloudWatch Alarms, X-Ray tracing, languages other than `ko` / `en`.
