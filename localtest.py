@@ -20,6 +20,7 @@ import argparse
 import logging
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,11 @@ class _StubSlackClient:
     `files_upload_v2` writes the received bytes to ./.uploads/ so you can
     actually open generated images instead of discarding them.
     """
+
+    # `read_attached_images` / `edit_image` read the bot token off the
+    # WebClient (per-app token in production); a non-empty stub keeps the
+    # auth header builder from short-circuiting on falsy values.
+    token = "xoxb-stub"
 
     def conversations_replies(self, **_):
         return {"messages": []}
@@ -63,6 +69,84 @@ def _build_slack_client(token: str):
         except Exception:
             pass
     return _StubSlackClient()
+
+
+def _detect_image_mime(data: bytes) -> str:
+    """Detect image MIME from magic bytes — file extensions lie (e.g. JPEG saved as .png)."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _install_local_image_fetcher(url_to_path: dict[str, Path]) -> None:
+    """Patch urllib.request.urlopen so the image tools can 'download' local
+    files via fake files.slack.com URLs without hitting the real network.
+
+    Real Slack URLs untouched — anything not in the mapping passes through
+    to the original urlopen, so production Slack behaviour is unaffected
+    in environments where SLACK_BOT_TOKEN is real.
+    """
+    real_urlopen = urllib.request.urlopen
+
+    class _LocalResponse:
+        def __init__(self, body: bytes, mime: str):
+            self._body = body
+            self.headers = {"Content-Type": mime}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _n: int = -1) -> bytes:
+            return self._body
+
+    def _patched(req, *args, **kwargs):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        path = url_to_path.get(url)
+        if path is None:
+            return real_urlopen(req, *args, **kwargs)
+        body = path.read_bytes()
+        return _LocalResponse(body, _detect_image_mime(body[:32]))
+
+    urllib.request.urlopen = _patched
+
+
+def _build_attachment_event(attach_paths: list[str]) -> dict[str, Any]:
+    """Turn `--attach` paths into a fake Slack mention event the image tools
+    can consume. Returns {} when no attachments were given."""
+    if not attach_paths:
+        return {}
+    files: list[dict[str, Any]] = []
+    url_to_path: dict[str, Path] = {}
+    for raw in attach_paths:
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file():
+            print(f"[오류] 첨부 파일을 찾을 수 없습니다: {raw}", file=sys.stderr)
+            sys.exit(1)
+        head = path.read_bytes()[:32]
+        mime = _detect_image_mime(head)
+        # The host has to be one of the SLACK_FILE_HOSTS values so the SSRF
+        # guard in src/tools/image.py accepts it; a millis-prefixed name
+        # keeps every test attachment URL unique even within one run.
+        url = f"https://files.slack.com/local/{int(time.time() * 1000)}-{path.name}"
+        url_to_path[url] = path
+        files.append(
+            {
+                "mimetype": mime,
+                "url_private_download": url,
+                "name": path.name,
+            }
+        )
+    _install_local_image_fetcher(url_to_path)
+    return {"files": files}
 
 
 def _make_on_step(quiet: bool):
@@ -93,6 +177,13 @@ def main() -> None:
     parser.add_argument("question", nargs="*", help="Question text. If omitted, read from stdin.")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output; print the full answer at the end.")
     parser.add_argument("--quiet-steps", action="store_true", help="Suppress intermediate step logs on stderr.")
+    parser.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="로컬 이미지를 mention 첨부로 시뮬레이션 (반복 사용 가능). edit_image 같은 첨부 기반 도구 테스트용.",
+    )
     args = parser.parse_args()
 
     stream_mode = not args.no_stream
@@ -127,11 +218,15 @@ def main() -> None:
     )
 
     slack_client = _build_slack_client(settings.slack_bot_token)
+    event = _build_attachment_event(args.attach)
+    if args.attach:
+        names = ", ".join(f["name"] for f in event["files"])
+        print(f"[첨부] {names}", file=sys.stderr)
     context = ToolContext(
         slack_client=slack_client,
         channel="local",
         thread_ts="0",
-        event={},
+        event=event,
         settings=settings,
         llm=llm,
     )
