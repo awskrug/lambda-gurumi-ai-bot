@@ -24,3 +24,6 @@ class _CompositeProvider:
 
     def generate_image(self, prompt):
         return self.image.generate_image(prompt)
+
+    def edit_image(self, prompt, images):
+        return self.image.edit_image(prompt, images)

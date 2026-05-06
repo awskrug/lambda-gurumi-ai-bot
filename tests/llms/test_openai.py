@@ -269,3 +269,73 @@ def test_openai_generate_image_dalle_sends_response_format():
     provider.generate_image("cat")
     kwargs = provider._client.images.generate.call_args.kwargs
     assert kwargs["response_format"] == "b64_json"
+
+
+def test_openai_edit_image_sends_single_file_for_one_image():
+    """gpt-image-1 accepts a single (filename, fileobj, mime) tuple when
+    only one input image is given; we pass it through `image=` not `image[]`."""
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")
+    provider._client = MagicMock()
+    response = MagicMock()
+    response.data = [MagicMock(b64_json=base64.b64encode(b"out").decode())]
+    provider._client.images.edit.return_value = response
+
+    out = provider.edit_image("style as pencil", [(b"\x89PNG-bytes", "image/png")])
+
+    assert out == b"out"
+    kwargs = provider._client.images.edit.call_args.kwargs
+    assert kwargs["model"] == "gpt-image-1"
+    assert kwargs["prompt"] == "style as pencil"
+    # gpt-image-1 rejects response_format and is multi-image capable but
+    # given one image we pass a bare tuple, not a list.
+    assert "response_format" not in kwargs
+    image_arg = kwargs["image"]
+    assert isinstance(image_arg, tuple)
+    filename, fileobj, mime = image_arg
+    assert filename == "image_0.png"
+    assert mime == "image/png"
+    assert fileobj.read() == b"\x89PNG-bytes"
+
+
+def test_openai_edit_image_sends_list_for_multiple_images():
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")
+    provider._client = MagicMock()
+    response = MagicMock()
+    response.data = [MagicMock(b64_json=base64.b64encode(b"o").decode())]
+    provider._client.images.edit.return_value = response
+
+    provider.edit_image(
+        "merge",
+        [(b"a", "image/png"), (b"b", "image/jpeg")],
+    )
+
+    image_arg = provider._client.images.edit.call_args.kwargs["image"]
+    assert isinstance(image_arg, list)
+    assert len(image_arg) == 2
+    # Filename hint follows the mime type so OpenAI's content-type detection
+    # picks the right format on the multipart side.
+    assert image_arg[0][0] == "image_0.png"
+    assert image_arg[1][0] == "image_1.jpg"
+
+
+def test_openai_edit_image_dalle_includes_response_format_and_size():
+    """dall-e-2 still needs the explicit b64_json + size; gpt-image-1 doesn't."""
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="dall-e-2")
+    provider._client = MagicMock()
+    response = MagicMock()
+    response.data = [MagicMock(b64_json=base64.b64encode(b"ok").decode())]
+    provider._client.images.edit.return_value = response
+
+    provider.edit_image("change", [(b"x", "image/png")])
+
+    kwargs = provider._client.images.edit.call_args.kwargs
+    assert kwargs["response_format"] == "b64_json"
+    assert kwargs["size"] == "1024x1024"
+
+
+def test_openai_edit_image_requires_at_least_one_image():
+    import pytest
+
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")
+    with pytest.raises(ValueError, match="at least one input image"):
+        provider.edit_image("hi", [])

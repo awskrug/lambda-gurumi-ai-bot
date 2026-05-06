@@ -139,7 +139,7 @@ class SlackMentionAgent:
                     {"tool": call.name, "ok": bool(tool_result.get("ok")), "error": tool_result.get("error")},
                 )
 
-                if call.name == "generate_image" and tool_result.get("ok"):
+                if call.name in ("generate_image", "edit_image") and tool_result.get("ok"):
                     permalink = (tool_result.get("result") or {}).get("permalink")
                     if permalink:
                         image_url = permalink
@@ -189,11 +189,17 @@ class SlackMentionAgent:
         # renders as mrkdwn — NOT GitHub markdown. Guide the model so replies
         # don't surface raw `**bold**` or `[text](url)` strings.
         slack_rules = (
-            "When you call the `generate_image` tool, the generated image is "
-            "already uploaded inline into the Slack thread. Do NOT repeat the "
-            "image URL or permalink in your text reply — just describe or "
-            "caption the image briefly. The user sees the picture attached "
-            "directly; a URL line is duplicate noise.\n"
+            "When you call `generate_image` or `edit_image`, the resulting "
+            "image is already uploaded inline into the Slack thread. Do NOT "
+            "repeat the image URL or permalink in your text reply — just "
+            "describe or caption the image briefly. The user sees the picture "
+            "attached directly; a URL line is duplicate noise.\n"
+            "Pick the right tool: `generate_image` for fresh prompts with no "
+            "source image; `edit_image` whenever the user wants to transform, "
+            "restyle, or modify an existing image (theirs or one earlier in "
+            "the thread). For edits to a thread image, call "
+            "`fetch_thread_history` first to obtain `url_private_download`, "
+            "then pass it to `edit_image(prompt=..., urls=[...])`.\n"
             "Slack renders mrkdwn, not GitHub markdown. Use `*bold*` with "
             "single asterisks, `_italic_`, `` `code` ``, and "
             "`<https://url|label>` for links. Do NOT use `**bold**` or "

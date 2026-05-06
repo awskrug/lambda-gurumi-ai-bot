@@ -53,6 +53,12 @@ class LLMProvider(Protocol):
 
     def generate_image(self, prompt: str) -> bytes: ...
 
+    def edit_image(
+        self,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+    ) -> bytes: ...
+
 
 # --------------------------------------------------------------------------- #
 # Retry helper

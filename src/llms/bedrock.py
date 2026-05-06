@@ -331,6 +331,18 @@ class BedrockProvider:
         payload = json.loads(response["body"].read())
         return self._extract_image_bytes(payload)
 
+    def edit_image(self, prompt: str, images: list[tuple[bytes, str]]) -> bytes:
+        # Titan / Nova Canvas / Stability all support image-to-image, but each
+        # uses a different request shape (Titan IMAGE_VARIATION, Nova
+        # COLOR_GUIDED_GENERATION, Stability init_image). We don't have a
+        # tested code path for any of them yet; raise so the executor surfaces
+        # a clear "edit not supported on this provider" message instead of
+        # silently routing to text-to-image.
+        raise NotImplementedError(
+            f"edit_image is not supported by Bedrock image model '{self.image_model}'. "
+            "Switch IMAGE_PROVIDER to 'openai' or 'xai' for editing."
+        )
+
     def _build_image_body(self, prompt: str) -> dict[str, Any]:
         family = self._image_family
         if family.startswith("amazon.titan-image") or family.startswith("amazon.nova-canvas"):

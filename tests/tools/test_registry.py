@@ -19,6 +19,7 @@ def test_default_registry_has_expected_tools():
         "fetch_thread_history",
         "search_web",
         "generate_image",
+        "edit_image",
         "get_current_time",
         "read_attached_document",
     }.issubset(names)
@@ -130,6 +131,14 @@ def test_executor_per_tool_timeout_override():
 def test_generate_image_tool_has_extended_timeout():
     """Image generation is slow; its registered timeout must be > default."""
     td = default_registry.get("generate_image")
+    assert td is not None
+    assert td.timeout is not None
+    assert td.timeout >= 60.0
+
+
+def test_edit_image_tool_has_extended_timeout():
+    """Edit is at least as slow as generate (input upload + edit) — same ceiling."""
+    td = default_registry.get("edit_image")
     assert td is not None
     assert td.timeout is not None
     assert td.timeout >= 60.0

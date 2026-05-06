@@ -137,6 +137,31 @@ def test_agent_captures_image_url():
     assert result.image_url == "https://slack/x"
 
 
+def test_agent_captures_image_url_from_edit_image():
+    """edit_image must be tracked the same way as generate_image — both leave
+    a file inline in the thread, so the image_url field on AgentResult should
+    point at it regardless of which tool produced it."""
+    reg = ToolRegistry()
+
+    @tool(reg, name="edit_image", description="", parameters={"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]})
+    def _edit(ctx, prompt):
+        return {"permalink": "https://slack/edited"}
+
+    llm = ScriptedLLM(
+        [
+            LLMResult(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="edit_image", arguments={"prompt": "sketch"})],
+                stop_reason="tool_use",
+            ),
+            LLMResult(content="여기 편집했어요", tool_calls=[], stop_reason="end_turn"),
+        ]
+    )
+    agent = SlackMentionAgent(llm=llm, context=_ctx(), registry=reg, max_steps=3)
+    result = agent.run("스케치 스타일로")
+    assert result.image_url == "https://slack/edited"
+
+
 def test_agent_forces_final_compose_at_max_steps():
     reg = _registry_with_search()
     # Every step returns more tool calls — never ends.

@@ -6,6 +6,7 @@ providers share this module. BedrockProvider does NOT use any of these.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import time
@@ -29,6 +30,21 @@ def _is_new_gen_openai(model: str) -> bool:
     """Newer OpenAI models (gpt-5, o1/o3/o4 reasoning) use `max_completion_tokens`
     and disallow `temperature` overrides."""
     return any(model.startswith(p) for p in _OPENAI_NEW_GENERATION_PREFIXES)
+
+
+_MIME_TO_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+
+
+def _image_filename(index: int, mime: str) -> str:
+    """Filename hint for multipart upload — OpenAI uses it for content-type detection."""
+    ext = _MIME_TO_EXT.get((mime or "").lower(), "png")
+    return f"image_{index}.{ext}"
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +236,18 @@ class _OpenAICompatProvider:
             kwargs["response_format"] = "b64_json"
         return kwargs
 
+    def _image_edit_kwargs(self, prompt: str) -> dict[str, Any]:
+        """Default OpenAI image edit call kwargs (image= filled by edit_image)."""
+        kwargs: dict[str, Any] = {
+            "model": self.image_model,
+            "prompt": prompt,
+        }
+        # Mirror generate(): gpt-image-1 rejects response_format, dall-e-2 needs it.
+        if self.image_model.startswith("dall-e"):
+            kwargs["response_format"] = "b64_json"
+            kwargs["size"] = "1024x1024"
+        return kwargs
+
     # -- LLMProvider surface ----------------------------------------------- #
 
     def chat(
@@ -290,4 +318,20 @@ class _OpenAICompatProvider:
     def generate_image(self, prompt: str) -> bytes:
         client = self._get_client()
         response = client.images.generate(**self._image_generate_kwargs(prompt))
+        return base64.b64decode(response.data[0].b64_json)
+
+    def edit_image(self, prompt: str, images: list[tuple[bytes, str]]) -> bytes:
+        if not images:
+            raise ValueError("edit_image requires at least one input image")
+        client = self._get_client()
+        kwargs = self._image_edit_kwargs(prompt)
+        # OpenAI multipart `image` accepts a tuple (filename, bytes_or_fileobj,
+        # content_type). gpt-image-1 supports a list of these (multi-image
+        # composition); dall-e-2 only takes a single PNG with alpha channel.
+        files = [
+            (_image_filename(idx, mime), io.BytesIO(data), mime)
+            for idx, (data, mime) in enumerate(images)
+        ]
+        kwargs["image"] = files if len(files) > 1 else files[0]
+        response = client.images.edit(**kwargs)
         return base64.b64decode(response.data[0].b64_json)

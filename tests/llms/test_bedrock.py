@@ -301,6 +301,21 @@ def test_bedrock_generate_image_titan_returns_bytes():
     assert provider.generate_image("cat") == b"imgdata"
 
 
+def test_bedrock_edit_image_raises_unsupported():
+    """No tested image-edit path on any Bedrock image family yet — surface a
+    clear NotImplementedError so the executor returns {ok: False, error: ...}
+    and the LLM apologises rather than silently routing to text-to-image."""
+    import pytest
+
+    provider = BedrockProvider(
+        model="anthropic.claude-3-5-sonnet-20240620-v1:0",
+        image_model="amazon.titan-image-generator-v1",
+        region="us-east-1",
+    )
+    with pytest.raises(NotImplementedError, match="not supported"):
+        provider.edit_image("change", [(b"x", "image/png")])
+
+
 def test_bedrock_generate_image_stability_returns_bytes():
     provider = BedrockProvider(
         model="anthropic.claude-3-5-sonnet-20240620-v1:0",
