@@ -9,6 +9,7 @@ from tests.tools._helpers import _ctx, _settings
 from src.tools.registry import ToolContext, ToolExecutor
 from src.tools.slack import (
     fetch_thread_history,
+    fetch_user_profile,
     read_attached_document,
     read_attached_images,
 )
@@ -185,6 +186,167 @@ def test_read_attached_images_urls_reject_non_slack_host():
     ctx = _ctx()
     with pytest.raises(ValueError):
         read_attached_images(ctx, urls=["https://evil.example.com/cat.png"])
+
+
+def test_read_attached_images_accepts_profile_image_hosts():
+    """Profile image URLs returned by fetch_user_profile must be loadable
+    via read_attached_images(urls=[...]) without a bot token (public CDN)."""
+    ctx = _ctx()
+    ctx.slack_client.token = "xoxb-bot"
+    ctx.llm.describe_image.return_value = "person smiling"
+    captured: list[dict[str, str]] = []
+
+    def _capture(req, timeout=None):
+        captured.append(dict(req.header_items()))
+        cm = MagicMock()
+        cm.__enter__.return_value.read.return_value = b"png-bytes"
+        return cm
+
+    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture):
+        out = read_attached_images(
+            ctx,
+            urls=[
+                "https://avatars.slack-edge.com/T1/U1/abc_512.png",
+                "https://secure.gravatar.com/avatar/deadbeef.png",
+            ],
+        )
+
+    assert len(out) == 2
+    # Profile-image hosts are public — Authorization header MUST NOT be sent
+    # (sending it could leak the bot token to a third-party CDN).
+    for headers in captured:
+        headers_lower = {k.lower(): v for k, v in headers.items()}
+        assert "authorization" not in headers_lower
+
+
+def test_read_attached_images_authorization_only_for_files_host():
+    """Mixed urls: files.slack.com gets the bot token, profile hosts do not."""
+    ctx = _ctx()
+    ctx.slack_client.token = "xoxb-bot"
+    ctx.llm.describe_image.return_value = "x"
+    captured: dict[str, str | None] = {}
+
+    def _capture(req, timeout=None):
+        captured[req.full_url] = req.headers.get("Authorization")
+        cm = MagicMock()
+        cm.__enter__.return_value.read.return_value = b"x"
+        return cm
+
+    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture):
+        read_attached_images(
+            ctx,
+            urls=[
+                "https://files.slack.com/x/private.png",
+                "https://avatars.slack-edge.com/T1/U1/avatar.png",
+            ],
+        )
+
+    assert captured["https://files.slack.com/x/private.png"] == "Bearer xoxb-bot"
+    assert captured["https://avatars.slack-edge.com/T1/U1/avatar.png"] is None
+
+
+# --------------------------------------------------------------------------- #
+# fetch_user_profile
+# --------------------------------------------------------------------------- #
+
+
+def test_fetch_user_profile_by_user_id():
+    from src.slack_helpers import user_name_cache
+
+    user_name_cache._cache.clear()
+    client = MagicMock()
+    client.users_info.return_value = {
+        "user": {
+            "real_name": "Bruce Kim",
+            "profile": {
+                "display_name": "bruce",
+                "real_name": "Bruce Kim",
+                "image_72": "https://avatars.slack-edge.com/72.png",
+                "image_192": "https://avatars.slack-edge.com/192.png",
+                "image_512": "https://avatars.slack-edge.com/512.png",
+                "image_original": "https://avatars.slack-edge.com/orig.png",
+            },
+        }
+    }
+    out = fetch_user_profile(_ctx(slack_client=client), user="U12345")
+    assert out == {
+        "user_id": "U12345",
+        "display_name": "bruce",
+        "real_name": "Bruce Kim",
+        # image_original wins over image_512 when both are present.
+        "image_url": "https://avatars.slack-edge.com/orig.png",
+    }
+    client.users_info.assert_called_once_with(user="U12345")
+    # The resolved display name should land in the cache so subsequent
+    # fetch_thread_history calls don't re-resolve.
+    assert user_name_cache._cache.get("U12345") == "bruce"
+
+
+def test_fetch_user_profile_falls_through_image_sizes():
+    """Default-avatar users have no image_original; fall back to 512."""
+    client = MagicMock()
+    client.users_info.return_value = {
+        "user": {
+            "real_name": "Sam",
+            "profile": {
+                "display_name": "sam",
+                "image_192": "https://secure.gravatar.com/x_192.png",
+                "image_512": "https://secure.gravatar.com/x_512.png",
+            },
+        }
+    }
+    out = fetch_user_profile(_ctx(slack_client=client), user="U999")
+    assert out["image_url"] == "https://secure.gravatar.com/x_512.png"
+
+
+def test_fetch_user_profile_strips_mention_syntax():
+    client = MagicMock()
+    client.users_info.return_value = {
+        "user": {"real_name": "X", "profile": {"display_name": "x", "image_512": "https://avatars.slack-edge.com/x.png"}}
+    }
+    fetch_user_profile(_ctx(slack_client=client), user="<@U2|olduser>")
+    client.users_info.assert_called_once_with(user="U2")
+
+
+def test_fetch_user_profile_resolves_display_name_via_cache():
+    """If the display name was warmed by fetch_thread_history, the LLM can
+    pass it directly without knowing the user_id."""
+    from src.slack_helpers import user_name_cache
+
+    user_name_cache._cache.clear()
+    user_name_cache._cache["U7"] = "alice"
+
+    client = MagicMock()
+    client.users_info.return_value = {
+        "user": {"real_name": "Alice", "profile": {"display_name": "alice", "image_512": "https://avatars.slack-edge.com/a.png"}}
+    }
+    out = fetch_user_profile(_ctx(slack_client=client), user="alice")
+    assert out["user_id"] == "U7"
+    client.users_info.assert_called_once_with(user="U7")
+
+
+def test_fetch_user_profile_unknown_display_name_raises():
+    """Cache miss on a non-ID input should raise so the LLM gets a clear
+    error pointing at fetch_thread_history (which warms the cache)."""
+    from src.slack_helpers import user_name_cache
+
+    user_name_cache._cache.clear()
+    client = MagicMock()
+    with pytest.raises(ValueError, match="could not resolve user"):
+        fetch_user_profile(_ctx(slack_client=client), user="ghost")
+    client.users_info.assert_not_called()
+
+
+def test_fetch_user_profile_propagates_users_info_failure():
+    from slack_sdk.errors import SlackApiError
+
+    client = MagicMock()
+    client.users_info.side_effect = SlackApiError(
+        message="user_not_found",
+        response={"error": "user_not_found"},
+    )
+    with pytest.raises(ValueError, match="user_not_found"):
+        fetch_user_profile(_ctx(slack_client=client), user="U999")
 
 
 def test_read_attached_images_uses_per_app_token_from_slack_client():

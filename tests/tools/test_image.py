@@ -207,3 +207,50 @@ def test_edit_image_uses_bot_token_for_download():
 
     headers_lower = {k.lower(): v for k, v in captured["headers"].items()}
     assert headers_lower["authorization"] == "Bearer xoxb-bot-token-here"
+
+
+def test_edit_image_accepts_profile_image_url():
+    """Profile image URLs from fetch_user_profile must be accepted via `urls`
+    so the bot can edit a user's avatar."""
+    llm = MagicMock()
+    llm.edit_image.return_value = b"edited"
+    client = MagicMock()
+    client.token = "xoxb-bot"
+    client.files_upload_v2.return_value = {"file": {"permalink": "https://slack/p"}}
+    ctx = _ctx(slack_client=client, llm=llm)
+    captured: dict = {}
+
+    def _spy(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["auth"] = req.headers.get("Authorization")
+        return _ok_response(b"avatar-bytes", mime="image/png")
+
+    with patch("src.tools.image.urllib.request.urlopen", side_effect=_spy):
+        edit_image(
+            ctx,
+            prompt="make it pixel art",
+            urls=["https://avatars.slack-edge.com/T1/U1/abc_512.png"],
+        )
+
+    assert captured["url"] == "https://avatars.slack-edge.com/T1/U1/abc_512.png"
+    # Public CDN — no Authorization (would leak the bot token).
+    assert captured["auth"] is None
+    images = llm.edit_image.call_args.args[1]
+    assert images == [(b"avatar-bytes", "image/png")]
+
+
+def test_edit_image_accepts_gravatar_host():
+    llm = MagicMock()
+    llm.edit_image.return_value = b"x"
+    client = MagicMock()
+    client.token = "xoxb-bot"
+    client.files_upload_v2.return_value = {"file": {"permalink": "p"}}
+    ctx = _ctx(slack_client=client, llm=llm)
+
+    with patch("src.tools.image.urllib.request.urlopen", return_value=_ok_response(b"g", mime="image/png")):
+        edit_image(
+            ctx,
+            prompt="x",
+            urls=["https://secure.gravatar.com/avatar/deadbeef.png"],
+        )
+    llm.edit_image.assert_called_once()

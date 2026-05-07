@@ -3,6 +3,7 @@ mention, fetch the current thread's history."""
 from __future__ import annotations
 
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -18,8 +19,19 @@ from src.tools.registry import ToolContext, default_registry, tool
 logger = logging.getLogger(__name__)
 
 SLACK_FILE_HOSTS = {"files.slack.com", "files-edge.slack.com", "files-pri.slack.com"}
+# Profile avatars come from Slack's CDN (custom uploads) or Gravatar
+# (default fallback). Both are public — sending the bot Authorization
+# header to these hosts is unnecessary and could leak the token, so the
+# fetch helper below skips it for these hosts.
+SLACK_PROFILE_IMAGE_HOSTS = {
+    "avatars.slack-edge.com",
+    "a.slack-edge.com",
+    "secure.gravatar.com",
+}
+SLACK_IMAGE_HOSTS = SLACK_FILE_HOSTS | SLACK_PROFILE_IMAGE_HOSTS
 DOC_TEXT_PREFIX = "text/"
 DOC_PDF_MIME = "application/pdf"
+_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
 
 
 @tool(
@@ -28,8 +40,9 @@ DOC_PDF_MIME = "application/pdf"
     description=(
         "Read image files and return textual descriptions. By default reads "
         "images attached to the current Slack mention. Pass `urls` to also "
-        "read images referenced from thread history (e.g. url_private_download "
-        "returned by fetch_thread_history)."
+        "read images referenced from thread history (url_private_download "
+        "returned by fetch_thread_history) or profile images (image_url "
+        "returned by fetch_user_profile)."
     ),
     parameters={
         "type": "object",
@@ -38,7 +51,12 @@ DOC_PDF_MIME = "application/pdf"
             "urls": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Additional Slack file URLs to describe (must be on files*.slack.com).",
+                "description": (
+                    "Additional image URLs to describe. Must be either a "
+                    "Slack file URL (files*.slack.com) or a Slack profile "
+                    "image URL (avatars.slack-edge.com, a.slack-edge.com, "
+                    "secure.gravatar.com)."
+                ),
             },
         },
         "required": [],
@@ -89,14 +107,20 @@ def read_attached_images(
     # the previous serial implementation did.
     for url, _, _ in candidates:
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
+        if parsed.scheme != "https" or parsed.hostname not in SLACK_IMAGE_HOSTS:
             raise ValueError("invalid Slack file download URL")
 
     if not candidates:
         return []
 
     def _fetch(url: str, mime_hint: str, name: str) -> dict[str, str] | None:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        # Profile-image hosts are public CDN; sending Authorization there
+        # is unnecessary and could leak the bot token. Only files*.slack.com
+        # requires auth (private-by-default).
+        headers: dict[str, str] = {}
+        if urllib.parse.urlparse(url).hostname in SLACK_FILE_HOSTS:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310 (host allowlisted)
             data = response.read()
         mime = mime_hint if mime_hint.startswith("image/") else _guess_image_mime(url)
@@ -111,6 +135,96 @@ def read_attached_images(
             results[future_to_idx[future]] = future.result()
 
     return [r for r in results if r is not None]
+
+
+@tool(
+    default_registry,
+    name="fetch_user_profile",
+    description=(
+        "Look up a Slack user's profile and return their display name, real "
+        "name, and profile image URL. Accepts either a Slack user ID (U…/W…), "
+        "a mention like <@U12345>, or a display name (resolved against names "
+        "already seen in this session — call fetch_thread_history first if a "
+        "name lookup fails). The returned image_url can be passed via the "
+        "`urls` parameter of edit_image (to restyle the avatar) or "
+        "read_attached_images (to describe it)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "user": {
+                "type": "string",
+                "description": "Slack user ID (U…/W…), <@U…> mention, or display name.",
+            },
+        },
+        "required": ["user"],
+    },
+    # Single users.info call; 15s matches the Slack-API timeout used elsewhere.
+    timeout=15.0,
+)
+def fetch_user_profile(ctx: ToolContext, user: str) -> dict[str, str]:
+    user_id = _resolve_user_id(user)
+    if not user_id:
+        raise ValueError(
+            f"could not resolve user {user!r}. Pass a user ID (U…/W…), "
+            "a <@U…> mention, or call fetch_thread_history first so the "
+            "display name is in cache."
+        )
+    try:
+        info = ctx.slack_client.users_info(user=user_id)
+    except SlackApiError as exc:
+        raise ValueError(f"users.info failed for {user_id}: {_slack_error(exc)}") from exc
+    user_obj = info.get("user") or {}
+    profile = user_obj.get("profile") or {}
+    real_name = user_obj.get("real_name") or profile.get("real_name") or ""
+    display_name = profile.get("display_name") or real_name or user_id
+    # Prefer the largest available avatar so edit_image has good resolution.
+    # `image_original` is only present for users with custom uploads;
+    # default-avatar users have only image_24..image_512.
+    image_url = (
+        profile.get("image_original")
+        or profile.get("image_1024")
+        or profile.get("image_512")
+        or profile.get("image_192")
+        or profile.get("image_72")
+        or ""
+    )
+    # Cache the resolved display name so subsequent fetch_thread_history
+    # calls don't re-resolve via another users.info round trip.
+    user_name_cache.set(user_id, display_name)
+    return {
+        "user_id": user_id,
+        "display_name": display_name,
+        "real_name": real_name,
+        "image_url": image_url,
+    }
+
+
+def _resolve_user_id(identifier: str) -> str | None:
+    """Resolve a free-form user reference to a Slack user ID.
+
+    Accepts: bare user ID (U…/W…), `<@U12345>` or `<@U12345|name>` mention
+    syntax, or a display name (looked up against `user_name_cache`).
+    Returns None when no match is found.
+    """
+    if not identifier:
+        return None
+    candidate = identifier.strip()
+    if candidate.startswith("<@") and candidate.endswith(">"):
+        candidate = candidate[2:-1].split("|", 1)[0]
+    if _USER_ID_RE.match(candidate):
+        return candidate
+    return user_name_cache.find_by_name(identifier.strip())
+
+
+def _slack_error(exc: SlackApiError) -> str:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return str(exc)
+    try:
+        return response.get("error", "") or str(exc)
+    except (AttributeError, TypeError):
+        return str(exc)
 
 
 def _guess_image_mime(url: str) -> str:

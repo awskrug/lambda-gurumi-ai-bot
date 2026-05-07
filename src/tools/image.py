@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 from src.tools.registry import ToolContext, default_registry, tool
-from src.tools.slack import SLACK_FILE_HOSTS
+from src.tools.slack import SLACK_FILE_HOSTS, SLACK_IMAGE_HOSTS
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +45,15 @@ def generate_image(ctx: ToolContext, prompt: str) -> dict[str, str]:
         "the Slack thread. By default uses images attached to the current "
         "Slack mention. To edit images from earlier in the thread, first "
         "call fetch_thread_history, then pass the desired "
-        "`files[*].url_private_download` values via `urls`. All URLs must "
-        "be on files*.slack.com. Use this — not generate_image — whenever "
-        "the user wants to transform, restyle, or modify an existing image. "
-        "Not supported when IMAGE_PROVIDER=bedrock; the tool returns an "
-        "error in that case so you can fall back to a text reply."
+        "`files[*].url_private_download` values via `urls`. To edit a "
+        "user's profile image, first call fetch_user_profile and pass the "
+        "returned `image_url` via `urls`. URLs must be on files*.slack.com "
+        "or a Slack profile image host (avatars.slack-edge.com, "
+        "a.slack-edge.com, secure.gravatar.com). Use this — not "
+        "generate_image — whenever the user wants to transform, restyle, "
+        "or modify an existing image. Not supported when "
+        "IMAGE_PROVIDER=bedrock; the tool returns an error in that case so "
+        "you can fall back to a text reply."
     ),
     parameters={
         "type": "object",
@@ -62,8 +66,10 @@ def generate_image(ctx: ToolContext, prompt: str) -> dict[str, str]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Optional Slack file URLs (files*.slack.com) to use as input. "
-                    "If omitted, uses images attached to the current Slack mention."
+                    "Optional input image URLs. Must be on files*.slack.com "
+                    "or a Slack profile image host (avatars.slack-edge.com, "
+                    "a.slack-edge.com, secure.gravatar.com). If omitted, "
+                    "uses images attached to the current Slack mention."
                 ),
             },
             "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 2},
@@ -158,7 +164,7 @@ def _collect_input_images(
     # gets a clear "bad URL" error instead of a partial fetch.
     for url, _ in candidates:
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
+        if parsed.scheme != "https" or parsed.hostname not in SLACK_IMAGE_HOSTS:
             raise ValueError(f"invalid Slack file URL: {url}")
 
     out: list[tuple[bytes, str]] = []
@@ -173,11 +179,19 @@ def _collect_input_images(
 
 
 def _fetch_slack_image(url: str, token: str) -> tuple[bytes, str]:
-    """Download a Slack-hosted image with the bot token. Returns (bytes, mime).
+    """Download a Slack-hosted image. Returns (bytes, mime).
 
-    Caller must validate `url` against SLACK_FILE_HOSTS first.
+    Sends the bot token only for files*.slack.com (private-by-default).
+    Profile-image hosts (avatars.slack-edge.com / secure.gravatar.com)
+    are public CDN — sending Authorization there is unnecessary and could
+    leak the token.
+
+    Caller must validate `url` against SLACK_IMAGE_HOSTS first.
     """
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    headers: dict[str, str] = {}
+    if urllib.parse.urlparse(url).hostname in SLACK_FILE_HOSTS:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310 (host allowlisted upstream)
         body = response.read()
         header_mime = (

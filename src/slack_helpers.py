@@ -547,6 +547,27 @@ class UserNameCache:
         with ThreadPoolExecutor(max_workers=min(len(misses), 8)) as pool:
             list(pool.map(lambda uid: self.get(client, uid), misses))
 
+    def find_by_name(self, name: str) -> str | None:
+        """Reverse lookup: return a user_id whose cached display name matches
+        `name`, or None. Used by `fetch_user_profile` so the LLM can refer to
+        people by display name as long as they appeared earlier in the thread
+        (i.e. were warmed by `fetch_thread_history`). Linear scan is fine —
+        the cache holds at most the unique users seen in the current session."""
+        if not name:
+            return None
+        for uid, cached in self._cache.items():
+            if cached == name:
+                return uid
+        return None
+
+    def set(self, user_id: str, name: str) -> None:
+        """Cache a name we already resolved (e.g. via a fresh users.info call)
+        without going through the network round-trip in `get`."""
+        if not user_id or not name:
+            return
+        with self._lock:
+            self._cache.setdefault(user_id, name)
+
 
 user_name_cache = UserNameCache._default()
 
