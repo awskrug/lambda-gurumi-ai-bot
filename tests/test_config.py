@@ -22,7 +22,7 @@ def _clear_env(monkeypatch):
         "MAX_LEN_SLACK", "MAX_THROTTLE_COUNT",
         "MAX_HISTORY_CHARS", "BOT_CURSOR", "SYSTEM_MESSAGE", "PERSONA_MESSAGE", "TAVILY_API_KEY", "XAI_API_KEY", "LOG_LEVEL",
         "DEFAULT_TIMEZONE", "MAX_DOC_CHARS", "MAX_DOC_PAGES", "MAX_DOC_BYTES",
-        "MAX_WEB_CHARS", "MAX_WEB_BYTES", "MAX_WEB_LINKS", "JINA_READER_BASE",
+        "MAX_WEB_CHARS", "MAX_WEB_BYTES", "MAX_WEB_LINKS", "MAX_IMAGE_BYTES", "JINA_READER_BASE",
         "SSM_PARAMS_PREFIX", "SSM_CACHE_TTL_SECONDS",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -270,3 +270,23 @@ def test_web_fetch_jina_reader_base_http_rejected(monkeypatch, reload_config):
     monkeypatch.setenv("JINA_READER_BASE", "http://internal.proxy.example")
     s = reload_config()
     assert s.jina_reader_base == "https://r.jina.ai"  # fallback
+
+
+def test_max_image_bytes_default(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    s = reload_config()
+    assert s.max_image_bytes == 10 * 1024 * 1024
+
+
+def test_max_image_bytes_env_override(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("MAX_IMAGE_BYTES", "262144")  # 256KB
+    s = reload_config()
+    assert s.max_image_bytes == 262144
+
+
+def test_max_image_bytes_below_minimum_clamped(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("MAX_IMAGE_BYTES", "1024")  # below 64KB floor
+    s = reload_config()
+    assert s.max_image_bytes == 64 * 1024

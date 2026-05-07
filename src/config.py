@@ -122,6 +122,10 @@ class Settings:
     max_web_chars: int = 8000
     max_web_bytes: int = 2 * 1024 * 1024
     max_web_links: int = 20
+    # Cap for `attach_image_from_url` — external image downloads. Slack
+    # itself accepts up to 1GB per upload, but bigger payloads inflate
+    # Lambda time and burn bandwidth, so the practical default is 10MB.
+    max_image_bytes: int = 10 * 1024 * 1024
     jina_reader_base: str = "https://r.jina.ai"
 
     @classmethod
@@ -179,5 +183,8 @@ class Settings:
             max_web_chars=_int_env("MAX_WEB_CHARS", 8000, minimum=500),
             max_web_bytes=_int_env("MAX_WEB_BYTES", 2 * 1024 * 1024, minimum=64 * 1024),
             max_web_links=_int_env("MAX_WEB_LINKS", 20, minimum=0),
+            max_image_bytes=_int_env(
+                "MAX_IMAGE_BYTES", 10 * 1024 * 1024, minimum=64 * 1024
+            ),
             jina_reader_base=_https_url_env("JINA_READER_BASE", "https://r.jina.ai"),
         )

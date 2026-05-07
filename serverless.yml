@@ -73,6 +73,8 @@ provider:
     MAX_WEB_BYTES: ${env:MAX_WEB_BYTES, '2097152'}
     MAX_WEB_CHARS: ${env:MAX_WEB_CHARS, '8000'}
     MAX_WEB_LINKS: ${env:MAX_WEB_LINKS, '20'}
+    # --- vars: External image attach (attach_image_from_url) ---
+    MAX_IMAGE_BYTES: ${env:MAX_IMAGE_BYTES, '10485760'}
   iam:
     role:
       statements:

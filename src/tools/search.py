@@ -65,3 +65,83 @@ def _tavily_search(api_key: str, query: str, limit: int) -> list[dict[str, str]]
         {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
         for r in payload.get("results", [])[:limit]
     ]
+
+
+@tool(
+    default_registry,
+    name="search_images",
+    description=(
+        "Search the public web for images matching a query and return their "
+        "URLs and LLM-generated descriptions. Requires TAVILY_API_KEY (raises "
+        "an error if unset — there is no DDG fallback for image search). "
+        "Each result is a public web URL — to attach the picked image to the "
+        "Slack thread, pass the URL to attach_image_from_url; to edit it, "
+        "attach first then call edit_image with the returned Slack URL."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+        },
+        "required": ["query"],
+    },
+    timeout=20.0,
+)
+def search_images(ctx: ToolContext, query: str, limit: int = 5) -> list[dict[str, str]]:
+    if not ctx.settings.tavily_api_key:
+        raise ValueError(
+            "image search requires TAVILY_API_KEY — set the env var or fall "
+            "back to a text response describing where the user could look."
+        )
+    return _tavily_image_search(ctx.settings.tavily_api_key, query, limit)
+
+
+def _tavily_image_search(api_key: str, query: str, limit: int) -> list[dict[str, str]]:
+    """Call Tavily /search with `include_images` + `include_image_descriptions`.
+
+    Tavily's `images` field shape depends on `include_image_descriptions`:
+      - false → list[str] (URLs only)
+      - true  → list[{url, description}]
+    We always request descriptions so the LLM has enough to pick — and
+    normalize both shapes here so the tool result is consistent.
+    """
+    url = f"https://{TAVILY_HOST}/search"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != TAVILY_HOST:
+        raise ValueError("invalid Tavily URL")
+    body = json.dumps(
+        {
+            "api_key": api_key,
+            "query": query,
+            # Tavily's image count is decoupled from `max_results`; we cap on
+            # the client side after the response so the LLM doesn't see a
+            # 20-item haystack when limit=5 was requested.
+            "max_results": max(limit, 5),
+            "include_images": True,
+            "include_image_descriptions": True,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310
+        payload = json.loads(response.read().decode("utf-8"))
+    raw_images = payload.get("images") or []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_images:
+        if isinstance(item, str):
+            image_url, description = item, ""
+        elif isinstance(item, dict):
+            image_url = item.get("url", "") or ""
+            description = item.get("description", "") or ""
+        else:
+            continue
+        if not image_url or image_url in seen:
+            continue
+        seen.add(image_url)
+        out.append({"url": image_url, "description": description})
+        if len(out) >= limit:
+            break
+    return out

@@ -1,12 +1,14 @@
 """Tests for src.tools.image."""
 from __future__ import annotations
 
+import dataclasses
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.tools._helpers import _ctx
-from src.tools.image import edit_image, generate_image
+from tests.tools._helpers import _ctx, _settings
+from src.tools.image import attach_image_from_url, edit_image, generate_image
+from src.tools.registry import ToolContext
 
 
 # --------------------------------------------------------------------------- #
@@ -254,3 +256,172 @@ def test_edit_image_accepts_gravatar_host():
             urls=["https://secure.gravatar.com/avatar/deadbeef.png"],
         )
     llm.edit_image.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# attach_image_from_url
+# --------------------------------------------------------------------------- #
+
+
+def _public_dns(monkeypatch):
+    """Make `_validate_public_https_url` resolve any host to a public IP."""
+    monkeypatch.setattr(
+        "src.tools.web.socket.getaddrinfo",
+        lambda *a, **k: [(0, 0, 0, "", ("93.184.216.34", 443))],
+    )
+
+
+def _ext_ctx(max_image_bytes: int = 10 * 1024 * 1024) -> ToolContext:
+    client = MagicMock()
+    client.token = "xoxb-bot"
+    client.files_upload_v2.return_value = {
+        "file": {
+            "permalink": "https://slack/p",
+            "url_private_download": "https://files.slack.com/T1/F1/x.png",
+            "title": "title",
+            "mimetype": "image/png",
+        }
+    }
+    return ToolContext(
+        slack_client=client,
+        channel="C1",
+        thread_ts="ts1",
+        event={},
+        settings=dataclasses.replace(_settings(), max_image_bytes=max_image_bytes),
+        llm=MagicMock(),
+    )
+
+
+def _ext_response(body: bytes, mime: str = "image/png", content_length: int | None = None) -> MagicMock:
+    headers = {"Content-Type": mime}
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
+    cm = MagicMock()
+    cm.__enter__.return_value = cm
+    cm.__exit__.return_value = False
+    # _read_body_capped calls response.headers.get(...)
+    cm.headers = MagicMock()
+    cm.headers.get = lambda k, default=None: headers.get(k, default)
+    cm.read.side_effect = lambda n=-1: body if n == -1 else body[:n]
+    return cm
+
+
+def test_attach_image_from_url_happy_path(monkeypatch):
+    _public_dns(monkeypatch)
+    ctx = _ext_ctx()
+    with patch(
+        "src.tools.image._NoRedirectHandler",
+    ), patch(
+        "src.tools.image.urllib.request.build_opener"
+    ) as build_opener:
+        opener = MagicMock()
+        opener.open.return_value = _ext_response(b"\x89PNG-bytes", mime="image/png", content_length=10)
+        build_opener.return_value = opener
+        out = attach_image_from_url(ctx, url="https://example.com/cat.png")
+
+    assert out == {
+        "permalink": "https://slack/p",
+        "url_private_download": "https://files.slack.com/T1/F1/x.png",
+        "title": "title",
+        "mimetype": "image/png",
+    }
+    upload_kwargs = ctx.slack_client.files_upload_v2.call_args.kwargs
+    assert upload_kwargs["channel"] == "C1"
+    assert upload_kwargs["thread_ts"] == "ts1"
+    assert upload_kwargs["filename"] == "cat.png"
+    assert upload_kwargs["file"] == b"\x89PNG-bytes"
+
+
+def test_attach_image_from_url_rejects_http_scheme():
+    """SSRF guard: http:// is not allowed even if everything else looks fine."""
+    ctx = _ext_ctx()
+    with pytest.raises(ValueError, match="https"):
+        attach_image_from_url(ctx, url="http://example.com/cat.png")
+    ctx.slack_client.files_upload_v2.assert_not_called()
+
+
+def test_attach_image_from_url_rejects_ip_literal():
+    ctx = _ext_ctx()
+    with pytest.raises(ValueError, match="IP literals"):
+        attach_image_from_url(ctx, url="https://10.0.0.1/x.png")
+    ctx.slack_client.files_upload_v2.assert_not_called()
+
+
+def test_attach_image_from_url_rejects_private_dns(monkeypatch):
+    """DNS that resolves to a private/loopback range must fail before any IO."""
+    monkeypatch.setattr(
+        "src.tools.web.socket.getaddrinfo",
+        lambda *a, **k: [(0, 0, 0, "", ("169.254.169.254", 443))],  # AWS metadata
+    )
+    ctx = _ext_ctx()
+    with pytest.raises(ValueError, match="non-public"):
+        attach_image_from_url(ctx, url="https://internal.example/cat.png")
+    ctx.slack_client.files_upload_v2.assert_not_called()
+
+
+def test_attach_image_from_url_rejects_non_image_content_type(monkeypatch):
+    _public_dns(monkeypatch)
+    ctx = _ext_ctx()
+    with patch("src.tools.image.urllib.request.build_opener") as build_opener:
+        opener = MagicMock()
+        opener.open.return_value = _ext_response(b"<html></html>", mime="text/html", content_length=13)
+        build_opener.return_value = opener
+        with pytest.raises(ValueError, match="did not return an image"):
+            attach_image_from_url(ctx, url="https://example.com/page")
+    ctx.slack_client.files_upload_v2.assert_not_called()
+
+
+def test_attach_image_from_url_rejects_oversize_via_content_length(monkeypatch):
+    _public_dns(monkeypatch)
+    ctx = _ext_ctx(max_image_bytes=1000)
+    with patch("src.tools.image.urllib.request.build_opener") as build_opener:
+        opener = MagicMock()
+        opener.open.return_value = _ext_response(
+            b"x" * 10, mime="image/png", content_length=5000
+        )
+        build_opener.return_value = opener
+        with pytest.raises(ValueError, match="MAX_WEB_BYTES"):
+            attach_image_from_url(ctx, url="https://example.com/big.png")
+    ctx.slack_client.files_upload_v2.assert_not_called()
+
+
+def test_attach_image_from_url_filename_falls_back_when_url_has_no_extension(monkeypatch):
+    _public_dns(monkeypatch)
+    ctx = _ext_ctx()
+    with patch("src.tools.image.urllib.request.build_opener") as build_opener:
+        opener = MagicMock()
+        opener.open.return_value = _ext_response(b"jpg-bytes", mime="image/jpeg", content_length=9)
+        build_opener.return_value = opener
+        attach_image_from_url(ctx, url="https://example.com/render?id=42")
+
+    upload_kwargs = ctx.slack_client.files_upload_v2.call_args.kwargs
+    # No usable basename → fall back to mime-based name.
+    assert upload_kwargs["filename"] == "image.jpg"
+
+
+def test_attach_image_from_url_uses_no_redirect_handler(monkeypatch):
+    """A 3xx redirect to a private host would defeat the SSRF guard. The
+    fetch must use _NoRedirectHandler (raises HTTPError on any 3xx)."""
+    _public_dns(monkeypatch)
+    ctx = _ext_ctx()
+    with patch("src.tools.image.urllib.request.build_opener") as build_opener:
+        # Return a real opener whose open() raises HTTPError to simulate
+        # what _NoRedirectHandler.redirect_request does on a 302.
+        import urllib.error
+
+        opener = MagicMock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            url="https://example.com/cat.png",
+            code=302,
+            msg="redirects not allowed",
+            hdrs=None,
+            fp=None,
+        )
+        build_opener.return_value = opener
+        with pytest.raises(ValueError, match="image download failed"):
+            attach_image_from_url(ctx, url="https://example.com/cat.png")
+    # Verify _NoRedirectHandler was actually wired into the opener (not
+    # silently swapped for a permissive handler later).
+    handler_arg = build_opener.call_args.args[0]
+    from src.tools.web import _NoRedirectHandler
+    assert isinstance(handler_arg, _NoRedirectHandler)
