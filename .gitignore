@@ -54,7 +54,5 @@ node_modules
 
 # claude
 .claude/
-.prompt-*.md
 .prompt.md
-prompt-*.md
 prompt.md
