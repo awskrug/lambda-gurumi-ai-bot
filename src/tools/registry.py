@@ -114,11 +114,10 @@ class ToolExecutor:
         except Exception as exc:  # noqa: BLE001
             # Broad catch on purpose: provider SDKs raise their own APIError
             # hierarchies (openai.APIError, anthropic.APIError, httpx.HTTPError)
-            # that were missing from the previous allowlist — and when they
-            # escaped the executor the whole agent loop aborted with a generic
-            # error instead of handing the failure back to the LLM to recover.
-            # The agent already treats {"ok": False, ...} as a recoverable tool
-            # result, so swallowing here is correct.
+            # that the agent must treat as recoverable. Returning
+            # {"ok": False, ...} hands the failure back to the LLM, which
+            # can retry, fall back, or surface a friendly message. A
+            # narrower except list lets those propagate and aborts the loop.
             logger.exception("tool %s failed", call.name)
             return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
 

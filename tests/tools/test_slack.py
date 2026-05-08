@@ -326,12 +326,12 @@ def test_fetch_user_profile_resolves_display_name_via_cache():
 
 
 def test_fetch_user_profile_unknown_display_name_raises():
-    """Cache miss on a non-ID input should raise so the LLM gets a clear
-    error pointing at fetch_thread_history (which warms the cache).
+    """Cache miss on a non-ID input raises after one warm attempt so the
+    LLM gets a clear error pointing at fetch_thread_history.
 
-    NOTE: the auto-fallback inside fetch_user_profile DOES try one
-    `conversations_replies` warm before giving up — but with no
-    matching name in the warm result, the final raise still happens.
+    `fetch_user_profile` tries one `conversations_replies` warm before
+    giving up; when the warm result has no matching name, the final
+    raise still happens.
     """
     from src.slack_helpers import user_name_cache
 
@@ -347,10 +347,10 @@ def test_fetch_user_profile_unknown_display_name_raises():
 
 
 def test_fetch_user_profile_auto_warms_on_cache_miss():
-    """Regression for the 2026-05-08 incident: when the LLM calls
-    fetch_user_profile with a display name and the cache is empty, the
-    tool must auto-fetch the current thread, warm the cache, and retry
-    once — instead of immediately raising 'could not resolve user'."""
+    """When the LLM calls fetch_user_profile with a display name and the
+    cache is empty, the tool auto-fetches the current thread, warms the
+    cache, and retries once — instead of immediately raising 'could
+    not resolve user'."""
     from src.slack_helpers import user_name_cache
 
     user_name_cache._cache.clear()
@@ -379,9 +379,8 @@ def test_fetch_user_profile_auto_warms_on_cache_miss():
 
 
 def test_fetch_user_profile_does_not_warm_when_cache_has_match():
-    """Auto-warm is a recovery path. When the display name resolves on
-    the first try, conversations_replies must NOT be called — pointless
-    Slack roundtrip."""
+    """When the display name resolves on the first try,
+    conversations_replies must NOT be called — pointless Slack roundtrip."""
     from src.slack_helpers import user_name_cache
 
     user_name_cache._cache.clear()
@@ -410,10 +409,10 @@ def test_fetch_user_profile_propagates_users_info_failure():
 
 
 def test_read_attached_images_uses_per_app_token_from_slack_client():
-    """Regression: the Authorization header must carry the per-app bot_token
-    that the worker resolved from SSM (and put on the WebClient passed into
-    ToolContext) — NOT `settings.slack_bot_token`, which is empty in the
-    Lambda runtime under the multi-tenant config."""
+    """The Authorization header must carry the per-app bot_token that the
+    worker resolved from SSM (and put on the WebClient passed into
+    ToolContext) — NOT `settings.slack_bot_token`, which is empty in
+    the Lambda runtime under the multi-tenant config."""
     import dataclasses
 
     slack_client = MagicMock()
@@ -443,7 +442,7 @@ def test_read_attached_images_uses_per_app_token_from_slack_client():
 
 
 def test_read_attached_document_uses_per_app_token_from_slack_client():
-    """Regression: same contract as the images path — token comes from the
+    """Same contract as the images path — token comes from the
     WebClient on ToolContext, not from settings."""
     import dataclasses
 

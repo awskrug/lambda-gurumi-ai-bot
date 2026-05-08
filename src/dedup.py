@@ -203,12 +203,11 @@ class ConversationStore(_BaseStore):
     def truncate_to_chars(messages: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
         """Drop oldest messages until total serialized size <= max_chars.
 
-        Previous implementation was O(n²) — it re-serialized the full kept
-        list on every pop. This walks the list once, serializes each message
-        individually, then accumulates from the newest end backwards until
-        adding the next (older) message would exceed the budget. Matches the
-        exact byte count of `json.dumps(kept, ensure_ascii=False)` using the
-        default item separator `", "`.
+        Walks the list once, serializes each message individually, then
+        accumulates from the newest end backwards until adding the next
+        (older) message would exceed the budget. The accumulated count
+        matches `len(json.dumps(kept, ensure_ascii=False))` exactly,
+        using the default item separator `", "`.
         """
         if not messages:
             return []

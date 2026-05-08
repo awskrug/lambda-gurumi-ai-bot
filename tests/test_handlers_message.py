@@ -920,9 +920,6 @@ def test_process_does_not_mark_done_when_agent_raises(app_module, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Mention handling — strip ONLY the bot's own mention; pre-warm any other
 # user mentions so fetch_user_profile can resolve them on the first call.
-# Regression: a CloudWatch incident showed the LLM calling
-# fetch_user_profile("Uno") with an empty cache and failing — root cause was
-# the mention regex stripping ALL `<@U…>` from the LLM's view of the text.
 # --------------------------------------------------------------------------- #
 
 
@@ -960,10 +957,10 @@ def test_strip_bot_mention_noop_when_bot_id_unknown():
 
 
 def test_process_pre_warms_mentioned_user_ids(app_module, monkeypatch):
-    """Regression for the 2026-05-08 incident: when the message text
-    carries `<@U-OTHER>` mentions, the handler must pre-warm their display
-    names so fetch_user_profile resolves on the first attempt — even if
-    the LLM forgets to call fetch_thread_history first."""
+    """When the message text carries `<@U-OTHER>` mentions, the handler
+    must pre-warm their display names so fetch_user_profile resolves on
+    the first attempt — even if the LLM forgets to call
+    fetch_thread_history first."""
     import dataclasses
 
     override = dataclasses.replace(

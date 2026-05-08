@@ -62,11 +62,10 @@ def _labels() -> dict[str, str]:
     return LABELS.get(runtime.settings.response_language, LABELS["en"])
 
 
-# Match any Slack user/special mention so we can extract referenced
-# user_ids (for cache pre-warm) and selectively strip just the bot's own
-# mention. The previous "<@[^>]+>" sub stripped EVERY mention, which hid
-# user_ids from the LLM and caused `fetch_user_profile` to receive a
-# free-text display name with no cache to resolve it.
+# Matches Slack user mentions so we can (a) extract referenced user_ids
+# for cache pre-warm and (b) selectively strip just the bot's own mention.
+# Other users' mentions stay intact so the LLM can pass `<@U…>` straight
+# to `fetch_user_profile`, whose `_resolve_user_id` parses the syntax.
 _USER_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
 
 
@@ -221,12 +220,11 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
                 return
         stream_msg.append(delta)
 
-    # Pre-warm display names for every user mentioned in the message.
-    # Without this, the LLM may call fetch_user_profile with a free-text
-    # name that the cache can't resolve — exact failure mode logged in
-    # CloudWatch ("could not resolve user 'Uno'"). Cheap: parallel
-    # users.info via UserNameCache.warm; cached across the warm
-    # container so a thread that re-mentions the same user pays once.
+    # Pre-warm display names for every user mentioned in the message so
+    # `fetch_user_profile` resolves on the first attempt even when the
+    # LLM passes a free-text name. Cheap: parallel `users.info` via
+    # `UserNameCache.warm`; cached across the warm container so a thread
+    # that re-mentions the same user pays once.
     mentioned_ids = {
         m
         for m in _USER_MENTION_RE.findall(raw_text)

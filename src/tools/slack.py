@@ -132,8 +132,8 @@ def read_attached_images(
         candidates.append((extra, "", _filename_from_url(extra)))
 
     # Pre-flight SSRF check: validate every URL we plan to fetch BEFORE we
-    # spin up worker threads, so an invalid host raises synchronously like
-    # the previous serial implementation did.
+    # spin up worker threads, so an invalid host surfaces as a synchronous
+    # ValueError rather than a thread-pool future exception.
     for url, _, _ in candidates:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme != "https" or parsed.hostname not in SLACK_IMAGE_HOSTS:
@@ -244,13 +244,14 @@ def fetch_user_profile(ctx: ToolContext, user: str) -> dict[str, str]:
 
 def _warm_cache_from_thread(ctx: ToolContext) -> bool:
     """Best-effort: pull thread participants and warm the display-name
-    cache. Returns True when at least one user_id was resolved (i.e.
-    a retry of `_resolve_user_id` may now succeed); False on any
+    cache. Returns True when at least one user_id was resolved (so a
+    follow-up `_resolve_user_id` call may succeed); False on any
     failure or when the thread is empty.
 
-    Used as a one-shot recovery path inside `fetch_user_profile` so a
-    cache miss doesn't bubble up as a hard error when the LLM forgot
-    to call `fetch_thread_history` first.
+    `fetch_user_profile` calls this once when a display-name lookup
+    misses the cache, so the LLM doesn't need to call
+    `fetch_thread_history` explicitly before referencing a user by
+    display name.
     """
     if not getattr(ctx, "thread_ts", None) or not getattr(ctx, "channel", None):
         return False
@@ -537,8 +538,8 @@ def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, An
 
         # Resolve every author/reacter we'll need in parallel before the
         # rendering loop. With a cold cache and limit=50 this would
-        # otherwise be 50+ serial users_info calls (the original timeout
-        # bug for read_attached_images, repeating itself here).
+        # otherwise be 50+ serial users.info calls and easily blow the
+        # tool timeout.
         # bot_ids (B…) are NOT resolvable via users.info — that endpoint
         # would 404 and pollute the cache. We render bot messages from
         # the inline `username`/`bot_id` fields below.

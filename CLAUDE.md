@@ -80,8 +80,8 @@ def some_handler(...):
 - `DedupStore.reserve`를 read-then-write로 변경 → 동시 worker 두 개가 같은 메시지 처리 가능 (race)
 - `id` prefix 스키마(`dedup:` / `done:` / `ctx:` / `app:` / `mem:`) 깨면 다른 종류 행이 충돌
 - `app:{api_app_id}` / `mem:{user_id}` 행에 `expire_at` 추가 → DynamoDB TTL이 영구 행을 자동 evict (앱 레지스트리·사용자 메모리 사라짐)
-- `dedup:` 단계만 두고 `done:` 마커 제거 → 워커 크래시 시 짧은 TTL이 만료된 *후*에도 retry는 통과해야 하지만 long-lived `dedup:`로 회귀하면 사용자 침묵 발생. 두 단계 분리는 의도된 회복 경로.
-- `mark_done` 호출을 dedup TTL보다 늦은 경로(예: history persist 실패 후)로 옮김 → done 미작성으로 retry가 같은 응답을 재생성. mark_done은 응답 전송 *직후*에 호출.
+- `dedup:`만 두고 `done:` 마커 제거 → 워커가 정상 종료된 retry 윈도우 안에서도 다시 실행됨. `dedup:` TTL을 1시간으로 늘림 → 워커 크래시 시 retry가 영구 차단되어 사용자 침묵. 두 단계 분리(`reserve` = in-flight, `done` = 영구 idempotency)가 둘을 동시에 만족시키는 유일한 path.
+- `mark_done` 호출을 응답 전송보다 늦은 경로(예: history persist 실패 후)로 옮김 → done 미작성으로 retry가 같은 응답을 재생성. `mark_done`은 응답 전송 *직후*에 호출.
 - `DEFAULT_RESERVE_TTL`을 Lambda timeout(`serverless.yml: timeout: 300`)보다 짧게 설정 → 무거운 도구(`generate_image`/`edit_image`, 240s) 실행 도중 dedup row 만료 → 동일 payload 재전달 시 `reserve` 통과로 중복 처리. TTL은 *Lambda timeout 이상*으로 유지.
 
 **App metadata**:
@@ -107,9 +107,9 @@ def some_handler(...):
 - Lambda IAM에서 `dynamodb:DeleteItem` 제거 → `MemoryStore.delete`가 마지막 entry 삭제 시 `delete_item`을 호출해 AccessDenied. 사용자가 메모리를 모두 잊으려 할 때만 발생하는 silent regression이라 일반 통합 테스트로 안 잡힘.
 
 **Mention 처리** (`src/handlers/message.py`):
-- `MENTION_RE`로 모든 `<@U…>` 멘션을 통째 strip → LLM이 함께 멘션된 다른 사용자의 user_id를 못 봄. `fetch_user_profile`이 cache 빈 상태에서 평문 display name을 받아 ValueError로 fail (CloudWatch에서 관찰된 incident). 봇 자신의 mention만 `_strip_bot_mention(text, bot_user_id)`로 제거. 다른 user mention은 보존.
-- 메시지 mention pre-warm을 제거 → cache cold 상태에서 LLM이 fetch_thread_history 누락 시 회귀. `_USER_MENTION_RE`로 추출 후 `user_name_cache.warm` 호출 유지.
-- `fetch_user_profile`의 cache-miss 자동 fallback(`_warm_cache_from_thread`) 제거 → A/B 둘 다 누락된 케이스에서 사용자 침묵.
+- 모든 `<@U…>` 멘션을 통째 strip → LLM이 함께 멘션된 다른 사용자의 user_id를 못 보고 `fetch_user_profile`이 cache 빈 상태에서 평문 display name을 받아 ValueError. 봇 자신의 mention만 `_strip_bot_mention(text, bot_user_id)`로 제거하고 다른 user mention은 보존해야 함.
+- 메시지 mention pre-warm을 제거 → cache cold 상태에서 LLM이 `fetch_thread_history`를 누락하면 첫 호출이 실패. `_USER_MENTION_RE`로 추출 후 `user_name_cache.warm` 호출 유지.
+- `fetch_user_profile`의 cache-miss 자동 fallback(`_warm_cache_from_thread`) 제거 → 두 보호 모두 누락된 경로에서 사용자 침묵.
 
 **Reaction 처리**:
 - `_get_bot_user_id` 권한 체크 우회 → 다른 봇/사람 메시지에 `chat.delete` 시도 → 403. `auth.test` 결과는 success만 캐시(failure는 매번 retry)

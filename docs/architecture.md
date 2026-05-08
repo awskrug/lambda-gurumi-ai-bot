@@ -167,14 +167,17 @@ DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시�
 
 ### 두 단계 dedup — `dedup:` (5분, Lambda timeout과 일치) + `done:` (1h)
 
-단일 `dedup:` 단계만 두던 초기 설계는 *워커가 크래시한 경우* 사용자 침묵을 유발했습니다: Lambda async 자동 retry가 동일 키로 들어와도 long-lived `dedup:` 예약 때문에 무조건 skip. 두 단계로 분리:
+워커 path 진입 순서:
 
-1. 워커 진입 시 `is_done(key)` 확인 → 이미 완료면 silent return
+1. `is_done(key)` 확인 → 이미 완료면 silent return
 2. `reserve(key)` (300s TTL — Lambda function timeout과 일치) — 실패면 in-flight skip
 3. agent.run + 응답 전송 + history persist
 4. **응답 전송 *직후*** `mark_done(key)` (1h `done:` 마커)
 
-`reserve` TTL이 Lambda timeout과 같다는 점이 핵심: 무거운 도구(`generate_image`/`edit_image`, 240s)가 실행 중인 동안에는 `dedup:` row가 살아 있어 동일 payload 재전달이 차단되고, Lambda가 함수를 강제 종료한 직후엔 row가 만료되어 다음 async retry가 새 in-flight 슬롯을 잡을 수 있습니다. 정상 종료 시 `done:` 마커가 1시간 동안 retry를 차단.
+두 단계의 의미가 다릅니다:
+
+- **`dedup:` (5분)** — *in-flight 보호*. 무거운 도구(`generate_image`/`edit_image`, 240s)가 실행 중인 동안에는 같은 payload의 동시 재전달을 차단합니다. TTL이 Lambda timeout과 같으므로 워커가 강제 종료된 직후엔 row가 만료되어 다음 async retry가 새 in-flight 슬롯을 잡을 수 있습니다.
+- **`done:` (1시간)** — *영구 idempotency*. 정상 종료된 요청에 대해 한 시간 동안 모든 retry를 차단합니다.
 
 Reaction은 별도 키 형태: `dedup:reaction:{event_ts}:{reactor}` / `done:reaction:...`. 같은 두 단계 패턴.
 
