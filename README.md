@@ -38,7 +38,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - **Receiver/worker 분리**: API Gateway 30초 제한과 무관하게 worker는 Lambda 300초 budget 사용 (async self-invoke)
   - DynamoDB 조건부 put으로 Slack/Lambda 재시도 **중복 제거**
   - 채널 allowlist + 유저당 동시 요청 **throttle**
-  - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h)
+  - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h) + **사용자별 영속 메모리**(TTL 없음, `remember`/`forget`)
+  - 두 단계 **dedup**: 짧은 in-flight 예약(`dedup:` 90s) + 성공 후 영구 마커(`done:` 1h) — 워커 크래시 시 Lambda async retry 회복
   - 긴 응답 **계층적 분할** (코드블록 → 문단 → 문장 → hard slice) + `MAX_LEN_SLACK` 기반 rolling 스트리밍
   - 첫 content delta 도착 시점에 placeholder 메시지 지연 posting — status UI와 중복 방지
   - 구조화 JSON 로깅 + request_id, 에러 메시지 sanitize
@@ -106,6 +107,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `MAX_WEB_CHARS` | | `8000` | `fetch_webpage` 반환 본문 최대 문자수 (≥500) |
 | `MAX_WEB_BYTES` | | `2097152` | `fetch_webpage` 다운로드 최대 바이트 (기본 2MB, ≥65536) |
 | `MAX_WEB_LINKS` | | `20` | `fetch_webpage` 반환 링크 최대 개수 (≥0) |
+| `MAX_IMAGE_BYTES` | | `10485760` | `attach_image_from_url`/Slack 이미지 다운로드 최대 바이트 (기본 10MB, ≥65536) |
 | `JINA_READER_BASE` | | `https://r.jina.ai` | `fetch_webpage` 가 호출하는 Jina Reader 베이스 URL. `https://` 가 아니면 기본값으로 폴백 |
 | `BOT_CURSOR` | | `:robot_face:` | 플레이스홀더·스트림 인디케이터 이모지 |
 | `SYSTEM_MESSAGE` | | — | 작업 규칙에 append 되는 추가 운영 정책. base 를 덮어쓰지 않음. **글로벌 전용** (per-app 오버라이드 없음 — 보안·정책 일관성) |
@@ -184,7 +186,7 @@ python localtest.py                                  # 대화형 (stdin, Ctrl+D)
 python localtest.py --attach ./cat.png "이 사진에 모자를 씌워줘"
 python localtest.py --attach a.png --attach b.png "두 이미지를 합쳐줘"
 
-# 테스트 (420 테스트)
+# 테스트
 python -m pytest --cov=src --cov-report=term-missing
 python -m pytest tests/test_handlers_message.py -v                  # 메시지 흐름
 python -m pytest tests/test_handlers_reactions.py -v                # reaction 흐름
@@ -212,7 +214,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 ### 2. GitHub 저장소 설정
 
 - **Secrets**: `AWS_ACCOUNT_ID`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택). Slack 시크릿은 SSM Parameter Store 에 별도 등록 — CI 시크릿 아님.
-- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `JINA_READER_BASE`, `SSM_PARAMS_PREFIX`, `SSM_CACHE_TTL_SECONDS`
+- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `MAX_IMAGE_BYTES`, `JINA_READER_BASE`, `SSM_PARAMS_PREFIX`, `SSM_CACHE_TTL_SECONDS`
 
 ### 3. 배포
 
@@ -248,7 +250,8 @@ src/
 ├── agent.py                 Agent 루프 (native function calling 반복)
 ├── credentials.py           SSM 기반 멀티테넌트 시크릿 캐시
 ├── app_metadata.py          app:{api_app_id} DDB 행 — 자동 등록 + per-app override
-├── dedup.py                 DDB 조건부 put 중복 제거 + 스레드 메모리
+├── dedup.py                 DDB 조건부 put 중복 제거 + 스레드 메모리 (dedup:/done:/ctx: prefix)
+├── memory.py                mem:{user_id} DDB 행 — 사용자별 영속 메모리 (TTL 없음)
 ├── slack_helpers.py         메시지 분할·스트리밍·사용자 캐시
 ├── config.py                Settings (env → dataclass, lazy validation)
 ├── logging_utils.py         구조화 JSON 로깅 + request_id

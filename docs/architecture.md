@@ -60,7 +60,8 @@
 | `src/tools/` | Tool 패키지. `@tool` 데코레이터로 self-register. |
 | `src/credentials.py` | SSM Parameter Store 기반 멀티테넌트 credentials 캐시 (positive + negative). |
 | `src/app_metadata.py` | `app:{api_app_id}` DynamoDB 행 — 자동 등록되는 앱 레지스트리 + per-app override 저장. |
-| `src/dedup.py` | DynamoDB 조건부 put 기반 중복 제거 + 스레드 대화 메모리. |
+| `src/dedup.py` | DynamoDB 조건부 put 기반 중복 제거(`reserve`/`is_done`/`mark_done` 두 단계) + 스레드 대화 메모리. |
+| `src/memory.py` | `MemoryStore` — `mem:{user_id}` 행에 사용자별 영속 메모리. TTL 없음. `remember`/`forget` 도구가 사용. |
 | `src/slack_helpers.py` | 메시지 분할(코드펜스 인지) + 스트리밍 + 사용자 캐시 + thread status. |
 | `src/logging_utils.py` | 구조화 JSON 로깅 + request_id 컨텍스트. |
 
@@ -144,21 +145,38 @@ API Gateway HTTP 통합은 응답 30초 제한이 있습니다. 하지만 LLM �
 
 Worker는 Lambda의 300초 budget(`serverless.yml: timeout: 300`)을 모두 씁니다. 도구 timeout (예: `generate_image` 240초)는 compose + upload + history-save가 남은 budget에 들어가도록 잡혀 있습니다.
 
-### Inline fallback
+### Inline fallback (로컬 전용)
 
-`AWS_LAMBDA_FUNCTION_NAME` env가 없거나 (로컬 harness) `lambda.invoke`가 raise하면 `_enqueue_worker`는 `_process_worker`를 inline 실행합니다 — 사용자 메시지가 떨어지지 않도록.
+`AWS_LAMBDA_FUNCTION_NAME` env가 없는 *로컬/테스트* 환경에서는 `_enqueue_worker`가 `_process_worker`를 inline 실행합니다 — receiver/worker 경계가 없는 단일 프로세스라 안전.
 
-## DynamoDB — 단일 테이블, 세 prefix
+Lambda 환경에서 `lambda.invoke`가 raise하면 inline 실행을 *하지 않습니다*. receiver는 API Gateway 30s + Slack ack 3s 윈도우 안에 있고 inline agent run은 둘 다 초과해 retry 폭주를 유발하기 때문입니다. 대신 best-effort `chat_postMessage`로 "잠시 후 다시 시도" 안내를 보내고 drop. 운영자가 IAM/throttle/네트워크 등 invoke 실패 원인을 해결해야 합니다 (CloudWatch에 traceback 기록).
 
-`DYNAMODB_TABLE_NAME` 단일 테이블이 세 종류 행을 보관합니다:
+## DynamoDB — 단일 테이블, 다섯 prefix
+
+`DYNAMODB_TABLE_NAME` 단일 테이블이 다섯 종류 행을 보관합니다:
 
 | Key prefix | 의미 | TTL |
 |-----------|------|-----|
-| `dedup:{client_msg_id}` | 1회 dedup 예약 | 1시간 (`expire_at`) |
+| `dedup:{key}` | 처리 중(in-flight) 예약 | 90초 (`expire_at`) |
+| `done:{key}` | 성공 처리 완료 마커 | 1시간 (`expire_at`) |
 | `ctx:{thread_ts}` | 스레드 대화 메모리 | 1시간 (`expire_at`) |
 | `app:{api_app_id}` | 앱 레지스트리 + per-app override | **없음** (영구) |
+| `mem:{user_id}` | 사용자별 영속 메모리 (`remember`/`forget`) | **없음** (영구) |
 
-DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시킵니다. `app:` 행에 `expire_at`을 실수로 추가하면 등록된 앱이 1시간 후 자동 삭제됩니다 — 절대 추가하지 마세요.
+DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시킵니다. `app:`/`mem:` 행에 `expire_at`을 실수로 추가하면 등록된 앱·사용자 메모리가 자동 삭제됩니다 — 절대 추가하지 마세요.
+
+### 두 단계 dedup — `dedup:` (90s) + `done:` (1h)
+
+단일 `dedup:` 단계만 두던 초기 설계는 *워커가 크래시한 경우* 사용자 침묵을 유발했습니다: Lambda async 자동 retry가 동일 키로 들어와도 long-lived `dedup:` 예약 때문에 무조건 skip. 두 단계로 분리:
+
+1. 워커 진입 시 `is_done(key)` 확인 → 이미 완료면 silent return
+2. `reserve(key)` (90s TTL) — 실패면 in-flight skip
+3. agent.run + 응답 전송 + history persist
+4. **응답 전송 *직후*** `mark_done(key)` (1h `done:` 마커)
+
+워커 크래시 시 `dedup:` 90s가 만료되며 retry는 `is_done` 통과 → `reserve` 통과 → 정상 처리. 정상 종료 시 `done:` 마커가 1시간 동안 retry를 차단.
+
+Reaction은 별도 키 형태: `dedup:reaction:{event_ts}:{reactor}` / `done:reaction:...`. 같은 두 단계 패턴.
 
 ### GSI: `user-index`
 
@@ -172,11 +190,9 @@ DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시�
 2. **Lambda async 재시도** — async invoke 실패 시 Lambda의 기본 2회 재시도. 같은 `_worker` payload가 다시 실행됨
 3. **우발적 재호출**
 
-Worker path 첫 줄에서 `DedupStore.reserve(f"dedup:{client_msg_id}")`가 `put_item(ConditionExpression="attribute_not_exists(id)")`을 수행. 중복 키는 `ConditionalCheckFailedException` → False → silent return.
+Worker path 첫 줄에서 `DedupStore.reserve(f"dedup:{client_msg_id}")`가 `put_item(ConditionExpression="attribute_not_exists(id)")`을 수행. 중복 키는 `ConditionalCheckFailedException` → False → silent return. `is_done` 선행 체크가 있어 retry는 `done:` 마커가 있으면 `reserve` 단계 전에 끝납니다(상세는 위 "두 단계 dedup" 섹션).
 
 Get-then-put 패턴은 race가 있으므로 절대 그리로 바꾸지 마세요 — 동시 두 개의 worker가 같은 메시지를 처리할 수 있습니다.
-
-Reaction은 별도 키 형태: `dedup:reaction:{event_ts}:{reactor}`. event_ts는 firing당 unique.
 
 ## Per-app overrides (ACL + persona)
 
@@ -296,9 +312,20 @@ Jina Reader path (`{JINA_READER_BASE}/{percent-encoded url}`)가 실제 네트�
 
 **DNS rebinding 한계**: pre-flight `getaddrinfo`와 실제 TCP connect는 별개 lookup. TTL=0 공격자가 IP를 바꿀 수 있음. Lambda는 VPC 밖이라 영향 제한적이지만, VPC/private-subnet egress 추가 시 재검토 필요.
 
-### Slack file fetch (`src/tools/slack.py`)
+### Slack file fetch (`src/tools/slack.py`, `src/tools/image.py`)
 
-`read_attached_images`/`read_attached_document`가 사용하는 `_fetch_slack_file`은 `SLACK_FILE_HOSTS` allowlist를 강제 — 봇 토큰이 임의 URL fetch에 쓰이지 않도록.
+`read_attached_images`/`read_attached_document`/`edit_image` 등 Slack-hosted 파일을 받는 모든 도구는 모듈-내부 helper `_http_get(req, timeout)`을 거칩니다. helper는 `urllib.request.build_opener(_NoRedirectHandler())`로 만든 opener를 사용 → **3xx redirect 거부**. cross-host redirect로 봇 Authorization 헤더가 leak되는 경로를 차단합니다. `SLACK_FILE_HOSTS` allowlist도 동일 경로에서 강제 — 봇 토큰이 임의 URL fetch에 쓰이지 않도록.
+
+크기 캡(`MAX_IMAGE_BYTES`/`MAX_DOC_BYTES`)은 `_read_body_capped`로 streamed read 단계에서 적용. Content-Length 검증과 read 도중 cap 둘 다.
+
+### External image fetch (`attach_image_from_url`)
+
+공개 HTTPS 이미지를 Slack에 첨부하는 경로는 4겹 방어:
+
+1. `_validate_public_https_url` — DNS 검증 (`fetch_webpage`와 동일).
+2. `_NoRedirectHandler` — 3xx 거부.
+3. `_read_body_capped(MAX_IMAGE_BYTES)` — Content-Length + streamed cap.
+4. `_detect_image_mime` — 응답 본문의 첫 8바이트 magic 시그니처 검증 (PNG/JPEG/GIF/WEBP/BMP). `Content-Type: image/png`로 위장한 HTML/SVG가 Slack preview 파이프라인에 들어가는 것을 막습니다.
 
 ## Structured logging + request_id
 
@@ -313,6 +340,19 @@ Python 3.12의 `LoggerAdapter.process()`가 `extra=`를 덮어쓰는 버그를 �
 `src/app_metadata.py::AppMetadataStore.record()`가 dedup 통과 후 `app:{api_app_id}` 행을 lazy upsert. 첫 이벤트가 들어온 시점에 자동 등록. 별도 등록 절차 불필요.
 
 운영자가 `scripts/apps.py list`로 등록된 앱을 조회 (자세한 사용법은 [docs/operations.md](operations.md)).
+
+## 사용자별 영속 메모리
+
+`src/memory.py::MemoryStore`가 `mem:{user_id}` 행에 사용자별 long-form 메모리를 저장합니다. 행 schema는 `entries` JSON blob (`{key: {value, ts}, ...}`).
+
+**Scope**: 운영 가정상 user_id는 앱 간 unique. 같은 사람이 다른 Slack 앱으로 멘션해도 동일 user_id면 메모리가 따라갑니다. 이 가정이 깨지는 환경이라면 row id를 `mem:{api_app_id}:{user_id}`로 분리(코드 한 줄).
+
+**Caps**: 항목 값 1000자, 사용자당 50개 키, blob 30KB. 초과 시 `remember`가 `ValueError`로 surface → LLM이 사용자에게 "메모리 가득" 안내.
+
+**자동 주입 vs 도구**:
+- agent 생성 시점에 `MemoryStore.get(user_id)`로 모든 entries를 한 번 로드 → system prompt의 별도 섹션("User memory:")에 렌더.
+- LLM은 `remember(key, value)` / `forget(key)` 두 도구를 쓰며, **`recall` 도구는 없음** — 메모리는 이미 컨텍스트에 들어있어 round-trip이 무의미.
+- 같은 turn에 `remember`로 저장한 값은 *그 turn의 system prompt에 다시 주입되지 않음*. 다음 turn부터 반영. self-confirming loop 방지.
 
 ## Config은 lazy
 

@@ -25,10 +25,13 @@
 
 ```
 app.py                       ← lambda_handler — _worker / receiver / X-Slack-Retry-Num 분기
-src/runtime.py               ← 싱글톤 (DDB/SSM/Lambda 클라이언트, Bolt 캐시, bot_user_id) + accessors + settings + logger
+src/runtime.py               ← 싱글톤 (DDB/SSM/Lambda 클라이언트, Bolt 캐시, bot_user_id, MemoryStore) + accessors + settings + logger
 src/router.py                ← receiver path + worker path + per-app Bolt 캐시
-src/handlers/message.py      ← _process — app_mention/DM 처리 (allowlist, agent, streaming)
+src/handlers/message.py      ← _process — app_mention/DM 처리 (allowlist, mention pre-warm, memory load, agent, streaming)
 src/handlers/reactions.py    ← _process_reaction + REACTION_HANDLERS dict + 핸들러 (현재 :x: → chat.delete)
+src/dedup.py                 ← DedupStore(reserve/is_done/mark_done) + ConversationStore + truncate
+src/memory.py                ← MemoryStore — mem:{user_id} 행 (사용자별 영속 메모리, TTL 없음)
+src/tools/memory.py          ← remember / forget — system prompt에 자동 주입되는 사용자 메모리 도구
 ```
 
 `app.py`는 의도적으로 ~70줄. Lambda entrypoint는 deployment contract라서 위치/이름 불변. 실제 로직은 `src/`로 이동해 다른 entrypoint(local CLI, 향후 이벤트 소스)가 Lambda 모듈을 import할 필요 없게.
@@ -75,8 +78,10 @@ def some_handler(...):
 
 **Dedup / 단일 테이블**:
 - `DedupStore.reserve`를 read-then-write로 변경 → 동시 worker 두 개가 같은 메시지 처리 가능 (race)
-- `id` prefix 스키마(`dedup:` / `ctx:` / `app:`) 깨면 다른 종류 행이 충돌
-- `app:{api_app_id}` 행에 `expire_at` 추가 → DynamoDB TTL이 영구 행을 자동 evict (앱 레지스트리 사라짐)
+- `id` prefix 스키마(`dedup:` / `done:` / `ctx:` / `app:` / `mem:`) 깨면 다른 종류 행이 충돌
+- `app:{api_app_id}` / `mem:{user_id}` 행에 `expire_at` 추가 → DynamoDB TTL이 영구 행을 자동 evict (앱 레지스트리·사용자 메모리 사라짐)
+- `dedup:` 단계만 두고 `done:` 마커 제거 → 워커 크래시 시 짧은 TTL이 만료된 *후*에도 retry는 통과해야 하지만 long-lived `dedup:`로 회귀하면 사용자 침묵 발생. 두 단계 분리는 의도된 회복 경로.
+- `mark_done` 호출을 dedup TTL보다 늦은 경로(예: history persist 실패 후)로 옮김 → done 미작성으로 retry가 같은 응답을 재생성. mark_done은 응답 전송 *직후*에 호출.
 
 **App metadata**:
 - `AppMetadataStore.record(...)`에서 `ReturnValues=ALL_NEW` 제거 → per-app override resolution이 별도 GetItem이 되거나(latency+cost) silently regress하여 항상 글로벌
@@ -94,6 +99,16 @@ def some_handler(...):
 - "속성 absent" vs "속성 = `[]` / `\"\"`"를 같은 의미로 collapse → override 의도 손실. `absent → 글로벌 fallback`, `present → 글로벌 무시`, `[]/"" → 명시적 빈값 오버라이드` 세 상태를 모두 distinct하게 유지.
 - `SYSTEM_MESSAGE`에 per-app override 추가 → 한 앱이 보안 정책을 약화시킬 수 있음. `SYSTEM_MESSAGE`는 운영자 정책이라 글로벌 전용. `PERSONA_MESSAGE`(스타일/톤)만 per-app.
 
+**User memory (`mem:{user_id}`)**:
+- `mem:{user_id}` 행에 `expire_at` 추가 → 영구 사용자 메모리가 TTL evict로 사라짐 (`app:` 행과 동일 invariant).
+- 메모리 row id를 `mem:{api_app_id}:{user_id}`로 분리하지 않음 — 운영 가정에서 user_id가 앱 간 unique. 가정이 깨지면 row id를 그렇게 바꾸고 store API는 그대로 둘 수 있음.
+- `remember`/`forget` 호출이 같은 turn의 system prompt에 즉시 반영되도록 변경 → LLM이 자기가 방금 저장한 값을 보고 자기-확인 루프에 빠짐. 메모리는 agent 생성 시점에 한 번만 로드, 다음 turn부터 반영.
+
+**Mention 처리** (`src/handlers/message.py`):
+- `MENTION_RE`로 모든 `<@U…>` 멘션을 통째 strip → LLM이 함께 멘션된 다른 사용자의 user_id를 못 봄. `fetch_user_profile`이 cache 빈 상태에서 평문 display name을 받아 ValueError로 fail (CloudWatch에서 관찰된 incident). 봇 자신의 mention만 `_strip_bot_mention(text, bot_user_id)`로 제거. 다른 user mention은 보존.
+- 메시지 mention pre-warm을 제거 → cache cold 상태에서 LLM이 fetch_thread_history 누락 시 회귀. `_USER_MENTION_RE`로 추출 후 `user_name_cache.warm` 호출 유지.
+- `fetch_user_profile`의 cache-miss 자동 fallback(`_warm_cache_from_thread`) 제거 → A/B 둘 다 누락된 케이스에서 사용자 침묵.
+
 **Reaction 처리**:
 - `_get_bot_user_id` 권한 체크 우회 → 다른 봇/사람 메시지에 `chat.delete` 시도 → 403. `auth.test` 결과는 success만 캐시(failure는 매번 retry)
 - 메시지 흐름과 reaction 흐름의 `ALLOWED_USER_IDS=[]` 의미를 통일 → 의도된 비대칭 깨짐. 메시지=open by default(`[]`=모두 허용), reaction-delete=closed by default(`[]`=원 질문자만)
@@ -109,8 +124,13 @@ def some_handler(...):
 **SSRF 가드**:
 - `_validate_public_https_url` 제거 (`fetch_webpage`) → RFC1918 / cloud metadata(`169.254.169.254`) fetch 가능
 - `fetch_webpage` raw fallback의 `_NoRedirectHandler` 제거 → 302가 사설 호스트로 우회
+- Slack file fetch의 `_http_get` helper(`_NoRedirectHandler` 적용)를 직접 `urlopen`으로 교체 → 3xx redirect가 봇 Authorization 헤더를 cross-host로 leak. `src/tools/slack.py`/`src/tools/image.py`의 모든 Slack 다운로드는 `_http_get`을 거쳐야 함.
 - Slack file fetch host allowlist(`SLACK_FILE_HOSTS`) 제거 → 봇 토큰으로 임의 URL fetch
+- `attach_image_from_url`의 magic bytes 검증(`_detect_image_mime`) 제거 → 악성 서버가 `Content-Type: image/png`로 HTML/SVG를 줘도 Slack에 업로드. PNG/JPEG/GIF/WEBP/BMP 시그니처 8바이트 검증 유지.
 - DNS rebinding 한계 인지: `_validate_public_https_url`의 pre-flight `getaddrinfo`와 실제 TCP connect는 별개 lookup. Lambda는 VPC 밖이라 영향 제한적이지만 VPC/private-subnet egress 추가 시 재검토 필요.
+
+**Receiver/worker fallback**:
+- `_enqueue_worker`의 invoke 실패 분기에서 `_process_worker`를 inline 실행 → receiver는 API Gateway 30s + Slack ack 3s 윈도우만 있고 inline agent run은 둘 다 초과 → retry 폭주. inline은 `AWS_LAMBDA_FUNCTION_NAME` 미설정인 로컬/테스트 경로에서만. Lambda 환경 invoke 실패는 best-effort `chat_postMessage` 안내 후 drop.
 
 운영 정책에 가까운 것들(예: `scripts/apps.py delete`의 `app_id` 재입력 확인 약화)은 [docs/operations.md](docs/operations.md)에 정리되어 있습니다.
 

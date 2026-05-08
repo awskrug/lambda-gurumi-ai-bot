@@ -47,7 +47,7 @@ def random_int(ctx: ToolContext, low: int, high: int) -> dict[str, int]:
 
 **규칙**
 
-- 첫 번째 인자는 항상 `ctx: ToolContext` — LLM 에는 노출되지 않는 런타임 컨텍스트 (`slack_client`, `channel`, `thread_ts`, `event`, `settings`, `llm`).
+- 첫 번째 인자는 항상 `ctx: ToolContext` — LLM 에는 노출되지 않는 런타임 컨텍스트 (`slack_client`, `channel`, `thread_ts`, `event`, `settings`, `llm`, `user_id`). per-user 동작이 필요하면 `ctx.user_id` 사용 (`remember`/`forget` 참고).
 - 나머지 인자는 `parameters` JSON Schema 가 그대로 정의. 키워드 전달되므로 LLM 이 부르는 argument 이름과 정확히 일치시킬 것.
 - 반환 타입은 JSON 직렬화 가능해야 합니다 (`dict`, `list`, `str`, `int`, `float`, `bool`). Agent 루프가 이걸 `role=tool` 메시지로 다시 LLM 에 넘겨줍니다.
 - 에러 처리: 복구 불가능한 실패는 `ValueError` 로 raise 합니다. `ToolExecutor` 가 잡아서 `{"ok": False, "error": "..."}` 로 감싸 LLM 이 상황을 보고 재계획할 수 있게 해줍니다.
@@ -60,6 +60,7 @@ def random_int(ctx: ToolContext, low: int, high: int) -> dict[str, int]:
 ```python
 from . import (  # noqa: F401  (imported for side effects)
     image,
+    memory,
     random_int,   # ← 추가
     search,
     slack,
