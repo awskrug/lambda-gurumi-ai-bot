@@ -62,13 +62,33 @@ def _labels() -> dict[str, str]:
     return LABELS.get(runtime.settings.response_language, LABELS["en"])
 
 
-MENTION_RE = re.compile(r"<@[^>]+>")
+# Match any Slack user/special mention so we can extract referenced
+# user_ids (for cache pre-warm) and selectively strip just the bot's own
+# mention. The previous "<@[^>]+>" sub stripped EVERY mention, which hid
+# user_ids from the LLM and caused `fetch_user_profile` to receive a
+# free-text display name with no cache to resolve it.
+_USER_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
+
+
+def _strip_bot_mention(text: str, bot_user_id: str) -> str:
+    """Remove only `<@BOT_USER_ID>` (and its `|alias` form). Other user
+    mentions stay in place so the LLM sees them as `<@U…>` and
+    `_resolve_user_id` can parse them in `fetch_user_profile`."""
+    if not text or not bot_user_id:
+        return text
+    pattern = re.compile(rf"<@{re.escape(bot_user_id)}(?:\|[^>]*)?>")
+    return pattern.sub("", text).strip()
 
 
 def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> None:  # noqa: ANN001
     set_request_id(str(uuid.uuid4()))
     labels = _labels()
-    text = MENTION_RE.sub("", event.get("text", "")).strip()
+    raw_text = event.get("text", "")
+    # Strip ONLY the bot's own mention. Other `<@U…>` mentions stay so
+    # the LLM can pass them straight into fetch_user_profile (which
+    # parses mention syntax).
+    bot_user_id = runtime._get_bot_user_id(client, api_app_id) if api_app_id else ""
+    text = _strip_bot_mention(raw_text, bot_user_id).strip() if bot_user_id else raw_text.strip()
     channel = event.get("channel")
     thread_ts = event.get("thread_ts") or event.get("ts")
     user = event.get("user", "")
@@ -200,6 +220,23 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
                 runtime.logger.warning("deferred streaming message start failed: %s", exc)
                 return
         stream_msg.append(delta)
+
+    # Pre-warm display names for every user mentioned in the message.
+    # Without this, the LLM may call fetch_user_profile with a free-text
+    # name that the cache can't resolve — exact failure mode logged in
+    # CloudWatch ("could not resolve user 'Uno'"). Cheap: parallel
+    # users.info via UserNameCache.warm; cached across the warm
+    # container so a thread that re-mentions the same user pays once.
+    mentioned_ids = {
+        m
+        for m in _USER_MENTION_RE.findall(raw_text)
+        if m and m != bot_user_id
+    }
+    if mentioned_ids:
+        try:
+            user_name_cache.warm(client, mentioned_ids)
+        except Exception as exc:  # noqa: BLE001
+            runtime.logger.debug("mention pre-warm failed: %s", exc)
 
     history_store = runtime._get_conversations()
     history = history_store.get(thread_ts)

@@ -198,6 +198,15 @@ def read_attached_images(
 def fetch_user_profile(ctx: ToolContext, user: str) -> dict[str, str]:
     user_id = _resolve_user_id(user)
     if not user_id:
+        # Cache-miss recovery: try warming the display-name cache from
+        # the current thread once, then re-resolve. Covers the "LLM
+        # called fetch_user_profile before fetch_thread_history" flow
+        # that the description discourages but doesn't enforce —
+        # without this, the user-visible failure is just an opaque
+        # "could not resolve user".
+        if _warm_cache_from_thread(ctx):
+            user_id = _resolve_user_id(user)
+    if not user_id:
         raise ValueError(
             f"could not resolve user {user!r}. Pass a user ID (U…/W…), "
             "a <@U…> mention, or call fetch_thread_history first so the "
@@ -231,6 +240,38 @@ def fetch_user_profile(ctx: ToolContext, user: str) -> dict[str, str]:
         "real_name": real_name,
         "image_url": image_url,
     }
+
+
+def _warm_cache_from_thread(ctx: ToolContext) -> bool:
+    """Best-effort: pull thread participants and warm the display-name
+    cache. Returns True when at least one user_id was resolved (i.e.
+    a retry of `_resolve_user_id` may now succeed); False on any
+    failure or when the thread is empty.
+
+    Used as a one-shot recovery path inside `fetch_user_profile` so a
+    cache miss doesn't bubble up as a hard error when the LLM forgot
+    to call `fetch_thread_history` first.
+    """
+    if not getattr(ctx, "thread_ts", None) or not getattr(ctx, "channel", None):
+        return False
+    try:
+        res = ctx.slack_client.conversations_replies(
+            channel=ctx.channel, ts=ctx.thread_ts, limit=50
+        )
+    except SlackApiError as exc:
+        logger.debug("cache-warm fetch failed: %s", _slack_error(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("cache-warm fetch unexpected error: %s", exc)
+        return False
+    messages = res.get("messages", []) if hasattr(res, "get") else []
+    user_ids: set[str] = {
+        m.get("user") for m in messages if m.get("user")
+    }
+    if not user_ids:
+        return False
+    user_name_cache.warm(ctx.slack_client, user_ids)
+    return True
 
 
 def _resolve_user_id(identifier: str) -> str | None:

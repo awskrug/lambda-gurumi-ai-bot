@@ -327,14 +327,74 @@ def test_fetch_user_profile_resolves_display_name_via_cache():
 
 def test_fetch_user_profile_unknown_display_name_raises():
     """Cache miss on a non-ID input should raise so the LLM gets a clear
-    error pointing at fetch_thread_history (which warms the cache)."""
+    error pointing at fetch_thread_history (which warms the cache).
+
+    NOTE: the auto-fallback inside fetch_user_profile DOES try one
+    `conversations_replies` warm before giving up — but with no
+    matching name in the warm result, the final raise still happens.
+    """
     from src.slack_helpers import user_name_cache
 
     user_name_cache._cache.clear()
     client = MagicMock()
+    # Empty thread → warm contributes nothing → resolve still fails.
+    client.conversations_replies.return_value = {"messages": []}
     with pytest.raises(ValueError, match="could not resolve user"):
         fetch_user_profile(_ctx(slack_client=client), user="ghost")
+    # users_info should not have been called for "ghost" — the cache
+    # warm wouldn't have queued it (no matching messages).
     client.users_info.assert_not_called()
+
+
+def test_fetch_user_profile_auto_warms_on_cache_miss():
+    """Regression for the 2026-05-08 incident: when the LLM calls
+    fetch_user_profile with a display name and the cache is empty, the
+    tool must auto-fetch the current thread, warm the cache, and retry
+    once — instead of immediately raising 'could not resolve user'."""
+    from src.slack_helpers import user_name_cache
+
+    user_name_cache._cache.clear()
+
+    client = MagicMock()
+    client.conversations_replies.return_value = {
+        "messages": [
+            {"user": "U-UNO", "ts": "1.1", "text": "hi"},
+            {"user": "U-OTHER", "ts": "1.2", "text": "hey"},
+        ]
+    }
+
+    def _users_info(user):
+        # Warm pulls names; the auto-retry lookup then matches "Uno".
+        names = {"U-UNO": "Uno", "U-OTHER": "other-name"}
+        return {"user": {"profile": {"display_name": names.get(user, user)}}}
+
+    client.users_info.side_effect = _users_info
+
+    out = fetch_user_profile(_ctx(slack_client=client), user="Uno")
+
+    assert out["user_id"] == "U-UNO"
+    assert out["display_name"] == "Uno"
+    # Auto-warm path uses conversations_replies on the current thread.
+    client.conversations_replies.assert_called_once()
+
+
+def test_fetch_user_profile_does_not_warm_when_cache_has_match():
+    """Auto-warm is a recovery path. When the display name resolves on
+    the first try, conversations_replies must NOT be called — pointless
+    Slack roundtrip."""
+    from src.slack_helpers import user_name_cache
+
+    user_name_cache._cache.clear()
+    user_name_cache._cache["U-UNO"] = "Uno"  # already warm
+
+    client = MagicMock()
+    client.users_info.return_value = {
+        "user": {"real_name": "Uno", "profile": {"display_name": "Uno", "image_512": "https://avatars.slack-edge.com/u.png"}}
+    }
+
+    out = fetch_user_profile(_ctx(slack_client=client), user="Uno")
+    assert out["user_id"] == "U-UNO"
+    client.conversations_replies.assert_not_called()
 
 
 def test_fetch_user_profile_propagates_users_info_failure():

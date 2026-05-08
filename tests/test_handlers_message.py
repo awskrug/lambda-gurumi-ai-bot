@@ -918,6 +918,115 @@ def test_process_does_not_mark_done_when_agent_raises(app_module, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Mention handling — strip ONLY the bot's own mention; pre-warm any other
+# user mentions so fetch_user_profile can resolve them on the first call.
+# Regression: a CloudWatch incident showed the LLM calling
+# fetch_user_profile("Uno") with an empty cache and failing — root cause was
+# the mention regex stripping ALL `<@U…>` from the LLM's view of the text.
+# --------------------------------------------------------------------------- #
+
+
+def test_strip_bot_mention_preserves_other_user_mentions():
+    """Direct unit test for the strip helper: only the bot's mention is
+    removed; co-mentioned users stay so the LLM can route them into
+    fetch_user_profile via the mention-syntax parser in `_resolve_user_id`."""
+    from src.handlers.message import _strip_bot_mention
+
+    raw = "<@U0BOT01> <@U0UNO01> 프로필 그려"
+    out = _strip_bot_mention(raw, "U0BOT01")
+    assert "<@U0UNO01>" in out
+    assert "<@U0BOT01>" not in out
+
+
+def test_strip_bot_mention_handles_alias_form():
+    """Slack sometimes emits `<@USERID|displayname>` — strip those too when
+    the USERID matches the bot."""
+    from src.handlers.message import _strip_bot_mention
+
+    raw = "<@U0BOT01|GurumiBot> <@U0UNO01|Uno> 그려"
+    out = _strip_bot_mention(raw, "U0BOT01")
+    assert "<@U0UNO01|Uno>" in out
+    assert "U0BOT01" not in out
+
+
+def test_strip_bot_mention_noop_when_bot_id_unknown():
+    """If auth.test failed (no bot_user_id resolved), don't strip anything —
+    falling through with all mentions intact is safer than aggressive
+    stripping that hides user_ids from the LLM."""
+    from src.handlers.message import _strip_bot_mention
+
+    raw = "<@U0XYZ01> hello"
+    assert _strip_bot_mention(raw, "") == "<@U0XYZ01> hello"
+
+
+def test_process_pre_warms_mentioned_user_ids(app_module, monkeypatch):
+    """Regression for the 2026-05-08 incident: when the message text
+    carries `<@U-OTHER>` mentions, the handler must pre-warm their display
+    names so fetch_user_profile resolves on the first attempt — even if
+    the LLM forgets to call fetch_thread_history first."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _NullMetadata())
+    monkeypatch.setattr(_runtime, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(_runtime, "_get_llm", lambda: object())
+    monkeypatch.setattr(_runtime, "_get_memory", lambda: _StubMem())
+    monkeypatch.setattr(
+        _runtime, "_get_bot_user_id", lambda *_a, **_kw: "U0BOT01"
+    )
+
+    warmed: list[set[str]] = []
+
+    class _CapturingCache:
+        def warm(self, _client, ids):
+            warmed.append(set(ids))
+
+        def get(self, _client, _uid):
+            return ""
+
+    monkeypatch.setattr(_message, "user_name_cache", _CapturingCache())
+    monkeypatch.setattr(_message, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(_message, "SlackMentionAgent", _CapturingAgent)
+    monkeypatch.setattr(_message, "StreamingMessage", _StubStream)
+
+    _message._process(
+        {
+            "channel": "C1",
+            "ts": "1.1",
+            "text": "<@U0BOT01> <@U0UNO01> 프로필 그려",
+            "user": "U0BRUCE0",
+            "client_msg_id": "msg-warm-1",
+        },
+        client=_StubClient(),
+        say=lambda **kw: None,
+        is_dm=False,
+        api_app_id="A1",
+    )
+
+    # The bot's own id is excluded; only the co-mentioned user is warmed.
+    assert warmed == [{"U0UNO01"}]
+    # And the bot's mention has been stripped from what reached the agent,
+    # while the other mention is preserved so the LLM can pass it through.
+    captured_text = _CapturingAgent.captured["context"].event.get("text")
+    # The event passed to the agent is unchanged (raw); the LLM-facing
+    # `user_message` is the parsed text. We don't have direct access here
+    # but the captured agent kwargs include the raw event for ToolContext.
+    assert "<@U0UNO01>" in captured_text
+    assert "<@U0BOT01>" in captured_text  # event.text untouched; only `user_message` is stripped
+
+
+class _StubMem:
+    def get(self, _u):
+        return []
+
+
+# --------------------------------------------------------------------------- #
 # User memory — auto-loaded by user_id and surfaced in the agent prompt
 # --------------------------------------------------------------------------- #
 

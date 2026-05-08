@@ -23,11 +23,15 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - `read_attached_images` — 첨부 이미지 Vision 요약
   - `read_attached_document` — 첨부 PDF/텍스트 추출 (페이지·바이트·문자 상한)
   - `fetch_thread_history` — 스레드 히스토리 조회
+  - `fetch_user_profile` — Slack 유저 프로필(display_name, real_name, image_url) 조회. 캐시 미스 시 thread를 1회 자동 warm 후 재시도
   - `search_web` — Tavily (`TAVILY_API_KEY` 설정 시) 또는 DuckDuckGo
+  - `search_images` — Tavily 이미지 검색(`TAVILY_API_KEY` 필수, DDG fallback 없음)
   - `fetch_webpage` — 공개 HTTPS 웹페이지 본문·링크 (Jina Reader 우선 + raw fallback, SSRF 가드)
   - `generate_image` — 텍스트 프롬프트로 이미지 생성 후 Slack 업로드
   - `edit_image` — 첨부된 이미지(또는 스레드 이전 이미지 URL)를 프롬프트로 편집 후 Slack 업로드. OpenAI/xAI 지원, Bedrock 미지원
+  - `attach_image_from_url` — 외부 공개 HTTPS 이미지를 다운로드해 Slack 스레드에 첨부 (SSRF 가드 + magic bytes 검증)
   - `get_current_time` — 서버 기본 TZ 또는 인자로 현재 시각/요일
+  - `remember` / `forget` — 사용자별 영속 메모리. 다음 turn부터 system prompt에 자동 주입(별도 `recall` 도구 없음)
 - **Production 기반**
   - **멀티테넌트**: 단일 배포로 여러 Slack 앱 서빙. 시크릿은 SSM Parameter Store에서 `api_app_id` 키로 per-request resolve
   - **앱별 오버라이드**: ACL(channel/user) + persona를 앱별로 글로벌 env var와 다르게 설정 가능
