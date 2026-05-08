@@ -373,7 +373,28 @@ def test_system_prompt_omits_empty_optional_layers():
     prompt = agent._build_system_prompt()
     assert "Additional policy:" not in prompt
     assert "Response style:" not in prompt
+    assert "User memory" not in prompt  # no memory layer when empty
     assert "Plan work" in prompt
+
+
+def test_system_prompt_renders_user_memory_section():
+    """user_memory entries must appear under a clearly labeled section so
+    the LLM treats them as durable user context, not transient history."""
+    reg = _registry_with_search()
+    agent = SlackMentionAgent(
+        llm=MagicMock(),
+        context=_ctx(),
+        registry=reg,
+        max_steps=3,
+        user_memory=[
+            {"key": "company", "value": "Daangn", "ts": 1700000000},
+            {"key": "team", "value": "AI Platform", "ts": 1700000100},
+        ],
+    )
+    prompt = agent._build_system_prompt()
+    assert "User memory" in prompt
+    assert "- company: Daangn" in prompt
+    assert "- team: AI Platform" in prompt
 
 
 def test_agent_aggregates_token_usage():

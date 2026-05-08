@@ -204,6 +204,17 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
     history_store = runtime._get_conversations()
     history = history_store.get(thread_ts)
 
+    # User-scoped persistent memory — auto-loaded once per agent run so
+    # `remember`/`forget` writes from this turn don't appear in the same
+    # turn's prompt (would tempt the LLM into a self-confirming loop).
+    # The next turn picks up the change.
+    user_memory: list[dict] = []
+    if user:
+        try:
+            user_memory = runtime._get_memory().get(user)
+        except Exception as exc:  # noqa: BLE001
+            runtime.logger.warning("memory load failed: %s", exc)
+
     llm = runtime._get_llm()
     context = ToolContext(
         slack_client=client,
@@ -212,6 +223,7 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
         event=event,
         settings=runtime.settings,
         llm=llm,
+        user_id=user,
     )
 
     def _on_step(step_num: int, phase: str, detail: dict) -> None:
@@ -245,6 +257,7 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
         system_message=runtime.settings.system_message,
         persona_message=effective_persona,
         history=history,
+        user_memory=user_memory,
         on_stream=_on_stream_wrapped,
         on_step=_on_step,
         max_output_tokens=runtime.settings.max_output_tokens,

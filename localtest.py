@@ -247,6 +247,10 @@ def main() -> None:
         event=event,
         settings=settings,
         llm=llm,
+        # Stable local user_id so `remember`/`forget` round-trip across
+        # localtest invocations. Pick anything non-empty — production
+        # uses the real Slack user_id.
+        user_id="LOCAL-USER",
     )
 
     if args.question:
@@ -273,6 +277,18 @@ def main() -> None:
 
     on_step = _make_on_step(args.quiet_steps)
 
+    # Best-effort memory load — works only when AWS creds are available
+    # (real DDB) AND the table exists. Skipped silently otherwise so
+    # offline localtest still runs.
+    user_memory: list[dict] = []
+    try:
+        from src.memory import MemoryStore
+
+        store = MemoryStore(table_name=settings.dynamodb_table_name, region=settings.aws_region)
+        user_memory = store.get(context.user_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[memory] load skipped: {exc}", file=sys.stderr)
+
     agent = SlackMentionAgent(
         llm=llm,
         context=context,
@@ -280,6 +296,7 @@ def main() -> None:
         max_steps=settings.agent_max_steps,
         response_language=settings.response_language,
         system_message=settings.system_message,
+        user_memory=user_memory,
         on_stream=on_stream,
         on_step=on_step,
         max_output_tokens=settings.max_output_tokens,

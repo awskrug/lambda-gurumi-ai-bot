@@ -22,6 +22,7 @@ from src.tools.registry import (
 # imported as `import time` inside registry.py / slack.py.
 from . import (  # noqa: F401  (imported for side effects)
     image,
+    memory,
     search,
     slack,
     time,

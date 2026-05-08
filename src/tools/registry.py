@@ -78,6 +78,11 @@ class ToolContext:
     event: dict[str, Any]
     settings: Settings
     llm: LLMProvider
+    # Slack user_id of the person who triggered the request. Used by
+    # memory tools (`remember`/`forget`) to scope writes per-user.
+    # Empty string when the event has no user (e.g. some bot-authored
+    # events) — memory tools refuse to operate without it.
+    user_id: str = ""
 
 
 # --------------------------------------------------------------------------- #

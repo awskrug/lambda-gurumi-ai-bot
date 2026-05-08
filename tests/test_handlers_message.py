@@ -918,6 +918,97 @@ def test_process_does_not_mark_done_when_agent_raises(app_module, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# User memory — auto-loaded by user_id and surfaced in the agent prompt
+# --------------------------------------------------------------------------- #
+
+
+def test_process_loads_user_memory_and_passes_to_agent(app_module, monkeypatch):
+    """Per-user memory must be fetched at agent construction (one call per
+    request, NOT inside the agent loop) and passed through as
+    `user_memory=[...]` so the agent can render it in the system prompt."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _NullMetadata())
+    monkeypatch.setattr(_runtime, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(_runtime, "_get_llm", lambda: object())
+
+    fetch_calls: list[str] = []
+
+    class _MemStub:
+        def get(self, user_id):
+            fetch_calls.append(user_id)
+            return [{"key": "company", "value": "Daangn", "ts": 1700000000}]
+
+    monkeypatch.setattr(_runtime, "_get_memory", lambda: _MemStub())
+    monkeypatch.setattr(_message, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(_message, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(_message, "StreamingMessage", _StubStream)
+    monkeypatch.setattr(_message, "SlackMentionAgent", _CapturingAgent)
+
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U-MEMORY", "client_msg_id": "msg-mem-1"},
+        client=_StubClient(),
+        say=lambda **kw: None,
+        is_dm=False,
+    )
+
+    # Memory was fetched exactly once with the event's user_id (not, say, the
+    # api_app_id) — per-user scoping.
+    assert fetch_calls == ["U-MEMORY"]
+    captured = _CapturingAgent.captured
+    assert captured["user_memory"] == [
+        {"key": "company", "value": "Daangn", "ts": 1700000000}
+    ]
+    # ToolContext also carries user_id so the `remember`/`forget` tools
+    # can write under the right key without re-parsing the event.
+    assert captured["context"].user_id == "U-MEMORY"
+
+
+def test_process_continues_when_memory_load_fails(app_module, monkeypatch):
+    """A DDB outage on memory read must NOT block the agent run — empty
+    memory is the graceful fallback."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _NullMetadata())
+    monkeypatch.setattr(_runtime, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(_runtime, "_get_llm", lambda: object())
+
+    class _BrokenMem:
+        def get(self, _user_id):
+            raise RuntimeError("DDB unreachable")
+
+    monkeypatch.setattr(_runtime, "_get_memory", lambda: _BrokenMem())
+    monkeypatch.setattr(_message, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(_message, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(_message, "StreamingMessage", _StubStream)
+    monkeypatch.setattr(_message, "SlackMentionAgent", _CapturingAgent)
+
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U-MEM", "client_msg_id": "msg-mem-2"},
+        client=_StubClient(),
+        say=lambda **kw: None,
+        is_dm=False,
+    )
+
+    # Empty memory — the agent still ran (CapturingAgent.captured is set).
+    assert _CapturingAgent.captured["user_memory"] == []
+
+
+# --------------------------------------------------------------------------- #
 # reaction_added — bot self-delete on :x: from authorized reactor
 # --------------------------------------------------------------------------- #
 

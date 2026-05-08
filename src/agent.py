@@ -42,6 +42,7 @@ class SlackMentionAgent:
         system_message: str | None = None,
         persona_message: str | None = None,
         history: list[dict[str, Any]] | None = None,
+        user_memory: list[dict[str, Any]] | None = None,
         on_stream: Callable[[str], None] | None = None,
         on_step: Callable[[int, str, dict[str, Any]], None] | None = None,
         max_output_tokens: int = 4096,
@@ -58,6 +59,10 @@ class SlackMentionAgent:
         self.system_message = system_message
         self.persona_message = persona_message
         self.history = history or []
+        # user_memory is `[{key, value, ts}, ...]` from MemoryStore.get.
+        # Surfaced in the system prompt so the LLM has it on every turn
+        # without spending a tool_call to fetch.
+        self.user_memory = user_memory or []
         self.on_stream = on_stream
         # on_step(step_num, phase, detail) — phases: "tool_use", "tool_result", "compose"
         self.on_step = on_step
@@ -243,6 +248,18 @@ class SlackMentionAgent:
         # Layer 3 — persona / answer style (optional, append).
         if self.persona_message:
             sections.append(f"Response style:\n{self.persona_message}")
+
+        # Layer 4 — user memory (optional). Auto-injected so the LLM
+        # never spends a `recall` round-trip; that's why no recall tool
+        # is registered. New writes via `remember`/`forget` take effect
+        # on the NEXT turn (memory is loaded once at agent
+        # construction in handlers.message).
+        if self.user_memory:
+            lines = [f"- {e['key']}: {e['value']}" for e in self.user_memory]
+            sections.append(
+                "User memory (saved across sessions, scoped to this user):\n"
+                + "\n".join(lines)
+            )
 
         sections.append(f"Respond in language: {self.response_language}.")
         return "\n\n".join(sections)

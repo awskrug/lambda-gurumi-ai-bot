@@ -26,6 +26,7 @@ from src.credentials import CredentialsStore
 from src.dedup import ConversationStore, DedupStore
 from src.llms import get_llm
 from src.logging_utils import get_logger
+from src.memory import MemoryStore
 
 settings = Settings.from_env()
 # logger name "app" is preserved across the runtime/router/handlers
@@ -38,6 +39,7 @@ _dedup: DedupStore | None = None
 _conversations: ConversationStore | None = None
 _credentials: CredentialsStore | None = None
 _app_metadata: AppMetadataStore | None = None
+_memory: MemoryStore | None = None
 # api_app_id -> ((signing_secret, bot_token), App). The secret tuple is
 # the cache *value* not the *key* so we can detect rotation: when
 # CredentialsStore returns a different tuple after its TTL refreshes, we
@@ -99,6 +101,16 @@ def _get_app_metadata() -> AppMetadataStore:
             region=settings.aws_region,
         )
     return _app_metadata
+
+
+def _get_memory() -> MemoryStore:
+    global _memory
+    if _memory is None:
+        _memory = MemoryStore(
+            table_name=settings.dynamodb_table_name,
+            region=settings.aws_region,
+        )
+    return _memory
 
 
 def _get_lambda_client():
