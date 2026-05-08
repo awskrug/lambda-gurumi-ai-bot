@@ -46,13 +46,19 @@ class DedupStore(_BaseStore):
 
     GSI_NAME = "user-index"
 
-    # In-flight TTL is intentionally short. It only needs to absorb
-    # Slack's receiver-side retry burst (≤30s in practice) and prevent
-    # two Lambda async invocations from running the same agent in
-    # parallel. Once a worker fails and the row TTL expires, Lambda's
-    # built-in async retry can re-enter without being silently blocked.
-    # The long-term idempotency guarantee comes from `mark_done` below.
-    DEFAULT_RESERVE_TTL = 90
+    # In-flight TTL must outlive the longest agent run. Heavy tools
+    # (`generate_image`/`edit_image`) hold the worker for up to 240s,
+    # and the Lambda function timeout itself is 300s (`serverless.yml`).
+    # If the TTL expires *while* the worker is still running, a
+    # concurrent re-delivery (Slack receiver retry, intermittent SDK
+    # retry, or Lambda async retry on a previous timeout) can pass
+    # `reserve` and run the agent in parallel — duplicate response.
+    # 300s = Lambda timeout: a worker that ran to function timeout has
+    # the row expire roughly when Lambda kills it, so the next async
+    # retry (~1 min later) gets a fresh in-flight slot. Successful
+    # runs write `done:` *before* the TTL is reached, so retries
+    # within the next hour are absorbed by `is_done` regardless.
+    DEFAULT_RESERVE_TTL = 300
     DEFAULT_DONE_TTL = 3600
 
     def reserve(

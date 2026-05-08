@@ -194,15 +194,25 @@ def test_reserve_and_mark_done_use_distinct_rows():
 
 
 @mock_aws
-def test_reserve_default_ttl_is_short():
-    """The in-flight reservation TTL must be short enough that a crashed
-    worker doesn't permanently block Lambda async retries. The exact value
-    is internal, but it MUST be well under an hour."""
+def test_reserve_default_ttl_outlives_lambda_timeout():
+    """The in-flight reservation TTL must be at least as long as the
+    Lambda function timeout (300s). If it expires *while* the worker
+    is still running a heavy tool (generate_image: 240s), a concurrent
+    re-delivery would pass `reserve` and run the agent twice —
+    duplicate response.
+
+    Upper bound: well under 1 hour, so a crashed worker doesn't
+    permanently block Lambda async retries (the `done:` marker, when
+    written, owns the long-term idempotency window).
+    """
     _create_table()
     store = DedupStore(table_name=TABLE, region=REGION)
     store.reserve("k3", user="U1")
     table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE)
     item = table.get_item(Key={"id": "dedup:k3"}).get("Item")
     assert item is not None
-    # TTL window: comfortably under 1 hour.
-    assert item["expire_at"] - int(time.time()) < 600
+    remaining = item["expire_at"] - int(time.time())
+    # Lower bound — must outlive the worker's longest tool execution.
+    assert remaining >= 240, f"TTL {remaining}s shorter than 240s tool timeout"
+    # Upper bound — well under an hour.
+    assert remaining < 600

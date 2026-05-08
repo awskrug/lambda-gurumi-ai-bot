@@ -39,7 +39,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - DynamoDB 조건부 put으로 Slack/Lambda 재시도 **중복 제거**
   - 채널 allowlist + 유저당 동시 요청 **throttle**
   - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h) + **사용자별 영속 메모리**(TTL 없음, `remember`/`forget`)
-  - 두 단계 **dedup**: 짧은 in-flight 예약(`dedup:` 90s) + 성공 후 영구 마커(`done:` 1h) — 워커 크래시 시 Lambda async retry 회복
+  - 두 단계 **dedup**: in-flight 예약(`dedup:`, Lambda timeout과 일치한 5분) + 성공 후 영구 마커(`done:` 1h) — 워커 크래시 시 Lambda async retry 회복
   - 긴 응답 **계층적 분할** (코드블록 → 문단 → 문장 → hard slice) + `MAX_LEN_SLACK` 기반 rolling 스트리밍
   - 첫 content delta 도착 시점에 placeholder 메시지 지연 posting — status UI와 중복 방지
   - 구조화 JSON 로깅 + request_id, 에러 메시지 sanitize

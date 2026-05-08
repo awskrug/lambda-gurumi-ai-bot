@@ -157,7 +157,7 @@ Lambda 환경에서 `lambda.invoke`가 raise하면 inline 실행을 *하지 않�
 
 | Key prefix | 의미 | TTL |
 |-----------|------|-----|
-| `dedup:{key}` | 처리 중(in-flight) 예약 | 90초 (`expire_at`) |
+| `dedup:{key}` | 처리 중(in-flight) 예약 | 5분 (Lambda timeout과 일치, `expire_at`) |
 | `done:{key}` | 성공 처리 완료 마커 | 1시간 (`expire_at`) |
 | `ctx:{thread_ts}` | 스레드 대화 메모리 | 1시간 (`expire_at`) |
 | `app:{api_app_id}` | 앱 레지스트리 + per-app override | **없음** (영구) |
@@ -165,16 +165,16 @@ Lambda 환경에서 `lambda.invoke`가 raise하면 inline 실행을 *하지 않�
 
 DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시킵니다. `app:`/`mem:` 행에 `expire_at`을 실수로 추가하면 등록된 앱·사용자 메모리가 자동 삭제됩니다 — 절대 추가하지 마세요.
 
-### 두 단계 dedup — `dedup:` (90s) + `done:` (1h)
+### 두 단계 dedup — `dedup:` (5분, Lambda timeout과 일치) + `done:` (1h)
 
 단일 `dedup:` 단계만 두던 초기 설계는 *워커가 크래시한 경우* 사용자 침묵을 유발했습니다: Lambda async 자동 retry가 동일 키로 들어와도 long-lived `dedup:` 예약 때문에 무조건 skip. 두 단계로 분리:
 
 1. 워커 진입 시 `is_done(key)` 확인 → 이미 완료면 silent return
-2. `reserve(key)` (90s TTL) — 실패면 in-flight skip
+2. `reserve(key)` (300s TTL — Lambda function timeout과 일치) — 실패면 in-flight skip
 3. agent.run + 응답 전송 + history persist
 4. **응답 전송 *직후*** `mark_done(key)` (1h `done:` 마커)
 
-워커 크래시 시 `dedup:` 90s가 만료되며 retry는 `is_done` 통과 → `reserve` 통과 → 정상 처리. 정상 종료 시 `done:` 마커가 1시간 동안 retry를 차단.
+`reserve` TTL이 Lambda timeout과 같다는 점이 핵심: 무거운 도구(`generate_image`/`edit_image`, 240s)가 실행 중인 동안에는 `dedup:` row가 살아 있어 동일 payload 재전달이 차단되고, Lambda가 함수를 강제 종료한 직후엔 row가 만료되어 다음 async retry가 새 in-flight 슬롯을 잡을 수 있습니다. 정상 종료 시 `done:` 마커가 1시간 동안 retry를 차단.
 
 Reaction은 별도 키 형태: `dedup:reaction:{event_ts}:{reactor}` / `done:reaction:...`. 같은 두 단계 패턴.
 

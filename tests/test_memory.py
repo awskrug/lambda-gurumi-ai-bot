@@ -102,7 +102,12 @@ def test_delete_missing_returns_false():
 @mock_aws
 def test_delete_last_entry_removes_row_entirely():
     """An empty entries dict shouldn't linger as a phantom row in DDB —
-    delete the whole item so future `get` returns the natural empty state."""
+    delete the whole item so future `get` returns the natural empty state.
+
+    Requires `dynamodb:DeleteItem` in the Lambda IAM policy
+    (`serverless.yml`). If that permission is removed, deletion of the
+    last entry will fail with AccessDenied in production.
+    """
     _create_table()
     store = MemoryStore(table_name=TABLE, region=REGION)
     store.put("U1", "k", "v")

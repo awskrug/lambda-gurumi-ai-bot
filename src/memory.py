@@ -143,7 +143,13 @@ class MemoryStore:
 
     def delete(self, user_id: str, key: str) -> bool:
         """Remove a single entry. Returns True if the key existed and
-        was removed, False if it was already absent."""
+        was removed, False if it was already absent.
+
+        When the deletion empties the row, the row itself is removed
+        via DeleteItem so we don't accumulate empty `{}` blobs. The
+        Lambda IAM policy grants `dynamodb:DeleteItem` for this path —
+        removing it would AccessDenied here.
+        """
         if not user_id or not key:
             return False
         existing = self._read_raw(user_id)
@@ -155,9 +161,6 @@ class MemoryStore:
                 blob = json.dumps(existing, ensure_ascii=False)
                 self._get_table().put_item(Item={"id": _row_id(user_id), "entries": blob})
             else:
-                # No entries left — drop the row entirely. Empty blob
-                # row would still occupy storage and complicate
-                # `is empty?` checks elsewhere.
                 self._get_table().delete_item(Key={"id": _row_id(user_id)})
         except ClientError as exc:
             logger.warning("memory delete failed for %s: %s", user_id, exc)

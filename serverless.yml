@@ -84,9 +84,14 @@ provider:
             # UpdateItem             — AppMetadataStore.record() uses
             #   update_item(if_not_exists, ReturnValues=ALL_NEW) so per-app
             #   ACL is read on the same roundtrip as the metadata write.
+            # DeleteItem             — MemoryStore.delete() removes the
+            #   `mem:{user_id}` row when the user clears their last
+            #   memory entry via the `forget` tool. Without this,
+            #   clearing the final key would AccessDenied in production.
             - dynamodb:GetItem
             - dynamodb:PutItem
             - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
             - dynamodb:Query
           Resource:
             - !GetAtt ConversationTable.Arn

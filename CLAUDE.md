@@ -82,6 +82,7 @@ def some_handler(...):
 - `app:{api_app_id}` / `mem:{user_id}` 행에 `expire_at` 추가 → DynamoDB TTL이 영구 행을 자동 evict (앱 레지스트리·사용자 메모리 사라짐)
 - `dedup:` 단계만 두고 `done:` 마커 제거 → 워커 크래시 시 짧은 TTL이 만료된 *후*에도 retry는 통과해야 하지만 long-lived `dedup:`로 회귀하면 사용자 침묵 발생. 두 단계 분리는 의도된 회복 경로.
 - `mark_done` 호출을 dedup TTL보다 늦은 경로(예: history persist 실패 후)로 옮김 → done 미작성으로 retry가 같은 응답을 재생성. mark_done은 응답 전송 *직후*에 호출.
+- `DEFAULT_RESERVE_TTL`을 Lambda timeout(`serverless.yml: timeout: 300`)보다 짧게 설정 → 무거운 도구(`generate_image`/`edit_image`, 240s) 실행 도중 dedup row 만료 → 동일 payload 재전달 시 `reserve` 통과로 중복 처리. TTL은 *Lambda timeout 이상*으로 유지.
 
 **App metadata**:
 - `AppMetadataStore.record(...)`에서 `ReturnValues=ALL_NEW` 제거 → per-app override resolution이 별도 GetItem이 되거나(latency+cost) silently regress하여 항상 글로벌
@@ -103,6 +104,7 @@ def some_handler(...):
 - `mem:{user_id}` 행에 `expire_at` 추가 → 영구 사용자 메모리가 TTL evict로 사라짐 (`app:` 행과 동일 invariant).
 - 메모리 row id를 `mem:{api_app_id}:{user_id}`로 분리하지 않음 — 운영 가정에서 user_id가 앱 간 unique. 가정이 깨지면 row id를 그렇게 바꾸고 store API는 그대로 둘 수 있음.
 - `remember`/`forget` 호출이 같은 turn의 system prompt에 즉시 반영되도록 변경 → LLM이 자기가 방금 저장한 값을 보고 자기-확인 루프에 빠짐. 메모리는 agent 생성 시점에 한 번만 로드, 다음 turn부터 반영.
+- Lambda IAM에서 `dynamodb:DeleteItem` 제거 → `MemoryStore.delete`가 마지막 entry 삭제 시 `delete_item`을 호출해 AccessDenied. 사용자가 메모리를 모두 잊으려 할 때만 발생하는 silent regression이라 일반 통합 테스트로 안 잡힘.
 
 **Mention 처리** (`src/handlers/message.py`):
 - `MENTION_RE`로 모든 `<@U…>` 멘션을 통째 strip → LLM이 함께 멘션된 다른 사용자의 user_id를 못 봄. `fetch_user_profile`이 cache 빈 상태에서 평문 display name을 받아 ValueError로 fail (CloudWatch에서 관찰된 incident). 봇 자신의 mention만 `_strip_bot_mention(text, bot_user_id)`로 제거. 다른 user mention은 보존.
