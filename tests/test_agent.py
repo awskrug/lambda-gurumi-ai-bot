@@ -164,13 +164,15 @@ def test_agent_captures_image_url_from_edit_image():
 
 def test_agent_forces_final_compose_at_max_steps():
     reg = _registry_with_search()
-    # Every step returns more tool calls — never ends.
+    # Tool-calling steps never end; the final compose hop (tools=None)
+    # is what actually closes the loop.
     def infinite():
         while True:
             yield LLMResult(
                 content="",
                 tool_calls=[ToolCall(id="x", name="search_web", arguments={"query": "q"})],
                 stop_reason="tool_use",
+                token_usage={"input": 5, "output": 1},
             )
 
     class EndlessLLM:
@@ -178,14 +180,22 @@ def test_agent_forces_final_compose_at_max_steps():
             self._gen = infinite()
             self.end_called = False
 
-        def chat(self, *a, **k):
+        def chat(self, system, messages, tools=None, max_tokens=1024, on_delta=None):
+            if tools is None:
+                # Final compose hop — no further tool calls allowed.
+                self.end_called = True
+                if on_delta:
+                    on_delta("forced")
+                return LLMResult(
+                    content="forced",
+                    tool_calls=[],
+                    stop_reason="end_turn",
+                    token_usage={"input": 11, "output": 7},
+                )
             return next(self._gen)
 
-        def stream_chat(self, system, messages, on_delta, max_tokens=1024):
-            self.end_called = True
-            if on_delta:
-                on_delta("forced")
-            return "forced"
+        def stream_chat(self, system, messages, on_delta, max_tokens=1024):  # pragma: no cover
+            raise AssertionError("agent must compose via chat(tools=None), not stream_chat")
 
         def describe_image(self, *a, **k):
             return ""
@@ -199,6 +209,9 @@ def test_agent_forces_final_compose_at_max_steps():
     assert result.text == "forced"
     assert llm.end_called is True
     assert result.steps == 2
+    # Final compose hop's usage is folded into the agent total.
+    # Two tool-calling hops × {input: 5, output: 1} + one compose hop {11, 7}.
+    assert result.token_usage == {"input": 5 * 2 + 11, "output": 1 * 2 + 7}
 
 
 def test_agent_on_step_fires_for_tool_use_and_compose():

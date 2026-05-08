@@ -47,6 +47,14 @@ MAX_VALUE_CHARS = 1000
 MAX_ENTRIES_PER_USER = 50
 MAX_BLOB_CHARS = 30_000
 
+# Concurrent writes to the same `mem:{user_id}` row are rare but possible
+# (one user mentioning the bot from two threads at once). Each write
+# does a read-modify-write of the JSON blob, so we guard with an
+# `entries = :prev_blob` ConditionExpression. A few retries reconcile
+# routine collisions; `MEMORY_WRITE_MAX_ATTEMPTS` caps the spin so a
+# pathological fight surfaces as ValueError instead of looping forever.
+MEMORY_WRITE_MAX_ATTEMPTS = 3
+
 
 class MemoryStore:
     """DynamoDB-backed per-user memory.
@@ -73,22 +81,7 @@ class MemoryStore:
         ordered newest-first. Returns [] when no memory exists."""
         if not user_id:
             return []
-        try:
-            res = self._get_table().get_item(Key={"id": _row_id(user_id)})
-        except ClientError as exc:
-            logger.warning("memory get failed for %s: %s", user_id, exc)
-            return []
-        item = res.get("Item")
-        if not item:
-            return []
-        raw = item.get("entries") or "{}"
-        try:
-            entries = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("malformed memory blob for %s", user_id)
-            return []
-        if not isinstance(entries, dict):
-            return []
+        entries, _ = self._read_raw(user_id)
         # Stable ordering: newest first by ts. Tie-break on key for
         # determinism so tests don't flake.
         items = [
@@ -103,9 +96,10 @@ class MemoryStore:
         """Upsert a single memory entry. Existing key is overwritten.
 
         Raises ValueError when the write would breach a cap so the
-        calling tool can surface the limit to the LLM. The DDB write
-        itself is best-effort; on outage we log + raise so the user
-        gets a clear "couldn't save" reply rather than a silent miss.
+        calling tool can surface the limit to the LLM. Concurrent writes
+        from the same user are reconciled via an `entries = :prev_blob`
+        condition + a small retry loop; if every attempt collides with a
+        racing writer, the final ValueError tells the user to retry.
         """
         if not user_id:
             raise ValueError("user_id is required")
@@ -119,27 +113,33 @@ class MemoryStore:
         if len(value) > MAX_VALUE_CHARS:
             raise ValueError(f"value exceeds {MAX_VALUE_CHARS} chars")
 
-        # Read-modify-write — race risk is acceptable here (a person
-        # rarely edits memory from two threads simultaneously). If two
-        # writes do collide, last-writer-wins, same as ConversationStore.
-        existing = self._read_raw(user_id)
-        existing[key] = {"value": value, "ts": int(time.time())}
-        if len(existing) > MAX_ENTRIES_PER_USER:
-            raise ValueError(
-                f"memory full ({MAX_ENTRIES_PER_USER} entries max). "
-                "Remove something with `forget` before adding more."
-            )
-        blob = json.dumps(existing, ensure_ascii=False)
-        if len(blob) > MAX_BLOB_CHARS:
-            raise ValueError(
-                f"memory blob would exceed {MAX_BLOB_CHARS} chars. "
-                "Trim long values or call `forget` on stale keys."
-            )
-        try:
-            self._get_table().put_item(Item={"id": _row_id(user_id), "entries": blob})
-        except ClientError as exc:
-            logger.warning("memory put failed for %s: %s", user_id, exc)
-            raise
+        for attempt in range(MEMORY_WRITE_MAX_ATTEMPTS):
+            existing, prev_blob = self._read_raw(user_id)
+            existing[key] = {"value": value, "ts": int(time.time())}
+            if len(existing) > MAX_ENTRIES_PER_USER:
+                raise ValueError(
+                    f"memory full ({MAX_ENTRIES_PER_USER} entries max). "
+                    "Remove something with `forget` before adding more."
+                )
+            blob = json.dumps(existing, ensure_ascii=False)
+            if len(blob) > MAX_BLOB_CHARS:
+                raise ValueError(
+                    f"memory blob would exceed {MAX_BLOB_CHARS} chars. "
+                    "Trim long values or call `forget` on stale keys."
+                )
+            try:
+                self._conditional_put(user_id, blob, prev_blob)
+                return
+            except _MemoryWriteConflict:
+                if attempt + 1 >= MEMORY_WRITE_MAX_ATTEMPTS:
+                    raise ValueError(
+                        "memory write conflict — another save raced this "
+                        "one. Please retry."
+                    )
+                continue
+            except ClientError as exc:
+                logger.warning("memory put failed for %s: %s", user_id, exc)
+                raise
 
     def delete(self, user_id: str, key: str) -> bool:
         """Remove a single entry. Returns True if the key existed and
@@ -149,38 +149,123 @@ class MemoryStore:
         via DeleteItem so we don't accumulate empty `{}` blobs. The
         Lambda IAM policy grants `dynamodb:DeleteItem` for this path —
         removing it would AccessDenied here.
+
+        Concurrent writes are reconciled the same way `put` does, with
+        an additional fast-path: if a concurrent writer already removed
+        the same key, the conflict is benign and we return True.
         """
         if not user_id or not key:
             return False
-        existing = self._read_raw(user_id)
-        if key not in existing:
-            return False
-        existing.pop(key, None)
-        try:
-            if existing:
-                blob = json.dumps(existing, ensure_ascii=False)
-                self._get_table().put_item(Item={"id": _row_id(user_id), "entries": blob})
-            else:
-                self._get_table().delete_item(Key={"id": _row_id(user_id)})
-        except ClientError as exc:
-            logger.warning("memory delete failed for %s: %s", user_id, exc)
-            raise
-        return True
 
-    def _read_raw(self, user_id: str) -> dict[str, dict[str, Any]]:
-        """Read the raw entries dict (key → {value, ts}). Internal use."""
+        for attempt in range(MEMORY_WRITE_MAX_ATTEMPTS):
+            existing, prev_blob = self._read_raw(user_id)
+            if key not in existing:
+                # Either the key was never there or a concurrent writer
+                # already removed it — both observe as "not present" to
+                # the caller.
+                return attempt > 0
+            existing.pop(key, None)
+            try:
+                if existing:
+                    blob = json.dumps(existing, ensure_ascii=False)
+                    self._conditional_put(user_id, blob, prev_blob)
+                else:
+                    self._conditional_delete(user_id, prev_blob)
+                return True
+            except _MemoryWriteConflict:
+                if attempt + 1 >= MEMORY_WRITE_MAX_ATTEMPTS:
+                    raise ValueError(
+                        "memory delete conflict — another write raced "
+                        "this one. Please retry."
+                    )
+                continue
+            except ClientError as exc:
+                logger.warning("memory delete failed for %s: %s", user_id, exc)
+                raise
+        return False  # unreachable, satisfies type checkers
+
+    def _read_raw(
+        self, user_id: str
+    ) -> tuple[dict[str, dict[str, Any]], str | None]:
+        """Read the entries dict and the raw blob string.
+
+        The raw blob is what `put`/`delete` use for the `entries =
+        :prev_blob` ConditionExpression — it's the only value DDB can
+        compare against on a server-side condition. `None` means the
+        row doesn't exist yet, which maps to `attribute_not_exists(id)`
+        on the conditional write side.
+
+        On a malformed blob we still return the raw value so the
+        condition matches — that lets a write recover the row instead
+        of being trapped behind unparseable history.
+        """
         try:
             res = self._get_table().get_item(Key={"id": _row_id(user_id)})
         except ClientError as exc:
             logger.warning("memory read failed for %s: %s", user_id, exc)
-            return {}
-        item = res.get("Item") or {}
+            return {}, None
+        item = res.get("Item")
+        if item is None:
+            return {}, None
         raw = item.get("entries") or "{}"
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            return {}
-        return data if isinstance(data, dict) else {}
+            return {}, raw
+        return (data if isinstance(data, dict) else {}), raw
+
+    def _conditional_put(
+        self, user_id: str, blob: str, prev_blob: str | None
+    ) -> None:
+        """Write the blob iff the row is unchanged since `_read_raw`.
+
+        Raises `_MemoryWriteConflict` on contention so the caller can
+        retry. Other ClientErrors propagate (transient DDB issue) so
+        the warning log surfaces the cause.
+        """
+        item = {"id": _row_id(user_id), "entries": blob}
+        try:
+            if prev_blob is None:
+                self._get_table().put_item(
+                    Item=item,
+                    ConditionExpression="attribute_not_exists(id)",
+                )
+            else:
+                self._get_table().put_item(
+                    Item=item,
+                    ConditionExpression="entries = :prev",
+                    ExpressionAttributeValues={":prev": prev_blob},
+                )
+        except ClientError as exc:
+            if _is_conditional_check_failure(exc):
+                raise _MemoryWriteConflict() from exc
+            raise
+
+    def _conditional_delete(self, user_id: str, prev_blob: str | None) -> None:
+        """Delete the row iff `entries` still equals `prev_blob`."""
+        if prev_blob is None:
+            # Nothing to delete — treat as benign no-op so retries don't
+            # spin forever on a row that vanished beneath us.
+            return
+        try:
+            self._get_table().delete_item(
+                Key={"id": _row_id(user_id)},
+                ConditionExpression="entries = :prev",
+                ExpressionAttributeValues={":prev": prev_blob},
+            )
+        except ClientError as exc:
+            if _is_conditional_check_failure(exc):
+                raise _MemoryWriteConflict() from exc
+            raise
+
+
+class _MemoryWriteConflict(Exception):
+    """Raised inside `MemoryStore` when a conditional write loses to a
+    concurrent writer. Internal — never surfaces past `put`/`delete`."""
+
+
+def _is_conditional_check_failure(exc: ClientError) -> bool:
+    return exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
 
 
 def _row_id(user_id: str) -> str:

@@ -188,3 +188,102 @@ def test_no_ttl_attribute_written():
         Key={"id": "mem:U1"}
     )
     assert "expire_at" not in (raw.get("Item") or {})
+
+
+# --------------------------------------------------------------------------- #
+# Concurrent-write reconciliation. The blob is read-modify-write, so two
+# writers racing on the same `mem:{user_id}` row need server-side
+# arbitration via an `entries = :prev_blob` ConditionExpression.
+# --------------------------------------------------------------------------- #
+
+
+@mock_aws
+def test_put_recovers_after_one_concurrent_write():
+    """A racing writer that landed *between* this writer's read and its
+    conditional put causes the first attempt to fail. The retry rereads
+    the latest blob and folds both keys into one row.
+    """
+    _create_table()
+    a = MemoryStore(table_name=TABLE, region=REGION)
+    b = MemoryStore(table_name=TABLE, region=REGION)
+
+    # Both readers see an empty row.
+    a_existing, a_prev = a._read_raw("U1")
+    assert a_existing == {} and a_prev is None
+    b_existing, b_prev = b._read_raw("U1")
+    assert b_existing == {} and b_prev is None
+
+    # B wins the race by writing first.
+    b.put("U1", "from_b", "B-value")
+
+    # A's put now sees the conflict on attempt 1 (its `prev_blob` was
+    # None, but the row now exists), retries, reads B's blob, and
+    # appends — both keys end up in the row.
+    a.put("U1", "from_a", "A-value")
+
+    out = {e["key"]: e["value"] for e in a.get("U1")}
+    assert out == {"from_a": "A-value", "from_b": "B-value"}
+
+
+@mock_aws
+def test_put_raises_when_max_attempts_exhausted(monkeypatch):
+    """When every retry collides with a concurrent writer, surface a
+    clear ValueError so the LLM can tell the user to retry — instead of
+    spinning the Lambda budget on infinite ConditionalCheckFailedException."""
+    _create_table()
+    store = MemoryStore(table_name=TABLE, region=REGION)
+    store.put("U1", "seed", "v")  # row exists so prev_blob != None
+
+    from src.memory import _MemoryWriteConflict
+
+    def _always_conflict(*_a, **_kw):
+        raise _MemoryWriteConflict()
+
+    monkeypatch.setattr(store, "_conditional_put", _always_conflict)
+
+    with pytest.raises(ValueError, match="memory write conflict"):
+        store.put("U1", "k", "v")
+
+
+@mock_aws
+def test_delete_treats_concurrent_removal_as_success():
+    """If a concurrent writer already removed the same key, the second
+    `delete` observes "key not present" on retry. Returning True
+    (rather than False) tells the user the desired post-condition holds."""
+    _create_table()
+    store = MemoryStore(table_name=TABLE, region=REGION)
+    store.put("U1", "doomed", "v")
+
+    # Simulate a racing writer: the first read sees the key, but
+    # before the conditional delete lands, another worker removes the
+    # key and the row state changes.
+    original_read = store._read_raw
+    state = {"calls": 0}
+
+    def _flaky_read(user_id):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return {"doomed": {"value": "v", "ts": 0}}, '{"doomed":{"value":"v","ts":0}}'
+        # Subsequent reads observe the row already cleared.
+        return {}, None
+
+    from src.memory import _MemoryWriteConflict
+
+    store._read_raw = _flaky_read  # type: ignore[assignment]
+
+    def _conflict_then_clear(*_a, **_kw):
+        raise _MemoryWriteConflict()
+
+    store._conditional_delete = _conflict_then_clear  # type: ignore[assignment]
+
+    assert store.delete("U1", "doomed") is True
+
+
+@mock_aws
+def test_concurrent_remove_of_same_key_returns_false_on_first_observation():
+    """Plain "key not present" on the first read still returns False —
+    the retry-success path only kicks in after at least one collision."""
+    _create_table()
+    store = MemoryStore(table_name=TABLE, region=REGION)
+    # Empty store; key was never there.
+    assert store.delete("U1", "never") is False

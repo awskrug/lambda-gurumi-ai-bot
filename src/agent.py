@@ -166,8 +166,16 @@ class SlackMentionAgent:
 
         # max_steps reached — force one final compose without tools.
         self._notify_step(steps, "compose", {"max_steps_hit": True})
-        final_text = self._compose_without_tools(system, messages)
-        return AgentResult(text=final_text, image_url=image_url, steps=steps, tool_calls_count=tool_calls_total, token_usage=total_usage)
+        final_text, final_usage = self._compose_without_tools(system, messages)
+        total_usage["input"] += final_usage.get("input", 0)
+        total_usage["output"] += final_usage.get("output", 0)
+        return AgentResult(
+            text=final_text,
+            image_url=image_url,
+            steps=steps,
+            tool_calls_count=tool_calls_total,
+            token_usage=total_usage,
+        )
 
     # ------------------------------------------------------------------ #
 
@@ -269,16 +277,28 @@ class SlackMentionAgent:
         args_blob = json.dumps(call.arguments or {}, sort_keys=True, ensure_ascii=False)
         return f"{call.name}:{hashlib.sha1(args_blob.encode()).hexdigest()[:12]}"
 
-    def _compose_without_tools(self, system: str, messages: list[dict[str, Any]]) -> str:
-        """Force a final answer when max_steps is reached — no tools permitted."""
+    def _compose_without_tools(
+        self, system: str, messages: list[dict[str, Any]]
+    ) -> tuple[str, dict[str, int]]:
+        """Force a final answer when max_steps is reached — no tools permitted.
+
+        Returns (text, token_usage) so the caller can fold this hop's
+        cost into `agent.done` accounting. Routes through `chat` (with
+        `on_delta` when streaming) so a single code path delivers both
+        the streaming UX and the usage numbers.
+        """
         directive = (
             "Provide the final answer now. Do not request any more tools; summarize based on prior observations."
         )
         messages = [*messages, {"role": "user", "content": directive}]
-        if self.on_stream:
-            return self.llm.stream_chat(system, messages, on_delta=self.on_stream, max_tokens=self.max_output_tokens)
-        result = self.llm.chat(system, messages, tools=None, max_tokens=self.max_output_tokens)
-        return (result.content or "").strip()
+        result = self.llm.chat(
+            system,
+            messages,
+            tools=None,
+            max_tokens=self.max_output_tokens,
+            on_delta=self.on_stream,
+        )
+        return (result.content or "").strip(), result.token_usage or {}
 
     def _notify_step(self, step: int, phase: str, detail: dict[str, Any]) -> None:
         if not self.on_step:
