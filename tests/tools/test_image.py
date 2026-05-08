@@ -64,7 +64,7 @@ def test_edit_image_uses_attached_files_by_default():
     }
     ctx = _ctx(event=event, slack_client=client, llm=llm)
 
-    with patch("src.tools.image.urllib.request.urlopen", return_value=_ok_response(b"raw-png")):
+    with patch("src.tools.image._http_get", return_value=_ok_response(b"raw-png")):
         out = edit_image(ctx, prompt="make it pencil sketch")
 
     assert out["permalink"] == "https://slack/p"
@@ -95,7 +95,7 @@ def test_edit_image_uses_explicit_urls_over_attachments():
         captured.append(req.full_url)
         return _ok_response(b"old-png", mime="image/png")
 
-    with patch("src.tools.image.urllib.request.urlopen", side_effect=_spy_urlopen):
+    with patch("src.tools.image._http_get", side_effect=_spy_urlopen):
         edit_image(
             ctx,
             prompt="redo",
@@ -157,7 +157,7 @@ def test_edit_image_skips_non_image_attachments_when_using_event_files():
     }
     ctx = _ctx(event=event, slack_client=client, llm=llm)
 
-    with patch("src.tools.image.urllib.request.urlopen", return_value=_ok_response(b"jpg-bytes", mime="image/jpeg")):
+    with patch("src.tools.image._http_get", return_value=_ok_response(b"jpg-bytes", mime="image/jpeg")):
         edit_image(ctx, prompt="enhance")
 
     images = llm.edit_image.call_args.args[1]
@@ -178,7 +178,7 @@ def test_edit_image_respects_limit_for_multi_attachment():
     }
     ctx = _ctx(event=event, slack_client=client, llm=llm)
 
-    with patch("src.tools.image.urllib.request.urlopen", return_value=_ok_response(b"x")):
+    with patch("src.tools.image._http_get", return_value=_ok_response(b"x")):
         edit_image(ctx, prompt="combine", limit=2)
 
     images = llm.edit_image.call_args.args[1]
@@ -204,7 +204,7 @@ def test_edit_image_uses_bot_token_for_download():
         captured["headers"] = dict(req.header_items())
         return _ok_response(b"png")
 
-    with patch("src.tools.image.urllib.request.urlopen", side_effect=_spy):
+    with patch("src.tools.image._http_get", side_effect=_spy):
         edit_image(ctx, prompt="x")
 
     headers_lower = {k.lower(): v for k, v in captured["headers"].items()}
@@ -227,7 +227,7 @@ def test_edit_image_accepts_profile_image_url():
         captured["auth"] = req.headers.get("Authorization")
         return _ok_response(b"avatar-bytes", mime="image/png")
 
-    with patch("src.tools.image.urllib.request.urlopen", side_effect=_spy):
+    with patch("src.tools.image._http_get", side_effect=_spy):
         edit_image(
             ctx,
             prompt="make it pixel art",
@@ -249,7 +249,7 @@ def test_edit_image_accepts_gravatar_host():
     client.files_upload_v2.return_value = {"file": {"permalink": "p"}}
     ctx = _ctx(slack_client=client, llm=llm)
 
-    with patch("src.tools.image.urllib.request.urlopen", return_value=_ok_response(b"g", mime="image/png")):
+    with patch("src.tools.image._http_get", return_value=_ok_response(b"g", mime="image/png")):
         edit_image(
             ctx,
             prompt="x",
@@ -309,13 +309,16 @@ def _ext_response(body: bytes, mime: str = "image/png", content_length: int | No
 def test_attach_image_from_url_happy_path(monkeypatch):
     _public_dns(monkeypatch)
     ctx = _ext_ctx()
+    # Real PNG magic — _fetch_external_image now sniffs body bytes so a
+    # malicious server can't claim image/png while shipping HTML/SVG.
+    png_body = b"\x89PNG\r\n\x1a\nrest-of-png"
     with patch(
         "src.tools.image._NoRedirectHandler",
     ), patch(
         "src.tools.image.urllib.request.build_opener"
     ) as build_opener:
         opener = MagicMock()
-        opener.open.return_value = _ext_response(b"\x89PNG-bytes", mime="image/png", content_length=10)
+        opener.open.return_value = _ext_response(png_body, mime="image/png", content_length=len(png_body))
         build_opener.return_value = opener
         out = attach_image_from_url(ctx, url="https://example.com/cat.png")
 
@@ -329,7 +332,7 @@ def test_attach_image_from_url_happy_path(monkeypatch):
     assert upload_kwargs["channel"] == "C1"
     assert upload_kwargs["thread_ts"] == "ts1"
     assert upload_kwargs["filename"] == "cat.png"
-    assert upload_kwargs["file"] == b"\x89PNG-bytes"
+    assert upload_kwargs["file"] == png_body
 
 
 def test_attach_image_from_url_rejects_http_scheme():
@@ -388,9 +391,11 @@ def test_attach_image_from_url_rejects_oversize_via_content_length(monkeypatch):
 def test_attach_image_from_url_filename_falls_back_when_url_has_no_extension(monkeypatch):
     _public_dns(monkeypatch)
     ctx = _ext_ctx()
+    # Real JPEG SOI magic — body must pass _detect_image_mime sniffing.
+    jpg_body = b"\xff\xd8\xff\xe0jpg-payload"
     with patch("src.tools.image.urllib.request.build_opener") as build_opener:
         opener = MagicMock()
-        opener.open.return_value = _ext_response(b"jpg-bytes", mime="image/jpeg", content_length=9)
+        opener.open.return_value = _ext_response(jpg_body, mime="image/jpeg", content_length=len(jpg_body))
         build_opener.return_value = opener
         attach_image_from_url(ctx, url="https://example.com/render?id=42")
 

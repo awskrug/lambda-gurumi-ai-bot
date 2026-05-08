@@ -22,10 +22,23 @@ class _FakeCreds:
 
 
 class _FakeDedup:
-    """Minimal DedupStore stand-in: reserve always succeeds, no throttle."""
+    """Minimal DedupStore stand-in: reserve always succeeds, no throttle.
+
+    Mirrors the two-stage contract (reserve + mark_done + is_done) so
+    handler tests don't have to know about the new completion marker.
+    """
+
+    def __init__(self):
+        self.done_keys: set[str] = set()
 
     def reserve(self, key, user="system"):
         return True
+
+    def is_done(self, key):
+        return key in self.done_keys
+
+    def mark_done(self, key, user="system"):
+        self.done_keys.add(key)
 
     def count_user_active(self, user):
         return 0

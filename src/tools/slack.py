@@ -15,8 +15,25 @@ from slack_sdk.errors import SlackApiError
 
 from src.slack_helpers import user_name_cache
 from src.tools.registry import ToolContext, default_registry, tool
+# Reuse SSRF primitives from web — _NoRedirectHandler keeps a 3xx from
+# leaking the bot's Authorization header to a non-Slack host, and
+# _read_body_capped enforces the per-tool size cap on streamed reads.
+from src.tools.web import _NoRedirectHandler, _read_body_capped
 
 logger = logging.getLogger(__name__)
+
+# Per-message text cap for fetch_thread_history. Long messages can blow
+# up the agent's context window; truncating here keeps a 50-message
+# history bounded for the next LLM hop. Hard-coded — operators have no
+# practical reason to tune it, and a separate setting would just be one
+# more knob to misconfigure.
+_HISTORY_TEXT_CHARS = 2000
+# Aggregate cap across all returned message texts. Even with the
+# per-message cap above, a 50-message history can still flood the agent
+# context (50 × 2000 = 100k chars). Stop accumulating once we cross
+# this budget; the oldest messages are kept (Slack returns oldest-first)
+# and the trailing ones get a clear truncation notice.
+_HISTORY_TOTAL_CHARS = 30000
 
 SLACK_FILE_HOSTS = {"files.slack.com", "files-edge.slack.com", "files-pri.slack.com"}
 # Profile avatars come from Slack's CDN (custom uploads) or Gravatar
@@ -32,6 +49,18 @@ SLACK_IMAGE_HOSTS = SLACK_FILE_HOSTS | SLACK_PROFILE_IMAGE_HOSTS
 DOC_TEXT_PREFIX = "text/"
 DOC_PDF_MIME = "application/pdf"
 _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
+
+
+def _http_get(req: urllib.request.Request, timeout: int = 15):
+    """Open `req` with redirects refused.
+
+    All Slack file fetches go through here so a 3xx cannot follow off-host
+    and carry the bot's Authorization header to a non-Slack target. This
+    is also the single name tests patch — keeps the patch surface tiny
+    instead of digging into `build_opener` plumbing.
+    """
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(req, timeout=timeout)
 
 
 @tool(
@@ -113,6 +142,8 @@ def read_attached_images(
     if not candidates:
         return []
 
+    max_bytes = ctx.settings.max_image_bytes
+
     def _fetch(url: str, mime_hint: str, name: str) -> dict[str, str] | None:
         # Profile-image hosts are public CDN; sending Authorization there
         # is unnecessary and could leak the bot token. Only files*.slack.com
@@ -121,8 +152,10 @@ def read_attached_images(
         if urllib.parse.urlparse(url).hostname in SLACK_FILE_HOSTS:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310 (host allowlisted)
-            data = response.read()
+        # _http_get refuses 3xx so the Authorization header above cannot
+        # follow a redirect off-host and leak the bot token.
+        with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted; redirects disabled)
+            data = _read_body_capped(response, max_bytes)
         mime = mime_hint if mime_hint.startswith("image/") else _guess_image_mime(url)
         if not mime.startswith("image/"):
             return None
@@ -260,7 +293,9 @@ def _fetch_slack_file(url: str, token: str, max_bytes: int) -> tuple[bytes, str]
     if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
         raise ValueError("invalid Slack file download URL")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310
+    # _http_get prevents a 3xx from carrying the bot token to an off-host
+    # redirect target.
+    with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted; redirects disabled)
         content_length = response.headers.get("Content-Length") if response.headers else None
         if content_length and content_length.isdigit() and int(content_length) > max_bytes:
             raise ValueError(f"document exceeds MAX_DOC_BYTES={max_bytes}")
@@ -463,9 +498,12 @@ def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, An
         # rendering loop. With a cold cache and limit=50 this would
         # otherwise be 50+ serial users_info calls (the original timeout
         # bug for read_attached_images, repeating itself here).
+        # bot_ids (B…) are NOT resolvable via users.info — that endpoint
+        # would 404 and pollute the cache. We render bot messages from
+        # the inline `username`/`bot_id` fields below.
         user_ids: set[str] = set()
         for item in messages:
-            uid = item.get("user") or item.get("bot_id")
+            uid = item.get("user")
             if uid:
                 user_ids.add(uid)
             for r in item.get("reactions") or []:
@@ -475,8 +513,16 @@ def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, An
         user_name_cache.warm(client, user_ids)
 
         out: list[dict[str, Any]] = []
+        total_text_chars = 0
         for item in messages:
-            user_id = item.get("user") or item.get("bot_id") or ""
+            user_id = item.get("user") or ""
+            if user_id:
+                author = user_name_cache.get(client, user_id)
+            else:
+                # Bot message: prefer the human-readable username Slack
+                # ships in the event payload; fall back to the bot_id so
+                # the LLM has *something* to attribute the message to.
+                author = item.get("username") or item.get("bot_id") or ""
             files = []
             for f in item.get("files") or []:
                 files.append(
@@ -498,10 +544,32 @@ def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, An
                         "users": reacting_users,
                     }
                 )
+            text = item.get("text", "")
+            if len(text) > _HISTORY_TEXT_CHARS:
+                text = text[:_HISTORY_TEXT_CHARS] + "…"
+            # Aggregate budget — once exhausted, stop pulling text content
+            # but still emit a short stub so the LLM can see the
+            # conversation continued (and how many messages were dropped).
+            budget_left = _HISTORY_TOTAL_CHARS - total_text_chars
+            if budget_left <= 0:
+                remaining = len(messages) - len(out)
+                out.append(
+                    {
+                        "user": author,
+                        "text": f"[{remaining} more messages truncated]",
+                        "ts": item.get("ts", ""),
+                        "files": files,
+                        "reactions": reactions,
+                    }
+                )
+                break
+            if len(text) > budget_left:
+                text = text[:budget_left] + "…"
+            total_text_chars += len(text)
             out.append(
                 {
-                    "user": user_name_cache.get(client, user_id) if user_id else "",
-                    "text": item.get("text", ""),
+                    "user": author,
+                    "text": text,
                     "ts": item.get("ts", ""),
                     "files": files,
                     "reactions": reactions,
@@ -525,7 +593,6 @@ def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, An
 
 def _with_slack_retry(call: Callable[[], Any], map_result: Callable[[Any], Any], label: str, attempts: int = 3) -> Any:
     delay = 1.0
-    last: SlackApiError | None = None
     for attempt in range(attempts):
         try:
             return map_result(call())
@@ -536,9 +603,9 @@ def _with_slack_retry(call: Callable[[], Any], map_result: Callable[[Any], Any],
                 logger.warning("%s rate limited, sleeping %ds", label, retry_after)
                 time.sleep(retry_after)
                 delay *= 2
-                last = exc
                 continue
             raise
-    if last:
-        raise last
-    return []
+    # Unreachable: every loop iteration either returns or re-raises. The
+    # only path that `continue`s is "ratelimited AND not the final attempt",
+    # so the final attempt always exits the loop one way or another.
+    raise RuntimeError(f"{label}: exhausted retries without raising")

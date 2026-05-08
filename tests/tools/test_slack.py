@@ -41,7 +41,7 @@ def test_read_attached_images_accepts_slack_host_variants():
     llm = MagicMock()
     llm.describe_image.return_value = "a cat"
     ctx = _ctx(event=event, llm=llm)
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         opener.return_value.__enter__.return_value.read.return_value = b"fake"
         result = read_attached_images(ctx, limit=1)
     assert result == [{"name": "a", "summary": "a cat"}]
@@ -172,7 +172,7 @@ def test_read_attached_images_accepts_extra_urls():
     be loadable via read_attached_images(urls=[...])."""
     ctx = _ctx()
     ctx.llm.describe_image.return_value = "a cat history"
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         opener.return_value.__enter__.return_value.read.return_value = b"fake-bytes"
         out = read_attached_images(
             ctx,
@@ -202,7 +202,7 @@ def test_read_attached_images_accepts_profile_image_hosts():
         cm.__enter__.return_value.read.return_value = b"png-bytes"
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture):
+    with patch("src.tools.slack._http_get", side_effect=_capture):
         out = read_attached_images(
             ctx,
             urls=[
@@ -232,7 +232,7 @@ def test_read_attached_images_authorization_only_for_files_host():
         cm.__enter__.return_value.read.return_value = b"x"
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture):
+    with patch("src.tools.slack._http_get", side_effect=_capture):
         read_attached_images(
             ctx,
             urls=[
@@ -376,7 +376,7 @@ def test_read_attached_images_uses_per_app_token_from_slack_client():
         cm.__enter__.return_value.read.return_value = b"img-bytes"
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture_request):
+    with patch("src.tools.slack._http_get", side_effect=_capture_request):
         read_attached_images(ctx, urls=["https://files.slack.com/x/cat.png"])
 
     assert captured["auth"] == "Bearer xoxb-per-app-from-ssm"
@@ -416,7 +416,7 @@ def test_read_attached_document_uses_per_app_token_from_slack_client():
         resp.read.side_effect = [b"hello world", b""]  # body chunk, then EOF
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_capture_request):
+    with patch("src.tools.slack._http_get", side_effect=_capture_request):
         read_attached_document(ctx, limit=1)
 
     assert captured["auth"] == "Bearer xoxb-per-app-from-ssm"
@@ -458,7 +458,7 @@ def test_read_attached_images_runs_describes_in_parallel():
 
     ctx.llm.describe_image.side_effect = _slow_describe
 
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         opener.return_value.__enter__.return_value.read.return_value = b"x"
         started = _time.monotonic()
         out = read_attached_images(ctx, limit=3)
@@ -506,7 +506,7 @@ def test_read_attached_images_preserves_order():
         cm.__enter__.return_value.read.return_value = body
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_open):
+    with patch("src.tools.slack._http_get", side_effect=_open):
         out = read_attached_images(
             ctx,
             limit=3,
@@ -528,7 +528,7 @@ def test_read_attached_images_respects_total_limit_across_event_and_urls():
     }
     ctx = _ctx(event=event)
     ctx.llm.describe_image.return_value = "desc"
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         opener.return_value.__enter__.return_value.read.return_value = b"x"
         out = read_attached_images(
             ctx,
@@ -583,7 +583,7 @@ def test_read_attached_document_runs_in_parallel():
         cm.__enter__.return_value.headers = {"Content-Length": "5", "Content-Type": "text/plain"}
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_slow_open):
+    with patch("src.tools.slack._http_get", side_effect=_slow_open):
         started = _time.monotonic()
         out = read_attached_document(ctx, limit=3)
         elapsed = _time.monotonic() - started
@@ -622,7 +622,7 @@ def test_read_attached_document_preserves_order_under_parallel_completion():
         cm.__enter__.return_value.headers = {"Content-Length": "1", "Content-Type": "text/plain"}
         return cm
 
-    with patch("src.tools.slack.urllib.request.urlopen", side_effect=_open):
+    with patch("src.tools.slack._http_get", side_effect=_open):
         out = read_attached_document(ctx, limit=2)
 
     assert [item["name"] for item in out] == ["slow.txt", "fast.txt"]
@@ -640,7 +640,7 @@ def test_read_attached_document_text_file():
     }
     ctx = _ctx(event=event)
     body = b"Hello\n  world.\nLine 3."
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         resp = opener.return_value.__enter__.return_value
         resp.read.return_value = body
         resp.headers = {"Content-Length": str(len(body))}
@@ -700,7 +700,7 @@ def test_read_attached_document_pdf_happy_path():
         ]
     }
     ctx = _ctx(event=event)
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         _mock_pdf_response(opener, pdf)
         out = read_attached_document(ctx, limit=1)
     assert len(out) == 1
@@ -733,7 +733,7 @@ def test_read_attached_document_pdf_truncation():
         settings=_settings(max_doc_chars=50),
         llm=ctx.llm,
     )
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         _mock_pdf_response(opener, pdf)
         out = read_attached_document(ctx, limit=1)
     assert out[0]["truncated"] is True
@@ -759,7 +759,7 @@ def test_read_attached_document_page_cap():
         settings=_settings(max_doc_pages=2),
         llm=MagicMock(),
     )
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         _mock_pdf_response(opener, pdf)
         out = read_attached_document(ctx, limit=1)
     assert "error" in out[0]
@@ -784,7 +784,7 @@ def test_read_attached_document_size_cap_via_content_length():
         settings=_settings(max_doc_bytes=100),  # tiny cap
         llm=MagicMock(),
     )
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         resp = opener.return_value.__enter__.return_value
         resp.headers = {"Content-Length": "200"}  # > cap
         resp.read.return_value = b"x" * 10  # should never be read past cap
@@ -812,7 +812,7 @@ def test_read_attached_document_size_cap_via_streamed_read():
         llm=MagicMock(),
     )
     body = b"y" * 200
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         resp = opener.return_value.__enter__.return_value
         resp.headers = {}  # no Content-Length
         buf = {"pos": 0}
@@ -865,7 +865,7 @@ def test_read_attached_document_skips_encrypted_pdf():
         ]
     }
     ctx = _ctx(event=event)
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         _mock_pdf_response(opener, encrypted_pdf)
         out = read_attached_document(ctx, limit=1)
     assert "error" in out[0]
@@ -884,7 +884,7 @@ def test_read_attached_document_skips_image_mime():
     }
     ctx = _ctx(event=event)
     # urlopen should NOT be called — image MIMEs are filtered before fetch
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         out = read_attached_document(ctx, limit=1)
     opener.assert_not_called()
     assert out == []
@@ -903,7 +903,7 @@ def test_read_attached_document_http_error_returns_per_item():
         ]
     }
     ctx = _ctx(event=event)
-    with patch("src.tools.slack.urllib.request.urlopen") as opener:
+    with patch("src.tools.slack._http_get") as opener:
         opener.side_effect = urllib.error.HTTPError(
             url="https://files.slack.com/missing.pdf",
             code=404,

@@ -85,11 +85,18 @@ def _detect_image_mime(data: bytes) -> str:
 
 
 def _install_local_image_fetcher(url_to_path: dict[str, Path]) -> None:
-    """Patch urllib.request.urlopen so the image tools can 'download' local
-    files via fake files.slack.com URLs without hitting the real network.
+    """Patch HTTP helpers so the image tools can 'download' local files via
+    fake files.slack.com URLs without hitting the real network.
+
+    Two interception points are needed:
+      1. `urllib.request.urlopen` — for the document fetch path.
+      2. `src.tools.{slack,image}._http_get` — the no-redirect helper the
+         image tools route through (introduced for the SSRF/Authorization
+         leak fix). It uses `build_opener` internally and bypasses any
+         `urlopen` monkeypatch.
 
     Real Slack URLs untouched — anything not in the mapping passes through
-    to the original urlopen, so production Slack behaviour is unaffected
+    to the original handlers, so production Slack behaviour is unaffected
     in environments where SLACK_BOT_TOKEN is real.
     """
     real_urlopen = urllib.request.urlopen
@@ -105,8 +112,10 @@ def _install_local_image_fetcher(url_to_path: dict[str, Path]) -> None:
         def __exit__(self, *_):
             return False
 
-        def read(self, _n: int = -1) -> bytes:
-            return self._body
+        def read(self, n: int = -1) -> bytes:
+            if n == -1 or n >= len(self._body):
+                return self._body
+            return self._body[:n]
 
     def _patched(req, *args, **kwargs):
         url = req.full_url if hasattr(req, "full_url") else str(req)
@@ -117,6 +126,15 @@ def _install_local_image_fetcher(url_to_path: dict[str, Path]) -> None:
         return _LocalResponse(body, _detect_image_mime(body[:32]))
 
     urllib.request.urlopen = _patched
+
+    def _patched_http_get(req, timeout: int = 15):
+        return _patched(req, timeout=timeout)
+
+    from src.tools import image as _image_tools
+    from src.tools import slack as _slack_tools
+
+    _image_tools._http_get = _patched_http_get
+    _slack_tools._http_get = _patched_http_get
 
 
 def _build_attachment_event(attach_paths: list[str]) -> dict[str, Any]:

@@ -761,6 +761,163 @@ def test_process_metadata_failure_falls_back_to_global_acl(app_module, monkeypat
 
 
 # --------------------------------------------------------------------------- #
+# Two-stage dedup — `done:` short-circuit + `mark_done` on success.
+#
+# Together these protect against the silent-failure path: if a worker
+# died mid-agent and Lambda async retries, the short-TTL `dedup:` row
+# has expired and the retry can re-enter. Once a run succeeds we lock
+# in `done:` so subsequent retries are quietly skipped.
+# --------------------------------------------------------------------------- #
+
+
+def test_process_skips_when_already_done(app_module, monkeypatch):
+    """A request whose `done:` marker exists from a prior successful run
+    must short-circuit before reserve / agent / response."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+
+    class _DoneAlready:
+        def is_done(self, _key):
+            return True
+
+        def reserve(self, *_a, **_kw):
+            raise AssertionError("reserve must not run when is_done returned True")
+
+        def mark_done(self, *_a, **_kw):
+            raise AssertionError("mark_done must not run on a short-circuit")
+
+        def count_user_active(self, _u):
+            return 0
+
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _DoneAlready())
+
+    def boom_agent(**_kw):
+        raise AssertionError("agent must not run when already done")
+
+    monkeypatch.setattr(_message, "SlackMentionAgent", boom_agent)
+
+    posts = []
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-done"},
+        client=object(),
+        say=lambda **kw: posts.append(kw),
+        is_dm=False,
+    )
+
+    assert posts == []
+
+
+def test_process_calls_mark_done_after_successful_run(app_module, monkeypatch):
+    """The long-lived `done:` marker must be written after the agent run
+    delivers its response — so subsequent retries see it and short-circuit."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+
+    marked: list[str] = []
+
+    class _RecordingDedup:
+        def is_done(self, _key):
+            return False
+
+        def reserve(self, _key, user="system"):
+            return True
+
+        def mark_done(self, key, user="system"):
+            marked.append(key)
+
+        def count_user_active(self, _u):
+            return 0
+
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _RecordingDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _NullMetadata())
+    monkeypatch.setattr(_runtime, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(_runtime, "_get_llm", lambda: object())
+    monkeypatch.setattr(_message, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(_message, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(_message, "SlackMentionAgent", _StubAgent)
+    monkeypatch.setattr(_message, "StreamingMessage", _StubStream)
+
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-success"},
+        client=_StubClient(),
+        say=lambda **kw: None,
+        is_dm=False,
+    )
+
+    assert marked == ["dedup:msg-success"]
+
+
+def test_process_does_not_mark_done_when_agent_raises(app_module, monkeypatch):
+    """If agent.run raises, the `dedup:` row is left to expire on its own
+    (short TTL) and `done:` is NOT written — Lambda async retry will be
+    allowed through after the in-flight TTL window."""
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+
+    class _RecordingDedup:
+        def __init__(self):
+            self.marked: list[str] = []
+
+        def is_done(self, _key):
+            return False
+
+        def reserve(self, _key, user="system"):
+            return True
+
+        def mark_done(self, key, user="system"):
+            self.marked.append(key)
+
+        def count_user_active(self, _u):
+            return 0
+
+    dedup = _RecordingDedup()
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: dedup)
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _NullMetadata())
+    monkeypatch.setattr(_runtime, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(_runtime, "_get_llm", lambda: object())
+    monkeypatch.setattr(_message, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(_message, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(_message, "StreamingMessage", _StubStream)
+
+    class _BoomAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, _text):
+            raise RuntimeError("agent exploded")
+
+    monkeypatch.setattr(_message, "SlackMentionAgent", _BoomAgent)
+
+    posts = []
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hi", "user": "U1", "client_msg_id": "msg-fail"},
+        client=_StubClient(),
+        say=lambda **kw: posts.append(kw),
+        is_dm=False,
+    )
+
+    assert dedup.marked == []  # no done marker written on failure
+
+
+# --------------------------------------------------------------------------- #
 # reaction_added — bot self-delete on :x: from authorized reactor
 # --------------------------------------------------------------------------- #
 

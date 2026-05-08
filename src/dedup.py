@@ -1,8 +1,16 @@
 """DynamoDB-backed idempotency and thread conversation memory.
 
-Single table, partition key `id`. Two key prefixes share the table:
-- `dedup:{client_msg_id}` — one-shot reservation for request deduplication.
+Single table, partition key `id`. Three key prefixes share the table:
+- `dedup:{client_msg_id}` — short-TTL in-flight reservation. Released
+  via natural TTL expiry so a worker that crashed/timed-out *can* be
+  retried by Lambda's async retry policy.
+- `done:{client_msg_id}` — long-TTL completion marker written after a
+  successful agent run. Subsequent retries see this and skip.
 - `ctx:{thread_ts}` — conversation history for thread memory.
+
+The two-stage dedup (reserve + mark_done) is what protects against the
+silent-failure path where a worker dies and Lambda's automatic retry
+would otherwise be blocked by a long-lived `dedup:` row.
 
 A GSI on `user` + `expire_at` enables per-user active-request counting
 for throttling.
@@ -38,7 +46,21 @@ class DedupStore(_BaseStore):
 
     GSI_NAME = "user-index"
 
-    def reserve(self, event_key: str, user: str = "system", ttl_seconds: int = 3600) -> bool:
+    # In-flight TTL is intentionally short. It only needs to absorb
+    # Slack's receiver-side retry burst (≤30s in practice) and prevent
+    # two Lambda async invocations from running the same agent in
+    # parallel. Once a worker fails and the row TTL expires, Lambda's
+    # built-in async retry can re-enter without being silently blocked.
+    # The long-term idempotency guarantee comes from `mark_done` below.
+    DEFAULT_RESERVE_TTL = 90
+    DEFAULT_DONE_TTL = 3600
+
+    def reserve(
+        self,
+        event_key: str,
+        user: str = "system",
+        ttl_seconds: int = DEFAULT_RESERVE_TTL,
+    ) -> bool:
         """Return True if reservation succeeds, False if already reserved.
 
         Uses ConditionExpression=attribute_not_exists(id) for atomicity — no
@@ -57,6 +79,47 @@ class DedupStore(_BaseStore):
                 return False
             logger.warning("dedup reserve failed: %s", exc)
             raise
+
+    def is_done(self, event_key: str) -> bool:
+        """Return True if a successful run was already recorded for this key.
+
+        Read-only — does NOT reserve anything. Callers check this first to
+        short-circuit retries that survived past the in-flight TTL window.
+        """
+        table = self._get_table()
+        try:
+            res = table.get_item(Key={"id": f"done:{event_key}"})
+        except ClientError as exc:
+            # Treat DDB outage as "not done" — falling through to reserve()
+            # will surface its own error path. Better to maybe-double-process
+            # than to silently drop on a transient read failure.
+            logger.warning("dedup is_done failed: %s", exc)
+            return False
+        return res.get("Item") is not None
+
+    def mark_done(
+        self,
+        event_key: str,
+        user: str = "system",
+        ttl_seconds: int = DEFAULT_DONE_TTL,
+    ) -> None:
+        """Write the long-lived completion marker.
+
+        Called after a successful agent run. The short-lived `dedup:` row
+        is left to expire on its own — only the `done:` marker survives,
+        and that's what subsequent `is_done` checks observe.
+        """
+        table = self._get_table()
+        expire_at = int(time.time()) + ttl_seconds
+        try:
+            table.put_item(
+                Item={"id": f"done:{event_key}", "user": user, "expire_at": expire_at},
+            )
+        except ClientError as exc:
+            # Failing to mark done is non-fatal — at worst a future retry
+            # re-runs the agent. We log so operators can spot a chronic
+            # outage; we do not raise into the response path.
+            logger.warning("dedup mark_done failed: %s", exc)
 
     def count_user_active(self, user: str) -> int:
         """Number of non-expired reservations for a user (throttle check)."""

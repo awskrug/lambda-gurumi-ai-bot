@@ -19,7 +19,11 @@ import urllib.parse
 import urllib.request
 
 from src.tools.registry import ToolContext, default_registry, tool
-from src.tools.slack import SLACK_FILE_HOSTS, SLACK_IMAGE_HOSTS
+from src.tools.slack import (
+    SLACK_FILE_HOSTS,
+    SLACK_IMAGE_HOSTS,
+    _guess_image_mime,
+)
 # SSRF guard primitives live in src.tools.web — sibling-module import is
 # fine within the tools package and avoids duplicating the validation
 # logic. The `_`-prefixed names are stable per CLAUDE.md ("load-bearing").
@@ -30,6 +34,15 @@ from src.tools.web import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _http_get(req: urllib.request.Request, timeout: int = 15):
+    """Open `req` with redirects refused — mirrors slack._http_get.
+
+    Tests patch this single name instead of `build_opener` plumbing.
+    """
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(req, timeout=timeout)
 
 
 @tool(
@@ -235,9 +248,10 @@ def _collect_input_images(
         if parsed.scheme != "https" or parsed.hostname not in SLACK_IMAGE_HOSTS:
             raise ValueError(f"invalid Slack file URL: {url}")
 
+    max_bytes = ctx.settings.max_image_bytes
     out: list[tuple[bytes, str]] = []
     for url, mime_hint in candidates:
-        body, header_mime = _fetch_slack_image(url, token)
+        body, header_mime = _fetch_slack_image(url, token, max_bytes)
         mime = (
             header_mime if header_mime.startswith("image/")
             else (mime_hint if mime_hint.startswith("image/") else _guess_image_mime(url))
@@ -246,13 +260,17 @@ def _collect_input_images(
     return out
 
 
-def _fetch_slack_image(url: str, token: str) -> tuple[bytes, str]:
-    """Download a Slack-hosted image. Returns (bytes, mime).
+def _fetch_slack_image(url: str, token: str, max_bytes: int) -> tuple[bytes, str]:
+    """Download a Slack-hosted image with size + redirect guards.
+
+    Returns (bytes, mime).
 
     Sends the bot token only for files*.slack.com (private-by-default).
     Profile-image hosts (avatars.slack-edge.com / secure.gravatar.com)
     are public CDN — sending Authorization there is unnecessary and could
-    leak the token.
+    leak the token. Redirects are refused so a 3xx cannot carry the bot
+    token to an off-host target. Body is capped at `max_bytes` to keep a
+    huge upload from inflating Lambda memory.
 
     Caller must validate `url` against SLACK_IMAGE_HOSTS first.
     """
@@ -260,27 +278,13 @@ def _fetch_slack_image(url: str, token: str) -> tuple[bytes, str]:
     if urllib.parse.urlparse(url).hostname in SLACK_FILE_HOSTS:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310 (host allowlisted upstream)
-        body = response.read()
+    with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted upstream; redirects disabled)
+        body = _read_body_capped(response, max_bytes)
         header_mime = (
             (response.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
             if response.headers else ""
         )
     return body, header_mime
-
-
-def _guess_image_mime(url: str) -> str:
-    path = urllib.parse.urlparse(url).path.lower()
-    for ext, mime in (
-        (".png", "image/png"),
-        (".jpg", "image/jpeg"),
-        (".jpeg", "image/jpeg"),
-        (".gif", "image/gif"),
-        (".webp", "image/webp"),
-    ):
-        if path.endswith(ext):
-            return mime
-    return "image/png"
 
 
 _IMAGE_FETCH_TIMEOUT = 12  # parallel to web._WEB_FETCH_TIMEOUT — same trade-offs
@@ -326,11 +330,44 @@ def _fetch_external_image(url: str, max_bytes: int) -> tuple[bytes, str, str]:
         raise ValueError(
             f"URL did not return an image (Content-Type={header_mime or 'missing'})"
         )
-    filename = _filename_from_url(url, header_mime)
+    # Header trust is not enough — a malicious server can label HTML/SVG
+    # as image/png. Verify against the standard image-format magic bytes
+    # so we don't upload something that renders as a script in Slack's
+    # preview surface. SVG is intentionally absent: it's text/xml and
+    # Slack handles it as a separate content type.
+    detected = _detect_image_mime(body)
+    if detected is None:
+        raise ValueError(
+            f"URL claimed Content-Type={header_mime} but body is not a "
+            "recognized image format (png/jpeg/gif/webp/bmp)"
+        )
+    filename = _filename_for_external_image(url, header_mime)
     return body, header_mime, filename
 
 
-def _filename_from_url(url: str, mime: str) -> str:
+def _detect_image_mime(body: bytes) -> str | None:
+    """Return the mime type implied by `body`'s magic bytes, or None.
+
+    Covers the formats Slack's image preview pipeline accepts. Sniffing
+    happens on the first ~12 bytes — sufficient for every signature
+    listed below.
+    """
+    if len(body) < 4:
+        return None
+    if body.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if body.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if body.startswith(b"GIF87a") or body.startswith(b"GIF89a"):
+        return "image/gif"
+    if len(body) >= 12 and body[0:4] == b"RIFF" and body[8:12] == b"WEBP":
+        return "image/webp"
+    if body.startswith(b"BM"):
+        return "image/bmp"
+    return None
+
+
+def _filename_for_external_image(url: str, mime: str) -> str:
     path = urllib.parse.urlparse(url).path
     name = path.rsplit("/", 1)[-1] if path else ""
     name = name.split("?", 1)[0].split("#", 1)[0]

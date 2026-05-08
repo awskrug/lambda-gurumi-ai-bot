@@ -7,11 +7,16 @@ import urllib.parse
 import urllib.request
 
 from src.tools.registry import ToolContext, default_registry, tool
+from src.tools.web import _read_body_capped
 
 logger = logging.getLogger(__name__)
 
 DUCKDUCKGO_HOST = "api.duckduckgo.com"
 TAVILY_HOST = "api.tavily.com"
+# Cap response sizes — search APIs occasionally return very large payloads
+# (e.g. Tavily with high max_results and rich content). 2 MiB matches the
+# default web fetch cap and is plenty for normal queries.
+_SEARCH_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
 
 
 @tool(
@@ -40,13 +45,25 @@ def _ddg_search(query: str, limit: int) -> list[dict[str, str]]:
     if parsed.scheme != "https" or parsed.hostname != DUCKDUCKGO_HOST:
         raise ValueError("invalid web search URL")
     with urllib.request.urlopen(url, timeout=15) as response:  # noqa: S310
-        payload = json.loads(response.read().decode("utf-8"))
+        body = _read_body_capped(response, _SEARCH_RESPONSE_MAX_BYTES)
+    payload = json.loads(body.decode("utf-8"))
+    # Schema match with the Tavily branch — `content` is empty on DDG since
+    # Instant Answer doesn't ship a per-result snippet, but emitting the
+    # key anyway lets the LLM treat both branches uniformly.
     results: list[dict[str, str]] = []
     if payload.get("AbstractURL"):
-        results.append({"title": payload.get("AbstractText", ""), "url": payload["AbstractURL"]})
+        results.append(
+            {
+                "title": payload.get("AbstractText", ""),
+                "url": payload["AbstractURL"],
+                "content": payload.get("AbstractText", ""),
+            }
+        )
     for item in payload.get("RelatedTopics", []):
         if "Text" in item and "FirstURL" in item:
-            results.append({"title": item["Text"], "url": item["FirstURL"]})
+            results.append(
+                {"title": item["Text"], "url": item["FirstURL"], "content": ""}
+            )
             if len(results) >= limit:
                 break
     return results[:limit]
@@ -60,7 +77,8 @@ def _tavily_search(api_key: str, query: str, limit: int) -> list[dict[str, str]]
     body = json.dumps({"api_key": api_key, "query": query, "max_results": limit}).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310
-        payload = json.loads(response.read().decode("utf-8"))
+        raw = _read_body_capped(response, _SEARCH_RESPONSE_MAX_BYTES)
+    payload = json.loads(raw.decode("utf-8"))
     return [
         {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
         for r in payload.get("results", [])[:limit]
@@ -126,7 +144,8 @@ def _tavily_image_search(api_key: str, query: str, limit: int) -> list[dict[str,
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310
-        payload = json.loads(response.read().decode("utf-8"))
+        raw = _read_body_capped(response, _SEARCH_RESPONSE_MAX_BYTES)
+    payload = json.loads(raw.decode("utf-8"))
     raw_images = payload.get("images") or []
     out: list[dict[str, str]] = []
     seen: set[str] = set()

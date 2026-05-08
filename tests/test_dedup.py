@@ -151,3 +151,58 @@ def test_conversation_truncate_single_large_msg_overflows_budget():
     msgs = [{"role": "user", "content": "x" * 1000}]
     trimmed = ConversationStore.truncate_to_chars(msgs, max_chars=50)
     assert trimmed == []
+
+
+# --------------------------------------------------------------------------- #
+# Two-stage dedup — reserve (short TTL) + mark_done (long TTL) protect against
+# the "worker died, Lambda async retry" silent-failure path.
+# --------------------------------------------------------------------------- #
+
+
+@mock_aws
+def test_is_done_returns_false_when_no_marker():
+    _create_table()
+    store = DedupStore(table_name=TABLE, region=REGION)
+    assert store.is_done("never-seen") is False
+
+
+@mock_aws
+def test_mark_done_then_is_done_returns_true():
+    """Once mark_done writes the long-lived `done:` row, is_done observes it.
+    This is the marker that lets a successful run short-circuit retries even
+    after the short-TTL `dedup:` row expires."""
+    _create_table()
+    store = DedupStore(table_name=TABLE, region=REGION)
+    assert store.is_done("k1") is False
+    store.mark_done("k1")
+    assert store.is_done("k1") is True
+
+
+@mock_aws
+def test_reserve_and_mark_done_use_distinct_rows():
+    """`reserve` writes `dedup:{key}` and `mark_done` writes `done:{key}` —
+    different DDB partitions. A reservation alone does NOT make is_done true,
+    which is what allows a worker that crashed mid-handler to be retried."""
+    _create_table()
+    store = DedupStore(table_name=TABLE, region=REGION)
+
+    assert store.reserve("k2") is True
+    assert store.is_done("k2") is False  # reserved but not yet completed
+
+    store.mark_done("k2")
+    assert store.is_done("k2") is True
+
+
+@mock_aws
+def test_reserve_default_ttl_is_short():
+    """The in-flight reservation TTL must be short enough that a crashed
+    worker doesn't permanently block Lambda async retries. The exact value
+    is internal, but it MUST be well under an hour."""
+    _create_table()
+    store = DedupStore(table_name=TABLE, region=REGION)
+    store.reserve("k3", user="U1")
+    table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE)
+    item = table.get_item(Key={"id": "dedup:k3"}).get("Item")
+    assert item is not None
+    # TTL window: comfortably under 1 hour.
+    assert item["expire_at"] - int(time.time()) < 600

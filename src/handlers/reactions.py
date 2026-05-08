@@ -51,17 +51,28 @@ def _process_reaction(event: dict, client: WebClient, api_app_id: str) -> None:
         return
 
     # Common dedup: Slack and Lambda may both re-deliver the same
-    # reaction event. event_ts is unique per event firing.
+    # reaction event. event_ts is unique per event firing. Two-stage
+    # check mirrors the message path — `done:` is the long-lived marker
+    # so a worker that crashed mid-handler can be retried by Lambda
+    # async without being silently blocked.
     dedup = runtime._get_dedup()
     dedup_key = f"reaction:{event.get('event_ts') or message_ts}:{reactor}"
+    full_key = f"dedup:{dedup_key}"
     try:
-        if not dedup.reserve(f"dedup:{dedup_key}", user=reactor or "system"):
-            log_event(runtime.logger, "dedup.skip", key=dedup_key)
+        if dedup.is_done(full_key):
+            log_event(runtime.logger, "dedup.skip", key=dedup_key, reason="already_done")
+            return
+        if not dedup.reserve(full_key, user=reactor or "system"):
+            log_event(runtime.logger, "dedup.skip", key=dedup_key, reason="in_flight")
             return
     except Exception as exc:  # noqa: BLE001
         runtime.logger.warning("dedup unavailable, proceeding without it: %s", exc)
 
     handler(event, client, api_app_id)
+    try:
+        dedup.mark_done(full_key, user=reactor or "system")
+    except Exception as exc:  # noqa: BLE001
+        runtime.logger.debug("dedup.mark_done failed: %s", exc)
 
 
 def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -> None:

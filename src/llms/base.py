@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Protocol
 
+from botocore.exceptions import ClientError
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,19 +70,28 @@ _RETRYABLE_BEDROCK = {"ThrottlingException", "ServiceQuotaExceededException", "M
 
 
 def _with_retry(fn: Callable[[], Any], label: str, attempts: int = 3) -> Any:
+    """Retry only Bedrock-style throttle/quota/timeout codes.
+
+    Anything else (4xx misconfig, model not found, transport errors that
+    aren't ClientError) re-raises on the first hit — retrying those just
+    burns Lambda budget for no recovery.
+    """
     delay = 1.0
-    last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
             return fn()
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            code = getattr(getattr(exc, "response", None), "get", lambda _k, _d=None: None)("Error", {}).get("Code") if hasattr(exc, "response") else None
+        except ClientError as exc:
+            response = getattr(exc, "response", None)
+            code = (
+                response.get("Error", {}).get("Code")
+                if isinstance(response, dict)
+                else None
+            )
             if code in _RETRYABLE_BEDROCK and attempt < attempts - 1:
                 logger.warning("%s retryable (%s), backoff %.1fs", label, code, delay)
                 time.sleep(delay)
                 delay *= 2
                 continue
             raise
-    if last_exc:
-        raise last_exc
+    # Unreachable: every loop iteration either returns, continues, or raises.
+    raise RuntimeError(f"{label}: exhausted retries without raising")

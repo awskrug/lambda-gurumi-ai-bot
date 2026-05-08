@@ -33,17 +33,29 @@ from src.handlers import message, reactions
 from src.logging_utils import log_event
 
 
-def _enqueue_worker(event: dict, is_dm: bool, api_app_id: str) -> None:
+def _enqueue_worker(
+    event: dict,
+    is_dm: bool,
+    api_app_id: str,
+    client: WebClient | None = None,
+) -> None:
     """Fire-and-forget async self-invoke of the worker path.
 
     `api_app_id` is carried through the payload so the worker can fetch
     its own bot token from SSM. We deliberately do NOT pass tokens
     through the payload — Lambda invoke payloads can be visible in
     CloudTrail and downstream tooling, so secrets stay in SSM.
+
+    `client` is the per-app WebClient Bolt injects into receiver
+    handlers. It's used only on the invoke-failure path to post a
+    short user-visible notice; the worker path mints its own.
     """
     function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
     inline_payload = {"slack_event": event, "is_dm": is_dm, "api_app_id": api_app_id}
     if not function_name:
+        # Local dev / tests: no Lambda runtime, run inline. Receivers in
+        # this mode are unit tests with no API Gateway timeout to worry
+        # about.
         _process_worker(inline_payload)
         return
     payload = json.dumps(
@@ -56,10 +68,37 @@ def _enqueue_worker(event: dict, is_dm: bool, api_app_id: str) -> None:
             Payload=payload,
         )
     except Exception:
-        # If async invoke fails (IAM, throttling, network), fall back to
-        # inline execution so the user's message isn't dropped.
-        runtime.logger.exception("async worker invoke failed, running inline")
-        _process_worker(inline_payload)
+        # Async invoke failed (IAM, throttling, network). DO NOT run
+        # the worker inline — receivers have a ~30s API Gateway window
+        # and Slack expects ack within 3s, so an inline agent run would
+        # blow both budgets and trigger a retry storm. Post a brief
+        # user-visible notice (best-effort) and drop the request; the
+        # user can resend.
+        runtime.logger.exception("async worker invoke failed; dropping after notice")
+        _notify_invoke_failure(client, event)
+
+
+def _notify_invoke_failure(client: WebClient | None, event: dict) -> None:
+    """Best-effort 'try again shortly' notice on async-invoke failure.
+
+    Silent if no client (e.g. reaction events have no natural reply
+    surface) or if posting itself fails. We do not raise — the receiver
+    must still return cleanly so API Gateway gets its 200.
+    """
+    if client is None:
+        return
+    channel = event.get("channel")
+    if not channel:
+        return
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    try:
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="일시 오류로 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        )
+    except Exception:
+        runtime.logger.warning("invoke-failure notification post failed", exc_info=True)
 
 
 def _process_worker(payload: dict) -> None:
@@ -128,18 +167,28 @@ def _get_bolt_app(api_app_id: str, signing_secret: str, bot_token: str) -> App:
     )
 
     @app.event("app_mention")
-    def _on_mention(event, body, ack):  # noqa: ANN001
+    def _on_mention(event, body, ack, client):  # noqa: ANN001
         ack()
-        _enqueue_worker(event, is_dm=False, api_app_id=(body or {}).get("api_app_id", ""))
+        _enqueue_worker(
+            event,
+            is_dm=False,
+            api_app_id=(body or {}).get("api_app_id", ""),
+            client=client,
+        )
 
     @app.event("message")
-    def _on_message(event, body, ack):  # noqa: ANN001
+    def _on_message(event, body, ack, client):  # noqa: ANN001
         ack()
         if event.get("channel_type") != "im":
             return
         if event.get("bot_id") or event.get("subtype"):
             return
-        _enqueue_worker(event, is_dm=True, api_app_id=(body or {}).get("api_app_id", ""))
+        _enqueue_worker(
+            event,
+            is_dm=True,
+            api_app_id=(body or {}).get("api_app_id", ""),
+            client=client,
+        )
 
     @app.event("reaction_added")
     def _on_reaction_added(event, body, ack):  # noqa: ANN001
@@ -153,6 +202,9 @@ def _get_bolt_app(api_app_id: str, signing_secret: str, bot_token: str) -> App:
             return
         if (event.get("item") or {}).get("type") != "message":
             return
+        # No `client=...` here: a reaction event has no natural reply
+        # surface to post a "try again" notice into. Drop on invoke
+        # failure (logged) and let the user re-react.
         _enqueue_worker(event, is_dm=False, api_app_id=(body or {}).get("api_app_id", ""))
 
     runtime._bolt_apps[api_app_id] = ((signing_secret, bot_token), app)

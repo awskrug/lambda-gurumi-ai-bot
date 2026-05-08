@@ -82,9 +82,18 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
 
     dedup = runtime._get_dedup()
     dedup_key = event.get("client_msg_id") or f"{channel}:{event.get('ts')}"
+    full_key = f"dedup:{dedup_key}"
+    # Two-stage check: a `done:` marker means an earlier attempt already
+    # finished successfully — short-circuit so retries don't re-run the
+    # agent. The `dedup:` reservation only blocks parallel/in-flight
+    # duplicates within a short TTL window; if the first worker died,
+    # that row TTL'd out and the retry needs to be allowed through.
     try:
-        if not dedup.reserve(f"dedup:{dedup_key}", user=user or "system"):
-            log_event(runtime.logger, "dedup.skip", key=dedup_key)
+        if dedup.is_done(full_key):
+            log_event(runtime.logger, "dedup.skip", key=dedup_key, reason="already_done")
+            return
+        if not dedup.reserve(full_key, user=user or "system"):
+            log_event(runtime.logger, "dedup.skip", key=dedup_key, reason="in_flight")
             return
     except Exception as exc:  # noqa: BLE001
         runtime.logger.warning("dedup unavailable, proceeding without it: %s", exc)
@@ -247,7 +256,16 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
     try:
         result = agent.run(text)
     except Exception as exc:  # noqa: BLE001
-        runtime.logger.exception("agent failure")
+        # Sanitize before logging — provider SDK tracebacks can carry
+        # `Authorization: Bearer ...` headers that would otherwise land in
+        # CloudWatch verbatim. Full traceback is preserved at DEBUG only.
+        log_event(
+            runtime.logger,
+            "agent.failure",
+            error_class=exc.__class__.__name__,
+            reason=sanitize_error(exc),
+        )
+        runtime.logger.debug("agent failure traceback", exc_info=True)
         error_text = f"{labels['error_prefix']}: {sanitize_error(exc)}"
         if stream_msg.ts is not None:
             stream_msg.stop(error_text)
@@ -292,6 +310,17 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
         )
     except Exception as exc:  # noqa: BLE001
         runtime.logger.warning("conversation persist failed: %s", exc)
+
+    # Mark the long-lived completion marker AFTER the response is delivered
+    # and history is persisted. A retry that loses the race against the
+    # short-TTL `dedup:` row will see `done:` and short-circuit cleanly.
+    try:
+        dedup.mark_done(full_key, user=user or "system")
+    except Exception as exc:  # noqa: BLE001
+        # Non-fatal: at worst a future retry re-runs the agent. The dedup
+        # store itself logs its own warning; this catch handles a totally
+        # absent dedup (in degraded mode above we may have skipped reserve).
+        runtime.logger.debug("dedup.mark_done failed: %s", exc)
 
     log_event(
         runtime.logger,

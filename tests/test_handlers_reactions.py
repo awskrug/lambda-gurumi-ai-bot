@@ -329,12 +329,19 @@ def test_process_reaction_dedup_drops_duplicate(app_module, monkeypatch):
     class _OneShotDedup:
         def __init__(self):
             self.seen = set()
+            self.done_keys: set[str] = set()
 
         def reserve(self, key, user="system"):
             if key in self.seen:
                 return False
             self.seen.add(key)
             return True
+
+        def is_done(self, key):
+            return key in self.done_keys
+
+        def mark_done(self, key, user="system"):
+            self.done_keys.add(key)
 
         def count_user_active(self, user):
             return 0

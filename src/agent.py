@@ -131,7 +131,14 @@ class SlackMentionAgent:
                 else:
                     seen_calls.add(signature)
                     tool_result = self.executor.execute(call)
-                log_event(logger, "tool.result", step=steps, tool=call.name, ok=tool_result.get("ok", False))
+                log_event(
+                    logger,
+                    "tool.result",
+                    step=steps,
+                    tool=call.name,
+                    ok=tool_result.get("ok", False),
+                    duration_ms=tool_result.get("duration_ms", 0),
+                )
 
                 self._notify_step(
                     steps,
@@ -182,7 +189,13 @@ class SlackMentionAgent:
             "them one-by-one. If a tool returns `ok:false`, tell the user "
             "briefly what failed (one short line) and, when it makes sense, "
             "suggest an alternative — do not retry blindly with the same "
-            "arguments and do not fabricate a result."
+            "arguments and do not fabricate a result.\n"
+            "When you decide to use tools in a turn, emit ONLY the "
+            "tool_calls — do not also output any text in that same turn. "
+            "Streaming a 'let me check…' preamble before tool_calls leaks "
+            "to the user and renders as duplicate output once the real "
+            "answer arrives. Save user-facing text for the turn AFTER "
+            "tool results return."
         )
         # Slack rendering rules. The streaming fallback path posts via plain
         # chat.postMessage / chat.update with a `text` field, which Slack

@@ -334,9 +334,11 @@ def test_enqueue_worker_does_not_ship_secrets_in_payload(app_module, monkeypatch
     assert b"bot_token" not in payload_bytes
 
 
-def test_enqueue_worker_falls_back_to_inline_on_invoke_failure(app_module, monkeypatch):
-    """If boto3.invoke raises, fall back to inline execution — still with
-    api_app_id in the payload so the worker can resolve credentials."""
+def test_enqueue_worker_drops_with_user_notice_on_invoke_failure(app_module, monkeypatch):
+    """If boto3.invoke raises (IAM, throttle, network), the receiver does
+    NOT run the agent inline — that would burn the API Gateway / Slack
+    ack budget and trigger a retry storm. Instead, post a short notice
+    via the Bolt-injected client and drop the request."""
     monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "gurumi-mention")
 
     class BrokenClient:
@@ -345,13 +347,43 @@ def test_enqueue_worker_falls_back_to_inline_on_invoke_failure(app_module, monke
 
     monkeypatch.setattr(_runtime, "_get_lambda_client", lambda: BrokenClient())
 
-    captured = []
-    monkeypatch.setattr(_router, "_process_worker", lambda payload: captured.append(payload))
+    def boom_inline(payload):
+        raise AssertionError("inline worker must not run on invoke failure")
+
+    monkeypatch.setattr(_router, "_process_worker", boom_inline)
+
+    posts: list[dict] = []
+
+    class _BoltClient:
+        def chat_postMessage(self, **kwargs):
+            posts.append(kwargs)
+
+    event = {"channel": "C1", "ts": "1.1", "text": "hi"}
+    _router._enqueue_worker(event, is_dm=False, api_app_id="A1", client=_BoltClient())
+
+    assert len(posts) == 1
+    assert posts[0]["channel"] == "C1"
+    assert posts[0]["thread_ts"] == "1.1"
+    assert "다시 시도" in posts[0]["text"]
+
+
+def test_enqueue_worker_drops_silently_when_no_client_on_invoke_failure(
+    app_module, monkeypatch
+):
+    """Reaction events have no natural reply surface (no `client` passed),
+    so an invoke failure must drop silently instead of raising."""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "gurumi-mention")
+
+    class BrokenClient:
+        def invoke(self, **_kwargs):
+            raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(_runtime, "_get_lambda_client", lambda: BrokenClient())
+    monkeypatch.setattr(_router, "_process_worker", lambda _p: None)
 
     event = {"channel": "C1", "text": "hi"}
+    # Should not raise.
     _router._enqueue_worker(event, is_dm=False, api_app_id="A1")
-
-    assert captured == [{"slack_event": event, "is_dm": False, "api_app_id": "A1"}]
 
 
 def test_enqueue_worker_payload_preserves_non_ascii(app_module, monkeypatch):
