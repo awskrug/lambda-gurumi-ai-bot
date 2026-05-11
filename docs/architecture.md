@@ -363,7 +363,7 @@ Python 3.12의 `LoggerAdapter.process()`가 `extra=`를 덮어쓰는 버그를 �
 
 Enum/int 검증은 조용히 fallback + 경고:
 - 잘못된 `LLM_PROVIDER=mystery` → `openai`
-- `AGENT_MAX_STEPS=not-int` → `3`
+- `AGENT_MAX_STEPS=not-int` → `6`
 - 최소값 미만은 clamp up
 
 ## Reaction 처리

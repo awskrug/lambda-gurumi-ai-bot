@@ -57,7 +57,7 @@ def test_invalid_int_falls_back_to_default(monkeypatch, reload_config):
     _clear_env(monkeypatch)
     monkeypatch.setenv("AGENT_MAX_STEPS", "not-an-int")
     s = reload_config()
-    assert s.agent_max_steps == 3
+    assert s.agent_max_steps == 6
 
 
 def test_int_below_minimum_clamped(monkeypatch, reload_config):

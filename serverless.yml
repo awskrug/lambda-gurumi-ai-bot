@@ -45,7 +45,7 @@ provider:
     LLM_MODEL: ${env:LLM_MODEL, 'gpt-4o-mini'}
     LLM_PROVIDER: ${env:LLM_PROVIDER, 'openai'}
     # --- vars: Agent behavior ---
-    AGENT_MAX_STEPS: ${env:AGENT_MAX_STEPS, '3'}
+    AGENT_MAX_STEPS: ${env:AGENT_MAX_STEPS, '6'}
     MAX_OUTPUT_TOKENS: ${env:MAX_OUTPUT_TOKENS, '4096'}
     RESPONSE_LANGUAGE: ${env:RESPONSE_LANGUAGE, 'ko'}
     # --- vars: Slack UX ---

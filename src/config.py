@@ -147,7 +147,7 @@ class Settings:
             llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini").strip(),
             image_provider=image_provider,
             image_model=os.getenv("IMAGE_MODEL", "gpt-image-1").strip(),
-            agent_max_steps=_int_env("AGENT_MAX_STEPS", 3, minimum=1),
+            agent_max_steps=_int_env("AGENT_MAX_STEPS", 6, minimum=2),
             response_language=response_language,
             dynamodb_table_name=os.getenv("DYNAMODB_TABLE_NAME", "lambda-gurumi-bot-dev").strip(),
             aws_region=os.getenv("AWS_REGION", "us-east-1").strip(),

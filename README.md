@@ -88,7 +88,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `LLM_MODEL` | | `gpt-4o-mini` | 텍스트 모델 |
 | `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` |
 | `IMAGE_MODEL` | | `gpt-image-1` | 이미지 모델 |
-| `AGENT_MAX_STEPS` | | `3` | tool 루프 최대 iteration |
+| `AGENT_MAX_STEPS` | | `6` | tool 루프 최대 iteration |
 | `RESPONSE_LANGUAGE` | | `ko` | `ko` / `en` |
 | `DYNAMODB_TABLE_NAME` | | `lambda-gurumi-bot-dev` | dedup / 대화 저장 테이블 |
 | `AWS_REGION` | | `us-east-1` | AWS 리전 |
