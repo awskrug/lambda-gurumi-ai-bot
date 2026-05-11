@@ -36,7 +36,7 @@ def test_defaults(monkeypatch, reload_config):
     assert s.image_provider == "openai"
     assert s.image_model == "gpt-image-1"
     assert s.response_language == "ko"
-    assert s.agent_max_steps == 3
+    assert s.agent_max_steps == 6
     assert s.max_len_slack == 2000
     assert s.allowed_channel_ids == []
     assert s.allowed_user_ids == []
