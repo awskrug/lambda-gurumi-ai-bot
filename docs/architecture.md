@@ -244,11 +244,19 @@ DynamoDB read 실패 시 `record()`가 None 반환 → bot은 글로벌 env var�
 
 **JSON-in-prompt parsing 없음** — tool calls는 구조화된 객체로 도착합니다.
 
-루프 종료: `stop_reason != "tool_use"` 또는 `max_steps` 도달. max_steps 도달 시 `_compose_without_tools`가 `tools=None`으로 한 번 더 호출 — 사용자에게 미완 상태로 응답하지 않게.
-
 ### 중복 tool_call 억제
 
 `_call_signature = name + sha1(args_json)`. 루프 내 같은 signature 반복 시 `{"ok": False, "error": "duplicate call skipped"}`로 short-circuit하고 LLM에 돌려줘 진행을 유도. 무한 retry 방지.
+
+### 한 턴 내 병렬 tool 실행
+
+LLM이 한 turn에 emit한 독립 `tool_calls`는 `ToolExecutor.execute_many`로 batch submit되어 worker pool(`max_workers=4`)에서 동시 실행됩니다. system prompt가 "independent tool들은 한 turn에 parallel로 emit하라"고 지시하므로(`fetch_thread_history` + `fetch_user_profile` + `read_attached_images` 같은 묶음이 전형) 실행 측도 직렬 합산이 아닌 max(latency)로 처리해야 hint가 의미를 가집니다.
+
+- **순서 보존**: 결과는 입력 순서대로 반환되고 log/`on_step`/messages append도 원래 call 순서로 수행 — `tool_call_id` ↔ tool result 매칭과 관측성이 결정적.
+- **중복 검사 우선**: pre-pass에서 signature 중복은 worker submit 없이 즉시 `duplicate call skipped`로 채움. 동일 turn에 same-sig가 둘 있으면 첫 번째만 실행.
+- **per-call deadline**: 각 call의 timeout은 자기 submit 시점 기준으로 계산되어, 늦게 끝나는 sibling이 후속 call의 timeout 예산을 silent하게 늘리지 않음.
+
+루프 종료: `not result.tool_calls`(LLM이 더 이상 도구를 요청하지 않음) 또는 `max_steps` 도달. max_steps 도달 시 `_compose_without_tools`가 `tools=None`으로 한 번 더 호출 — 사용자에게 미완 상태로 응답하지 않게.
 
 ### 4-phase 파이프라인 (절대 단축 금지)
 
@@ -317,7 +325,7 @@ Jina Reader path (`{JINA_READER_BASE}/{percent-encoded url}`)가 실제 네트�
 
 ### Slack file fetch (`src/tools/slack.py`, `src/tools/image.py`)
 
-`read_attached_images`/`read_attached_document`/`edit_image` 등 Slack-hosted 파일을 받는 모든 도구는 모듈-내부 helper `_http_get(req, timeout)`을 거칩니다. helper는 `urllib.request.build_opener(_NoRedirectHandler())`로 만든 opener를 사용 → **3xx redirect 거부**. cross-host redirect로 봇 Authorization 헤더가 leak되는 경로를 차단합니다. `SLACK_FILE_HOSTS` allowlist도 동일 경로에서 강제 — 봇 토큰이 임의 URL fetch에 쓰이지 않도록.
+`read_attached_images`/`read_attached_document`/`edit_image` 등 Slack-hosted 파일을 받는 모든 도구는 모듈-내부 helper `_http_get(req, timeout)`을 거칩니다. helper는 `urllib.request.build_opener(_SlackRedirectHandler())`로 만든 opener를 사용 → **redirect는 `SLACK_IMAGE_HOSTS` 안에서만 허용**(Slack은 `url_private_download`에 대해 same-zone signed CDN URL refresh로 자주 302를 발급하므로 일률 거부할 수 없음). `SLACK_FILE_HOSTS` 밖으로 redirect되면 Authorization 헤더가 strip되어 봇 토큰이 cross-host로 leak되지 않습니다. 비-Slack 호스트로의 redirect는 `HTTPError("redirects not allowed (off-host)")`로 거부. `SLACK_FILE_HOSTS` allowlist도 동일 경로에서 강제 — 봇 토큰이 임의 URL fetch에 쓰이지 않도록.
 
 크기 캡(`MAX_IMAGE_BYTES`/`MAX_DOC_BYTES`)은 `_read_body_capped`로 streamed read 단계에서 적용. Content-Length 검증과 read 도중 cap 둘 다.
 
