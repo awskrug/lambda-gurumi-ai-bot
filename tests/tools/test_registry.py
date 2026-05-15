@@ -190,3 +190,145 @@ def test_executor_close_is_idempotent():
     executor.close()
     executor.close()
     assert executor._closed is True
+
+
+# --------------------------------------------------------------------------- #
+# execute_many — parallel batch execution
+# --------------------------------------------------------------------------- #
+
+
+def test_execute_many_runs_calls_concurrently():
+    """Multiple slow tools submitted together must overlap in time, not run
+    one-after-another. The wall-clock for two 0.2s tools should be ~0.2s, not
+    ~0.4s — otherwise the parallel-tool-call hint in the system prompt buys
+    nothing."""
+    import time
+
+    registry = ToolRegistry()
+
+    def slowish(ctx):
+        time.sleep(0.2)
+        return "ok"
+
+    registry.register(
+        ToolDef(
+            name="slowish",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            fn=slowish,
+            timeout=2.0,
+        )
+    )
+    executor = ToolExecutor(_ctx(), registry)
+    started = time.monotonic()
+    results = executor.execute_many(
+        [
+            ToolCall(id="a", name="slowish", arguments={}),
+            ToolCall(id="b", name="slowish", arguments={}),
+        ]
+    )
+    elapsed = time.monotonic() - started
+    assert all(r["ok"] for r in results)
+    # 0.2s each sequentially would be ≥0.4s. Allow generous headroom for CI
+    # scheduling — anything below 0.35s proves they overlapped.
+    assert elapsed < 0.35, f"calls did not overlap (elapsed={elapsed:.3f}s)"
+
+
+def test_execute_many_preserves_input_order():
+    """Even when later calls finish first, results are returned in submission
+    order — the agent loop relies on this to keep `tool_call_id` ↔ result
+    mapping straight."""
+    import time
+
+    registry = ToolRegistry()
+
+    def slow(ctx):
+        time.sleep(0.15)
+        return "slow"
+
+    def fast(ctx):
+        return "fast"
+
+    registry.register(
+        ToolDef(name="slow", description="", parameters={"type": "object", "properties": {}}, fn=slow, timeout=2.0)
+    )
+    registry.register(
+        ToolDef(name="fast", description="", parameters={"type": "object", "properties": {}}, fn=fast, timeout=2.0)
+    )
+    executor = ToolExecutor(_ctx(), registry)
+    results = executor.execute_many(
+        [
+            ToolCall(id="0", name="slow", arguments={}),
+            ToolCall(id="1", name="fast", arguments={}),
+        ]
+    )
+    assert results[0]["result"] == "slow"
+    assert results[1]["result"] == "fast"
+
+
+def test_execute_many_per_call_deadline_holds():
+    """Each call's wait must not exceed its own timeout budget — pinned to
+    submit time, not to iteration order. Two slow tools sharing a 0.1s budget
+    should both time out in ~0.1s wall-clock, not ~0.2s (which is what
+    iterating-then-waiting would produce if budgets were reset per check)."""
+    import time
+
+    registry = ToolRegistry()
+
+    def really_slow(ctx):
+        time.sleep(2.0)
+        return "should-not-return"
+
+    registry.register(
+        ToolDef(
+            name="really_slow",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            fn=really_slow,
+            timeout=0.1,
+        )
+    )
+    executor = ToolExecutor(_ctx(), registry)
+    started = time.monotonic()
+    results = executor.execute_many(
+        [
+            ToolCall(id="0", name="really_slow", arguments={}),
+            ToolCall(id="1", name="really_slow", arguments={}),
+        ]
+    )
+    elapsed = time.monotonic() - started
+
+    assert all(not r["ok"] for r in results)
+    assert all("timed out" in r["error"] for r in results)
+    # Parallel timeouts should land near 0.1s, not 0.2s (sequential) or 2.0s
+    # (no timeout enforcement). Generous ceiling to absorb CI scheduling.
+    assert elapsed < 0.5, f"deadlines did not hold (elapsed={elapsed:.3f}s)"
+
+
+def test_execute_many_mixed_known_and_unknown():
+    """Unknown tools short-circuit without consuming a worker. Mixing one
+    unknown with one valid call should yield (unknown error, valid result)
+    in order."""
+    registry = ToolRegistry()
+
+    def ok(ctx):
+        return "good"
+
+    registry.register(
+        ToolDef(name="ok", description="", parameters={"type": "object", "properties": {}}, fn=ok)
+    )
+    executor = ToolExecutor(_ctx(), registry)
+    results = executor.execute_many(
+        [
+            ToolCall(id="a", name="nope", arguments={}),
+            ToolCall(id="b", name="ok", arguments={}),
+        ]
+    )
+    assert results[0]["ok"] is False and "unknown" in results[0]["error"]
+    assert results[1]["ok"] is True and results[1]["result"] == "good"
+
+
+def test_execute_many_empty_input_returns_empty_list():
+    registry = ToolRegistry()
+    executor = ToolExecutor(_ctx(), registry)
+    assert executor.execute_many([]) == []

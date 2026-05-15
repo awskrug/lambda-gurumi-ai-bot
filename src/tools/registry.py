@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -95,31 +95,75 @@ class ToolExecutor:
         self.context = context
         self.registry = registry
         self.timeout = timeout
-        self._pool = ThreadPoolExecutor(max_workers=2)
+        # max_workers=4 matches the agent's typical fan-out for a single turn
+        # (LLMs emit 2–4 parallel tool_calls when the system prompt encourages
+        # it — e.g. fetch_thread_history + fetch_user_profile +
+        # read_attached_images). Inner tool pools (read_attached_images,
+        # read_attached_document) also use 4 as their cap, so this stays
+        # consistent across the codebase.
+        self._pool = ThreadPoolExecutor(max_workers=4)
         self._closed = False
 
     def execute(self, call: ToolCall) -> dict[str, Any]:
-        td = self.registry.get(call.name)
-        started = time.monotonic()
-        if td is None:
-            return {"ok": False, "error": f"unknown tool: {call.name}"}
-        effective_timeout = td.timeout if td.timeout is not None else self.timeout
-        try:
+        # Single-call path delegates to execute_many so timeout + exception
+        # handling lives in one place.
+        return self.execute_many([call])[0]
+
+    def execute_many(self, calls: list[ToolCall]) -> list[dict[str, Any]]:
+        """Run a batch of tool calls concurrently. Returns results in the same
+        order as `calls`.
+
+        All known tools are submitted to the worker pool up front, so they
+        execute in parallel up to ``max_workers``. Unknown tools short-circuit
+        without consuming a worker slot.
+
+        Per-call timeout is enforced from each call's submit time, not from
+        when we begin waiting on it — otherwise a slow earlier call could
+        silently extend a later call's allotted budget.
+        """
+        if not calls:
+            return []
+        prepared: list[tuple[Future | None, ToolDef | None, float, ToolCall]] = []
+        for call in calls:
+            td = self.registry.get(call.name)
+            started = time.monotonic()
+            if td is None:
+                prepared.append((None, None, started, call))
+                continue
             future = self._pool.submit(td.fn, self.context, **(call.arguments or {}))
-            result = future.result(timeout=effective_timeout)
-            return {"ok": True, "result": result, "duration_ms": int((time.monotonic() - started) * 1000)}
-        except FuturesTimeout:
-            logger.warning("tool %s timed out after %.1fs", call.name, effective_timeout)
-            return {"ok": False, "error": f"tool '{call.name}' timed out after {effective_timeout}s"}
-        except Exception as exc:  # noqa: BLE001
-            # Broad catch on purpose: provider SDKs raise their own APIError
-            # hierarchies (openai.APIError, anthropic.APIError, httpx.HTTPError)
-            # that the agent must treat as recoverable. Returning
-            # {"ok": False, ...} hands the failure back to the LLM, which
-            # can retry, fall back, or surface a friendly message. A
-            # narrower except list lets those propagate and aborts the loop.
-            logger.exception("tool %s failed", call.name)
-            return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
+            prepared.append((future, td, started, call))
+
+        results: list[dict[str, Any]] = []
+        for future, td, started, call in prepared:
+            if td is None or future is None:
+                results.append({"ok": False, "error": f"unknown tool: {call.name}"})
+                continue
+            effective_timeout = td.timeout if td.timeout is not None else self.timeout
+            remaining = max(0.0, started + effective_timeout - time.monotonic())
+            try:
+                result = future.result(timeout=remaining)
+                results.append(
+                    {
+                        "ok": True,
+                        "result": result,
+                        "duration_ms": int((time.monotonic() - started) * 1000),
+                    }
+                )
+            except FuturesTimeout:
+                logger.warning("tool %s timed out after %.1fs", call.name, effective_timeout)
+                results.append(
+                    {"ok": False, "error": f"tool '{call.name}' timed out after {effective_timeout}s"}
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Broad catch on purpose: provider SDKs raise their own APIError
+                # hierarchies (openai.APIError, anthropic.APIError, httpx.HTTPError)
+                # that the agent must treat as recoverable. Returning
+                # {"ok": False, ...} hands the failure back to the LLM, which
+                # can retry, fall back, or surface a friendly message. A
+                # narrower except list lets those propagate and aborts the loop.
+                logger.exception("tool %s failed", call.name)
+                results.append({"ok": False, "error": f"{exc.__class__.__name__}: {exc}"})
+        return results
 
     def close(self) -> None:
         """Release the worker pool.

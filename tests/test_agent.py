@@ -410,6 +410,111 @@ def test_system_prompt_renders_user_memory_section():
     assert "- team: AI Platform" in prompt
 
 
+def test_agent_dispatches_parallel_tool_calls_concurrently():
+    """When the LLM emits multiple independent tool_calls in one turn, the
+    agent must submit them to the executor pool together so they overlap in
+    wall-clock — not run one-after-another. Sequential dispatch here would
+    waste the system-prompt hint to emit parallel tool_calls."""
+    import time
+
+    reg = ToolRegistry()
+
+    @tool(
+        reg,
+        name="slow_a",
+        description="",
+        parameters={"type": "object", "properties": {}},
+        timeout=2.0,
+    )
+    def _a(ctx):
+        time.sleep(0.2)
+        return "a"
+
+    @tool(
+        reg,
+        name="slow_b",
+        description="",
+        parameters={"type": "object", "properties": {}},
+        timeout=2.0,
+    )
+    def _b(ctx):
+        time.sleep(0.2)
+        return "b"
+
+    llm = ScriptedLLM(
+        [
+            LLMResult(
+                content="",
+                tool_calls=[
+                    ToolCall(id="c1", name="slow_a", arguments={}),
+                    ToolCall(id="c2", name="slow_b", arguments={}),
+                ],
+                stop_reason="tool_use",
+            ),
+            LLMResult(content="done", tool_calls=[], stop_reason="end_turn"),
+        ]
+    )
+    agent = SlackMentionAgent(llm=llm, context=_ctx(), registry=reg, max_steps=3)
+    started = time.monotonic()
+    result = agent.run("q")
+    elapsed = time.monotonic() - started
+    assert result.tool_calls_count == 2
+    # Sequential would be ≥0.4s; parallel finishes near 0.2s. Leave headroom
+    # for CI scheduling but stay clearly below the sequential floor.
+    assert elapsed < 0.35, f"tool_calls did not overlap (elapsed={elapsed:.3f}s)"
+
+
+def test_agent_preserves_tool_call_order_in_messages():
+    """tool result messages must keep `tool_call_id` matched 1:1 with the
+    original tool_calls, in the same order — providers reject out-of-order
+    tool messages even when the IDs are right."""
+    import json
+
+    reg = ToolRegistry()
+
+    @tool(reg, name="fast", description="", parameters={"type": "object", "properties": {}})
+    def _fast(ctx):
+        return "fast"
+
+    @tool(reg, name="slow", description="", parameters={"type": "object", "properties": {}}, timeout=2.0)
+    def _slow(ctx):
+        import time
+        time.sleep(0.1)
+        return "slow"
+
+    captured_messages: list[dict] = []
+
+    class CapturingLLM(ScriptedLLM):
+        def chat(self, system, messages, tools=None, max_tokens=1024, on_delta=None):
+            captured_messages.append(list(messages))
+            return super().chat(system, messages, tools=tools, max_tokens=max_tokens, on_delta=on_delta)
+
+    llm = CapturingLLM(
+        [
+            LLMResult(
+                content="",
+                tool_calls=[
+                    ToolCall(id="c-slow", name="slow", arguments={}),
+                    ToolCall(id="c-fast", name="fast", arguments={}),
+                ],
+                stop_reason="tool_use",
+            ),
+            LLMResult(content="done", tool_calls=[], stop_reason="end_turn"),
+        ]
+    )
+    agent = SlackMentionAgent(llm=llm, context=_ctx(), registry=reg, max_steps=3)
+    agent.run("q")
+
+    # Second hop sees: [user, assistant w/ tool_calls, tool(slow), tool(fast)]
+    second_hop = captured_messages[1]
+    tool_msgs = [m for m in second_hop if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c-slow", "c-fast"]
+    # Confirm payload of each is consistent with its id (fast call should
+    # carry "fast" result even though it finished first physically).
+    assert json.loads(tool_msgs[0]["content"])["result"] == "slow"
+    assert json.loads(tool_msgs[1]["content"])["result"] == "fast"
+
+
 def test_agent_aggregates_token_usage():
     reg = _registry_with_search()
     llm = ScriptedLLM(

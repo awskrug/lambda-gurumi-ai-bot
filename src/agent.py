@@ -128,14 +128,31 @@ class SlackMentionAgent:
                 }
             )
 
-            for call in result.tool_calls:
-                tool_calls_total += 1
+            # Pre-pass: separate duplicates (cheap, no work) from unique calls
+            # (submit in parallel). The system prompt instructs the LLM to
+            # emit independent tool_calls together, so a typical turn has
+            # 1–4 calls that can run concurrently. Sequential execution here
+            # would defeat that hint.
+            unique_calls: list[tuple[int, ToolCall]] = []
+            tool_results: list[dict[str, Any] | None] = [None] * len(result.tool_calls)
+            for idx, call in enumerate(result.tool_calls):
                 signature = self._call_signature(call)
                 if signature in seen_calls:
-                    tool_result = {"ok": False, "error": "duplicate call skipped"}
+                    tool_results[idx] = {"ok": False, "error": "duplicate call skipped"}
                 else:
                     seen_calls.add(signature)
-                    tool_result = self.executor.execute(call)
+                    unique_calls.append((idx, call))
+            if unique_calls:
+                batch = self.executor.execute_many([c for _, c in unique_calls])
+                for (idx, _), tool_result in zip(unique_calls, batch):
+                    tool_results[idx] = tool_result
+
+            # Post-pass: render results in the original call order so log lines
+            # and `on_step` notifications are deterministic regardless of which
+            # tool finished first. The tool messages themselves are keyed by
+            # `tool_call_id`, so ordering is purely for observability.
+            for call, tool_result in zip(result.tool_calls, tool_results):
+                tool_calls_total += 1
                 log_event(
                     logger,
                     "tool.result",
