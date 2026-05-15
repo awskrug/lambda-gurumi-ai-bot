@@ -430,3 +430,19 @@ def test_attach_image_from_url_uses_no_redirect_handler(monkeypatch):
     handler_arg = build_opener.call_args.args[0]
     from src.tools.web import _NoRedirectHandler
     assert isinstance(handler_arg, _NoRedirectHandler)
+
+
+def test_image_http_get_uses_slack_redirect_handler():
+    """edit_image's Slack fetch path must use _SlackRedirectHandler so
+    Slack-internal 302s (signed CDN refresh) are followed. The strict
+    _NoRedirectHandler stays reserved for external URL fetches."""
+    import urllib.request
+
+    from src.tools import image as _image_mod
+    from src.tools.slack import _SlackRedirectHandler
+
+    with patch("src.tools.image.urllib.request.build_opener") as build_opener:
+        build_opener.return_value = MagicMock()
+        _image_mod._http_get(urllib.request.Request("https://files.slack.com/x.png"))
+    handler_arg = build_opener.call_args.args[0]
+    assert isinstance(handler_arg, _SlackRedirectHandler)

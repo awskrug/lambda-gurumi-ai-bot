@@ -22,6 +22,7 @@ from src.tools.registry import ToolContext, default_registry, tool
 from src.tools.slack import (
     SLACK_FILE_HOSTS,
     SLACK_IMAGE_HOSTS,
+    _SlackRedirectHandler,
     _guess_image_mime,
 )
 # SSRF guard primitives live in src.tools.web — sibling-module import is
@@ -37,11 +38,11 @@ logger = logging.getLogger(__name__)
 
 
 def _http_get(req: urllib.request.Request, timeout: int = 15):
-    """Open `req` with redirects refused — mirrors slack._http_get.
+    """Open `req` allowing only Slack-internal redirects — mirrors slack._http_get.
 
     Tests patch this single name instead of `build_opener` plumbing.
     """
-    opener = urllib.request.build_opener(_NoRedirectHandler())
+    opener = urllib.request.build_opener(_SlackRedirectHandler())
     return opener.open(req, timeout=timeout)
 
 
@@ -268,9 +269,10 @@ def _fetch_slack_image(url: str, token: str, max_bytes: int) -> tuple[bytes, str
     Sends the bot token only for files*.slack.com (private-by-default).
     Profile-image hosts (avatars.slack-edge.com / secure.gravatar.com)
     are public CDN — sending Authorization there is unnecessary and could
-    leak the token. Redirects are refused so a 3xx cannot carry the bot
-    token to an off-host target. Body is capped at `max_bytes` to keep a
-    huge upload from inflating Lambda memory.
+    leak the token. Redirects are bounded to SLACK_IMAGE_HOSTS and the
+    Authorization header is stripped on any cross-host redirect so the
+    bot token cannot follow a 3xx off-zone. Body is capped at `max_bytes`
+    to keep a huge upload from inflating Lambda memory.
 
     Caller must validate `url` against SLACK_IMAGE_HOSTS first.
     """
@@ -278,7 +280,7 @@ def _fetch_slack_image(url: str, token: str, max_bytes: int) -> tuple[bytes, str
     if urllib.parse.urlparse(url).hostname in SLACK_FILE_HOSTS:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
-    with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted upstream; redirects disabled)
+    with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted upstream; redirects bounded to Slack hosts)
         body = _read_body_capped(response, max_bytes)
         header_mime = (
             (response.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()

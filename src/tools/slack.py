@@ -15,10 +15,10 @@ from slack_sdk.errors import SlackApiError
 
 from src.slack_helpers import user_name_cache
 from src.tools.registry import ToolContext, default_registry, tool
-# Reuse SSRF primitives from web — _NoRedirectHandler keeps a 3xx from
-# leaking the bot's Authorization header to a non-Slack host, and
-# _read_body_capped enforces the per-tool size cap on streamed reads.
-from src.tools.web import _NoRedirectHandler, _read_body_capped
+# Reuse SSRF primitive from web — _read_body_capped enforces the per-tool
+# size cap on streamed reads. The Slack file fetch paths use the bounded
+# _SlackRedirectHandler below (defined here so it can reach SLACK_*_HOSTS).
+from src.tools.web import _read_body_capped
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +51,54 @@ DOC_PDF_MIME = "application/pdf"
 _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
 
 
-def _http_get(req: urllib.request.Request, timeout: int = 15):
-    """Open `req` with redirects refused.
+class _SlackRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only within Slack-trusted hosts.
 
-    All Slack file fetches go through here so a 3xx cannot follow off-host
-    and carry the bot's Authorization header to a non-Slack target. This
-    is also the single name tests patch — keeps the patch surface tiny
-    instead of digging into `build_opener` plumbing.
+    Slack's `url_private_download` periodically 302s to a signed CDN URL
+    (typically same host with refreshed query string, sometimes
+    `files-edge.slack.com`). Refusing every 3xx — what `_NoRedirectHandler`
+    does — would block legitimate downloads. This handler keeps the same
+    safety contract by:
+
+    1. Refusing redirects to any host outside ``SLACK_IMAGE_HOSTS``. A 3xx
+       to an arbitrary destination is the original auth-leak / SSRF
+       concern; staying on the allowlist preserves it.
+    2. Stripping the ``Authorization`` header before following a redirect
+       into a non-files (public CDN) host. Profile / avatar CDNs never
+       need the bot token, so a redirect to one must not carry it.
+
+    Inherits the stdlib redirect-count cap (max_redirections = 10) and
+    method-rewrite rules from ``HTTPRedirectHandler``.
     """
-    opener = urllib.request.build_opener(_NoRedirectHandler())
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme != "https" or parsed.hostname not in SLACK_IMAGE_HOSTS:
+            raise urllib.error.HTTPError(
+                req.full_url, code, "redirects not allowed (off-host)", headers, fp
+            )
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        if parsed.hostname not in SLACK_FILE_HOSTS:
+            new.headers = {
+                k: v for k, v in new.headers.items()
+                if k.lower() != "authorization"
+            }
+        return new
+
+
+def _http_get(req: urllib.request.Request, timeout: int = 15):
+    """Open `req` allowing only Slack-internal redirects.
+
+    All Slack file fetches go through here. ``_SlackRedirectHandler``
+    keeps a 3xx from carrying the bot's Authorization header to a
+    non-Slack target while still following the same-zone redirects
+    Slack uses for signed CDN URLs. This is also the single name tests
+    patch — keeps the patch surface tiny instead of digging into
+    `build_opener` plumbing.
+    """
+    opener = urllib.request.build_opener(_SlackRedirectHandler())
     return opener.open(req, timeout=timeout)
 
 
@@ -152,9 +191,9 @@ def read_attached_images(
         if urllib.parse.urlparse(url).hostname in SLACK_FILE_HOSTS:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(url, headers=headers)
-        # _http_get refuses 3xx so the Authorization header above cannot
-        # follow a redirect off-host and leak the bot token.
-        with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted; redirects disabled)
+        # _http_get bounds 3xx redirects to SLACK_IMAGE_HOSTS and strips
+        # Authorization on cross-host redirects so the bot token cannot leak.
+        with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted; redirects bounded to Slack hosts)
             data = _read_body_capped(response, max_bytes)
         mime = mime_hint if mime_hint.startswith("image/") else _guess_image_mime(url)
         if not mime.startswith("image/"):
@@ -335,9 +374,9 @@ def _fetch_slack_file(url: str, token: str, max_bytes: int) -> tuple[bytes, str]
     if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
         raise ValueError("invalid Slack file download URL")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    # _http_get prevents a 3xx from carrying the bot token to an off-host
-    # redirect target.
-    with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted; redirects disabled)
+    # _http_get bounds 3xx redirects to SLACK_IMAGE_HOSTS and strips
+    # Authorization on cross-host redirects so the bot token cannot leak.
+    with _http_get(req, timeout=15) as response:  # noqa: S310 (host allowlisted; redirects bounded to Slack hosts)
         content_length = response.headers.get("Content-Length") if response.headers else None
         if content_length and content_length.isdigit() and int(content_length) > max_bytes:
             raise ValueError(f"document exceeds MAX_DOC_BYTES={max_bytes}")

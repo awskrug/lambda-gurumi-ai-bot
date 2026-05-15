@@ -974,3 +974,101 @@ def test_read_attached_document_http_error_returns_per_item():
     assert len(out) == 1
     assert "error" in out[0]
     assert "404" in out[0]["error"]
+
+
+# --------------------------------------------------------------------------- #
+# _SlackRedirectHandler — bounded redirect policy for Slack file fetches
+# --------------------------------------------------------------------------- #
+
+
+def test_slack_redirect_handler_allows_same_zone_redirect():
+    """url_private_download routinely 302s to a signed CDN URL on the same
+    host or a sibling files-edge host; the handler must let the stdlib
+    follow it instead of refusing."""
+    import urllib.request
+
+    from src.tools.slack import _SlackRedirectHandler
+
+    handler = _SlackRedirectHandler()
+    req = urllib.request.Request(
+        "https://files.slack.com/files-pri/T1-F1/x.png",
+        headers={"Authorization": "Bearer xoxb-token"},
+    )
+    new = handler.redirect_request(
+        req, None, 302, "Found", {},
+        "https://files-edge.slack.com/files-tmb/T1-F1/x.png?t=signed",
+    )
+    assert new is not None
+    # Same private-files zone — Authorization must survive so the bot can
+    # actually fetch the redirected URL.
+    assert any(k.lower() == "authorization" for k in new.headers)
+
+
+def test_slack_redirect_handler_strips_auth_on_cross_zone_redirect():
+    """Redirect from a private files host to a public CDN host (e.g.
+    avatars.slack-edge.com) must drop the bot token. The token has no
+    business at a CDN that serves public assets."""
+    import urllib.request
+
+    from src.tools.slack import _SlackRedirectHandler
+
+    handler = _SlackRedirectHandler()
+    req = urllib.request.Request(
+        "https://files.slack.com/files-pri/T1-F1/avatar.png",
+        headers={"Authorization": "Bearer xoxb-token"},
+    )
+    new = handler.redirect_request(
+        req, None, 302, "Found", {},
+        "https://avatars.slack-edge.com/T1-U1/avatar.png",
+    )
+    assert new is not None
+    assert not any(k.lower() == "authorization" for k in new.headers)
+
+
+def test_slack_redirect_handler_refuses_off_host_redirect():
+    """A 302 to an arbitrary host is the original auth-leak / SSRF concern.
+    Must raise HTTPError so the caller surfaces the failure instead of
+    silently following."""
+    import urllib.error
+    import urllib.request
+
+    from src.tools.slack import _SlackRedirectHandler
+
+    handler = _SlackRedirectHandler()
+    req = urllib.request.Request("https://files.slack.com/x.png")
+    with pytest.raises(urllib.error.HTTPError, match="off-host"):
+        handler.redirect_request(
+            req, None, 302, "Found", {}, "https://evil.example.com/exfiltrate",
+        )
+
+
+def test_slack_redirect_handler_refuses_http_scheme_redirect():
+    """Even if the host happens to be in the allowlist, http:// would let
+    a passive network observer read the redirect target. Refuse so the
+    bot only ever speaks TLS to Slack hosts."""
+    import urllib.error
+    import urllib.request
+
+    from src.tools.slack import _SlackRedirectHandler
+
+    handler = _SlackRedirectHandler()
+    req = urllib.request.Request("https://files.slack.com/x.png")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(
+            req, None, 302, "Found", {}, "http://files.slack.com/x.png",
+        )
+
+
+def test_http_get_uses_slack_redirect_handler():
+    """Regression guard: _http_get must wire _SlackRedirectHandler into the
+    opener, not the strict _NoRedirectHandler. Swapping it back would
+    re-block legitimate Slack-internal redirects (the original bug)."""
+    import urllib.request
+
+    from src.tools import slack as _slack_mod
+
+    with patch("src.tools.slack.urllib.request.build_opener") as build_opener:
+        build_opener.return_value = MagicMock()
+        _slack_mod._http_get(urllib.request.Request("https://files.slack.com/x.png"))
+    handler_arg = build_opener.call_args.args[0]
+    assert isinstance(handler_arg, _slack_mod._SlackRedirectHandler)
