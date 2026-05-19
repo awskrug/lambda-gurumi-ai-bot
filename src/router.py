@@ -23,14 +23,22 @@ from __future__ import annotations
 import base64
 import json
 import os
+import urllib.parse
 
 from slack_bolt import App
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 from slack_sdk import WebClient
 
 from src import runtime
-from src.handlers import message, reactions
+from src.handlers import commands, message, reactions
 from src.logging_utils import log_event
+
+
+# Slash command names handled by `@app.command(...)` registrations below.
+# Kept in sync with `src.handlers.commands._COMMAND_TO_IMAGE` (the worker
+# checks again, so an entry here without a worker mapping is just a
+# no-op).
+_SLASH_COMMANDS: tuple[str, ...] = ("/img-gpt", "/img-xai")
 
 
 def _enqueue_worker(
@@ -101,6 +109,85 @@ def _notify_invoke_failure(client: WebClient | None, event: dict) -> None:
         runtime.logger.warning("invoke-failure notification post failed", exc_info=True)
 
 
+def _enqueue_command_worker(
+    body: dict,
+    api_app_id: str,
+) -> None:
+    """Fire-and-forget async self-invoke for a slash command.
+
+    Mirrors `_enqueue_worker` for events, but the worker-side dispatch
+    branches on `kind=command` instead of an `event["type"]`. The Bolt
+    `body` dict for a slash command carries Slack's full form payload —
+    we extract only the fields the worker actually needs so the async
+    invoke payload stays small and ships zero secrets.
+    """
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    command_payload = {
+        "command": body.get("command", ""),
+        "text": body.get("text", ""),
+        "channel_id": body.get("channel_id", ""),
+        "user_id": body.get("user_id", ""),
+        "trigger_id": body.get("trigger_id", ""),
+        "response_url": body.get("response_url", ""),
+        "team_id": body.get("team_id", ""),
+    }
+    inline_payload = {
+        "kind": "command",
+        "command_payload": command_payload,
+        "api_app_id": api_app_id,
+    }
+    if not function_name:
+        _process_worker(inline_payload)
+        return
+    payload = json.dumps(
+        {"_worker": True, **inline_payload}, ensure_ascii=False
+    ).encode("utf-8")
+    try:
+        runtime._get_lambda_client().invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=payload,
+        )
+    except Exception:
+        # Same trade-off as `_enqueue_worker`: do NOT run inline — the
+        # receiver budget cannot absorb a 60–180s image generation.
+        # Push an ephemeral notice through `response_url` instead so the
+        # user sees a clear failure (slash commands have no thread to
+        # post into without an explicit channel reply).
+        runtime.logger.exception("async command invoke failed; dropping after notice")
+        _notify_command_invoke_failure(command_payload.get("response_url") or "")
+
+
+def _notify_command_invoke_failure(response_url: str) -> None:
+    """Best-effort 'try again shortly' notice for slash-command invoke failure.
+
+    We avoid posting to the channel here — a public bot message that
+    says "I failed" is noisier than an ephemeral reply only the invoking
+    user sees. If `response_url` is unavailable, drop silently.
+    """
+    if not response_url:
+        return
+    body = json.dumps(
+        {
+            "response_type": "ephemeral",
+            "text": "일시 오류로 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        }
+    ).encode("utf-8")
+    import urllib.request  # noqa: PLC0415  (local import — used only on the failure path)
+
+    req = urllib.request.Request(
+        response_url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310 (Slack-issued URL)
+            resp.read()
+    except Exception:
+        runtime.logger.warning("command invoke-failure notification failed", exc_info=True)
+
+
 def _process_worker(payload: dict) -> None:
     """Worker path: full agent run.
 
@@ -108,15 +195,16 @@ def _process_worker(payload: dict) -> None:
     the payload. Bolt's injected WebClient is gone by this point — it
     lived in the receiver process — so we mint a fresh one.
     """
+    kind = payload.get("kind")
+    api_app_id = payload.get("api_app_id") or ""
     slack_event = payload.get("slack_event") or {}
     is_dm = bool(payload.get("is_dm"))
-    api_app_id = payload.get("api_app_id") or ""
     # reaction_added carries the channel inside `item`, not at the top
     # level the way message/app_mention events do.
     channel = slack_event.get("channel") or (slack_event.get("item") or {}).get("channel")
 
     if not api_app_id:
-        log_event(runtime.logger, "worker.no_app_id", channel=channel)
+        log_event(runtime.logger, "worker.no_app_id", channel=channel, kind=kind)
         return
     creds = runtime._get_credentials().get(api_app_id)
     if creds is None:
@@ -125,11 +213,20 @@ def _process_worker(payload: dict) -> None:
             "worker.unknown_app",
             api_app_id=api_app_id,
             channel=channel,
+            kind=kind,
             note=f"missing SSM SecureString at {runtime.settings.ssm_params_prefix}/{api_app_id}/{{signing_secret,bot_token}}",
         )
         return
 
     client = WebClient(token=creds.bot_token)
+
+    if kind == "command":
+        commands._process_command(
+            payload.get("command_payload") or {},
+            client,
+            api_app_id=api_app_id,
+        )
+        return
 
     if slack_event.get("type") == "reaction_added":
         reactions._process_reaction(slack_event, client, api_app_id=api_app_id)
@@ -207,6 +304,18 @@ def _get_bolt_app(api_app_id: str, signing_secret: str, bot_token: str) -> App:
         # failure (logged) and let the user re-react.
         _enqueue_worker(event, is_dm=False, api_app_id=(body or {}).get("api_app_id", ""))
 
+    # Slash command handlers — one decorator per command name. Bolt
+    # dispatches based on the `command` form field; `body` is the full
+    # parsed form payload (already signature-verified by Bolt).
+    def _make_command_handler(_name: str):
+        def _on_command(ack, body):  # noqa: ANN001
+            ack()
+            _enqueue_command_worker(body or {}, api_app_id=(body or {}).get("api_app_id", ""))
+        return _on_command
+
+    for _cmd in _SLASH_COMMANDS:
+        app.command(_cmd)(_make_command_handler(_cmd))
+
     runtime._bolt_apps[api_app_id] = ((signing_secret, bot_token), app)
     return app
 
@@ -214,9 +323,10 @@ def _get_bolt_app(api_app_id: str, signing_secret: str, bot_token: str) -> App:
 def _parse_request_body(event: dict) -> dict | None:
     """Decode an API Gateway proxy event body into a JSON dict.
 
-    Returns None for non-JSON bodies (e.g. legacy URL-encoded slash
-    commands — not used by this bot). Handles base64 transport that API
-    Gateway uses for binary content types.
+    Returns None for non-JSON bodies. Slash commands arrive as
+    application/x-www-form-urlencoded and are routed via
+    `_route_command` (path-based dispatch in `_route_request`). Handles
+    base64 transport that API Gateway uses for binary content types.
     """
     body = event.get("body") or ""
     if not body:
@@ -233,8 +343,45 @@ def _parse_request_body(event: dict) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _parse_command_app_id(event: dict) -> str | None:
+    """Extract `api_app_id` from a slash-command form body.
+
+    We do NOT mutate `event["body"]` — Bolt still needs the raw bytes
+    for signature verification downstream. Only `api_app_id` is pulled
+    out so the receiver can pick the right SSM credentials.
+    """
+    body = event.get("body") or ""
+    if not body:
+        return None
+    if event.get("isBase64Encoded"):
+        try:
+            body = base64.b64decode(body).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
+    except ValueError:
+        return None
+    vals = parsed.get("api_app_id") or []
+    return vals[0] if vals else None
+
+
+def _request_path(event: dict) -> str:
+    """Best-effort path string for routing the request.
+
+    API Gateway proxy events carry both `path` (the actual request
+    path) and `resource` (the route template). Either is enough to tell
+    `/slack/events` from `/slack/command`.
+    """
+    path = event.get("path") or event.get("resource") or ""
+    return path if isinstance(path, str) else ""
+
+
 def _route_request(event: dict, context) -> dict:  # noqa: ANN001
     """Receiver path entry — identifies the target app and dispatches."""
+    if _request_path(event).endswith("/slack/command"):
+        return _route_command(event, context)
+
     parsed = _parse_request_body(event)
     if parsed is None:
         log_event(runtime.logger, "request.unparseable_body")
@@ -259,6 +406,34 @@ def _route_request(event: dict, context) -> dict:  # noqa: ANN001
         log_event(
             runtime.logger,
             "request.unknown_app",
+            api_app_id=api_app_id,
+            note=f"missing SSM SecureString at {runtime.settings.ssm_params_prefix}/{api_app_id}/{{signing_secret,bot_token}}",
+        )
+        return {"statusCode": 200, "body": ""}
+
+    bolt_app = _get_bolt_app(api_app_id, creds.signing_secret, creds.bot_token)
+    return SlackRequestHandler(bolt_app).handle(event, context)
+
+
+def _route_command(event: dict, context) -> dict:  # noqa: ANN001
+    """Receiver path for `/slack/command`.
+
+    Slash commands arrive as `application/x-www-form-urlencoded`. We
+    parse just enough of the body to recover `api_app_id`, then hand the
+    raw event to the per-app Bolt App, which verifies the signature with
+    that app's `signing_secret` and dispatches to the registered
+    `@app.command(...)` handler.
+    """
+    api_app_id = _parse_command_app_id(event)
+    if not api_app_id:
+        log_event(runtime.logger, "command.no_app_id")
+        return {"statusCode": 200, "body": ""}
+
+    creds = runtime._get_credentials().get(api_app_id)
+    if creds is None:
+        log_event(
+            runtime.logger,
+            "command.unknown_app",
             api_app_id=api_app_id,
             note=f"missing SSM SecureString at {runtime.settings.ssm_params_prefix}/{api_app_id}/{{signing_secret,bot_token}}",
         )

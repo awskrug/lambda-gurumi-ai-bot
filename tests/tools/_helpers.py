@@ -14,6 +14,8 @@ def _settings(**overrides) -> Settings:
         "llm_model": "gpt-4o-mini",
         "image_provider": "openai",
         "image_model": "gpt-image-1",
+        "image_model_gpt": "gpt-image-1",
+        "image_model_xai": "grok-imagine-image",
         "agent_max_steps": 3,
         "response_language": "ko",
         "dynamodb_table_name": "t",

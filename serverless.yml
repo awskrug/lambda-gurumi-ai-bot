@@ -40,10 +40,17 @@ provider:
     # --- secrets: Web search ---
     TAVILY_API_KEY: ${env:TAVILY_API_KEY, ''}
     # --- vars: LLM / Image ---
-    IMAGE_MODEL: ${env:IMAGE_MODEL, 'gpt-image-1'}
-    IMAGE_PROVIDER: ${env:IMAGE_PROVIDER, 'openai'}
     LLM_MODEL: ${env:LLM_MODEL, 'gpt-4o-mini'}
     LLM_PROVIDER: ${env:LLM_PROVIDER, 'openai'}
+    IMAGE_MODEL: ${env:IMAGE_MODEL, 'gpt-image-1'}
+    IMAGE_PROVIDER: ${env:IMAGE_PROVIDER, 'openai'}
+    # Per-slash-command image model overrides. /img-gpt uses IMAGE_MODEL_GPT
+    # with the OpenAI provider; /img-xai uses IMAGE_MODEL_XAI with the xAI
+    # provider. These are independent of IMAGE_PROVIDER/IMAGE_MODEL above so
+    # operators can pin the slash-command models without changing the agent
+    # default.
+    IMAGE_MODEL_GPT: ${env:IMAGE_MODEL_GPT, 'gpt-image-1'}
+    IMAGE_MODEL_XAI: ${env:IMAGE_MODEL_XAI, 'grok-imagine-image'}
     # --- vars: Agent behavior ---
     AGENT_MAX_STEPS: ${env:AGENT_MAX_STEPS, '6'}
     MAX_OUTPUT_TOKENS: ${env:MAX_OUTPUT_TOKENS, '4096'}
@@ -144,6 +151,13 @@ functions:
     events:
       - http:
           path: slack/events
+          method: post
+      # Slash Commands (`/img-gpt`, `/img-xai`) share the same Lambda function
+      # but arrive as application/x-www-form-urlencoded instead of JSON. The
+      # handler routes by `event.path`; Bolt verifies the signing_secret on
+      # both paths the same way.
+      - http:
+          path: slack/command
           method: post
 
 resources:

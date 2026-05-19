@@ -171,6 +171,11 @@ def test_get_bolt_app_caches_per_app_id(app_module, monkeypatch):
                 return fn
             return deco
 
+        def command(self, _name):
+            def deco(fn):
+                return fn
+            return deco
+
     monkeypatch.setattr(_router, "App", FakeApp)
 
     a1 = _router._get_bolt_app("A1", "sig", "tok")
@@ -190,6 +195,11 @@ def test_get_bolt_app_isolates_apps(app_module, monkeypatch):
             constructed.append(kwargs)
 
         def event(self, _name):
+            def deco(fn):
+                return fn
+            return deco
+
+        def command(self, _name):
             def deco(fn):
                 return fn
             return deco
@@ -224,6 +234,11 @@ def test_get_bolt_app_rebuilds_on_secret_rotation(app_module, monkeypatch):
                 return fn
             return deco
 
+        def command(self, _name):
+            def deco(fn):
+                return fn
+            return deco
+
     monkeypatch.setattr(_router, "App", FakeApp)
 
     first = _router._get_bolt_app("A1", "sig-old", "tok-old")
@@ -245,6 +260,11 @@ def test_get_bolt_app_disables_token_verification(app_module, monkeypatch):
             constructed.append(kwargs)
 
         def event(self, _name):
+            def deco(fn):
+                return fn
+            return deco
+
+        def command(self, _name):
             def deco(fn):
                 return fn
             return deco
@@ -529,6 +549,375 @@ def test_process_worker_say_callable_posts_to_event_channel(app_module, monkeypa
 
 
 # --------------------------------------------------------------------------- #
-# Channel allowlist — block reply with first-channel substitution
+# Slash command receiver — _route_command + _enqueue_command_worker
 # --------------------------------------------------------------------------- #
+
+
+def _urlencoded(fields: dict) -> str:
+    import urllib.parse
+
+    return urllib.parse.urlencode(fields)
+
+
+def test_route_request_slash_command_path_decodes_form_and_dispatches(app_module, monkeypatch):
+    """`POST /slack/command` carries application/x-www-form-urlencoded — the
+    router extracts api_app_id from the form and hands the raw event to the
+    per-app Bolt App for signature verification."""
+    from src.credentials import SlackAppCredentials
+
+    fake_creds, bolt_calls, handle_calls = _stub_route_dependencies(
+        monkeypatch,
+        app_module,
+        {"A1": SlackAppCredentials(signing_secret="s", bot_token="t")},
+    )
+
+    body = _urlencoded(
+        {
+            "api_app_id": "A1",
+            "command": "/img-xai",
+            "text": "사과",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "trigger_id": "trig-1",
+            "response_url": "https://hooks.slack.com/r1",
+            "team_id": "T1",
+        }
+    )
+    event = {"path": "/slack/command", "body": body}
+
+    result = _router._route_request(event, "ctx-x")
+    assert result == {"statusCode": 200, "body": "bolt-handled"}
+    assert fake_creds.calls == ["A1"]
+    assert bolt_calls["seen"] == [("A1", "s", "t")]
+    assert handle_calls == [("init", "bolt:A1"), ("handle", event, "ctx-x")]
+
+
+def test_route_request_slash_command_decodes_base64_body(app_module, monkeypatch):
+    """API Gateway sometimes delivers form bodies as base64. The form parser
+    must decode before parsing — otherwise api_app_id is invisible."""
+    import base64
+
+    from src.credentials import SlackAppCredentials
+
+    _stub_route_dependencies(
+        monkeypatch,
+        app_module,
+        {"A1": SlackAppCredentials(signing_secret="s", bot_token="t")},
+    )
+
+    raw = _urlencoded({"api_app_id": "A1", "command": "/img-gpt", "text": "x"})
+    encoded = base64.b64encode(raw.encode()).decode()
+    event = {"path": "/dev/slack/command", "body": encoded, "isBase64Encoded": True}
+
+    result = _router._route_request(event, None)
+    assert result == {"statusCode": 200, "body": "bolt-handled"}
+
+
+def test_route_request_slash_command_unknown_app_returns_200(app_module, monkeypatch):
+    fake_creds, _, handle_calls = _stub_route_dependencies(monkeypatch, app_module, {})
+
+    body = _urlencoded({"api_app_id": "A-NEW", "command": "/img-xai", "text": "x"})
+    event = {"path": "/slack/command", "body": body}
+
+    result = _router._route_request(event, None)
+    assert result == {"statusCode": 200, "body": ""}
+    assert fake_creds.calls == ["A-NEW"]
+    assert handle_calls == []
+
+
+def test_route_request_slash_command_missing_app_id_returns_200(app_module, monkeypatch):
+    """A form body without api_app_id can't be routed — log + 200 so Slack
+    does not retry. Mirrors the events-side behaviour for the same shape."""
+    fake_creds, _, handle_calls = _stub_route_dependencies(monkeypatch, app_module, {})
+
+    body = _urlencoded({"command": "/img-xai", "text": "x"})
+    event = {"path": "/slack/command", "body": body}
+
+    result = _router._route_request(event, None)
+    assert result == {"statusCode": 200, "body": ""}
+    assert fake_creds.calls == []
+    assert handle_calls == []
+
+
+def test_route_request_path_dispatches_events_not_commands(app_module, monkeypatch):
+    """Sanity: a JSON event body on `/slack/events` still flows through the
+    existing JSON-decode path, not the form-decode command path."""
+    from src.credentials import SlackAppCredentials
+
+    fake_creds, _, handle_calls = _stub_route_dependencies(
+        monkeypatch,
+        app_module,
+        {"A1": SlackAppCredentials(signing_secret="s", bot_token="t")},
+    )
+
+    body = json.dumps({"api_app_id": "A1", "type": "event_callback", "event": {}})
+    event = {"path": "/slack/events", "body": body}
+
+    result = _router._route_request(event, "ctx")
+    assert result == {"statusCode": 200, "body": "bolt-handled"}
+    assert fake_creds.calls == ["A1"]
+    assert len(handle_calls) == 2
+
+
+# --------------------------------------------------------------------------- #
+# _enqueue_command_worker — payload shape + secret-free + invoke fallback
+# --------------------------------------------------------------------------- #
+
+
+def test_enqueue_command_worker_runs_inline_when_not_in_lambda(app_module, monkeypatch):
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    monkeypatch.setattr(
+        _runtime,
+        "_get_lambda_client",
+        lambda: (_ for _ in ()).throw(AssertionError("invoke must not run off-Lambda")),
+    )
+
+    captured = []
+    monkeypatch.setattr(_router, "_process_worker", lambda p: captured.append(p))
+
+    body = {
+        "api_app_id": "A1",
+        "command": "/img-xai",
+        "text": "사과",
+        "channel_id": "C1",
+        "user_id": "U1",
+        "trigger_id": "trig-1",
+        "response_url": "https://r",
+        "team_id": "T1",
+    }
+    _router._enqueue_command_worker(body, api_app_id="A1")
+
+    assert captured == [
+        {
+            "kind": "command",
+            "command_payload": {
+                "command": "/img-xai",
+                "text": "사과",
+                "channel_id": "C1",
+                "user_id": "U1",
+                "trigger_id": "trig-1",
+                "response_url": "https://r",
+                "team_id": "T1",
+            },
+            "api_app_id": "A1",
+        }
+    ]
+
+
+def test_enqueue_command_worker_fires_async_invoke_in_lambda(app_module, monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "gurumi-mention")
+
+    invocations = []
+
+    class FakeLambdaClient:
+        def invoke(self, **kwargs):
+            invocations.append(kwargs)
+            return {"StatusCode": 202}
+
+    monkeypatch.setattr(_runtime, "_get_lambda_client", lambda: FakeLambdaClient())
+    monkeypatch.setattr(
+        _router,
+        "_process_worker",
+        lambda _p: (_ for _ in ()).throw(AssertionError("inline must not run")),
+    )
+
+    _router._enqueue_command_worker(
+        {
+            "api_app_id": "A-multi",
+            "command": "/img-gpt",
+            "text": "sky",
+            "channel_id": "C9",
+            "user_id": "U9",
+            "trigger_id": "trig-9",
+            "response_url": "https://r",
+            "team_id": "T1",
+        },
+        api_app_id="A-multi",
+    )
+
+    assert len(invocations) == 1
+    call = invocations[0]
+    payload = json.loads(call["Payload"].decode("utf-8"))
+    assert payload == {
+        "_worker": True,
+        "kind": "command",
+        "command_payload": {
+            "command": "/img-gpt",
+            "text": "sky",
+            "channel_id": "C9",
+            "user_id": "U9",
+            "trigger_id": "trig-9",
+            "response_url": "https://r",
+            "team_id": "T1",
+        },
+        "api_app_id": "A-multi",
+    }
+
+
+def test_enqueue_command_worker_does_not_ship_secrets(app_module, monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "gurumi-mention")
+
+    invocations = []
+
+    class FakeLambdaClient:
+        def invoke(self, **kwargs):
+            invocations.append(kwargs)
+
+    monkeypatch.setattr(_runtime, "_get_lambda_client", lambda: FakeLambdaClient())
+    monkeypatch.setattr(_router, "_process_worker", lambda _p: None)
+
+    # Body deliberately includes a `token` field (Slack's deprecated verification
+    # token still shows up in form payloads). The enqueue path must NOT
+    # forward it into the worker payload.
+    _router._enqueue_command_worker(
+        {
+            "api_app_id": "A1",
+            "command": "/img-gpt",
+            "text": "x",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "trigger_id": "t",
+            "response_url": "https://r",
+            "team_id": "T1",
+            "token": "deprecated-verification-token",
+        },
+        api_app_id="A1",
+    )
+
+    bytes_payload = invocations[0]["Payload"]
+    assert b"deprecated-verification-token" not in bytes_payload
+    assert b"signing_secret" not in bytes_payload
+    assert b"xoxb" not in bytes_payload
+
+
+def test_enqueue_command_worker_notifies_via_response_url_on_invoke_failure(
+    app_module, monkeypatch
+):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "gurumi-mention")
+
+    class BrokenClient:
+        def invoke(self, **_kwargs):
+            raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(_runtime, "_get_lambda_client", lambda: BrokenClient())
+    monkeypatch.setattr(_router, "_process_worker", lambda _p: None)
+
+    posted: list[dict] = []
+
+    def fake_urlopen(req, timeout=5):
+        posted.append({"url": req.full_url, "data": req.data})
+
+        class _R:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        return _R()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    _router._enqueue_command_worker(
+        {
+            "api_app_id": "A1",
+            "command": "/img-gpt",
+            "text": "x",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "trigger_id": "t",
+            "response_url": "https://hooks.slack.com/r",
+            "team_id": "T1",
+        },
+        api_app_id="A1",
+    )
+
+    assert len(posted) == 1
+    assert posted[0]["url"] == "https://hooks.slack.com/r"
+    payload = json.loads(posted[0]["data"].decode("utf-8"))
+    assert payload["response_type"] == "ephemeral"
+    assert "다시 시도" in payload["text"]
+
+
+# --------------------------------------------------------------------------- #
+# _process_worker — kind=command routes to commands._process_command
+# --------------------------------------------------------------------------- #
+
+
+def test_process_worker_kind_command_dispatches_to_commands(app_module, monkeypatch):
+    from src.credentials import SlackAppCredentials
+    from src.handlers import commands as _commands_mod
+
+    monkeypatch.setattr(
+        _runtime,
+        "_get_credentials",
+        lambda: _FakeCreds({"A1": SlackAppCredentials(signing_secret="s", bot_token="xoxb-1")}),
+    )
+
+    created_tokens = []
+
+    class FakeWeb:
+        def __init__(self, token):
+            created_tokens.append(token)
+            self.token = token
+
+    monkeypatch.setattr(_router, "WebClient", FakeWeb)
+
+    def boom_message(*_args, **_kwargs):
+        raise AssertionError("message._process must not run for command payload")
+
+    def boom_reaction(*_args, **_kwargs):
+        raise AssertionError("reactions._process_reaction must not run for command payload")
+
+    monkeypatch.setattr(_message, "_process", boom_message)
+    monkeypatch.setattr(_reactions, "_process_reaction", boom_reaction)
+
+    captured: dict = {}
+
+    def fake_process_command(payload, client, api_app_id=""):
+        captured["payload"] = payload
+        captured["client"] = client
+        captured["api_app_id"] = api_app_id
+
+    monkeypatch.setattr(_commands_mod, "_process_command", fake_process_command)
+
+    payload = {
+        "kind": "command",
+        "command_payload": {
+            "command": "/img-xai",
+            "text": "x",
+            "channel_id": "C1",
+            "trigger_id": "t",
+        },
+        "api_app_id": "A1",
+    }
+    _router._process_worker(payload)
+
+    assert created_tokens == ["xoxb-1"]
+    assert captured["payload"] == payload["command_payload"]
+    assert captured["api_app_id"] == "A1"
+
+
+def test_process_worker_kind_command_skips_when_app_id_missing(app_module, monkeypatch):
+    """Defensive: a malformed command payload with no api_app_id must not crash."""
+
+    def boom_creds():
+        raise AssertionError("credentials lookup must not run without api_app_id")
+
+    monkeypatch.setattr(_runtime, "_get_credentials", boom_creds)
+
+    from src.handlers import commands as _commands_mod
+
+    def boom_process(*_args, **_kwargs):
+        raise AssertionError("_process_command must not run without credentials")
+
+    monkeypatch.setattr(_commands_mod, "_process_command", boom_process)
+
+    # Should not raise.
+    _router._process_worker(
+        {"kind": "command", "command_payload": {"command": "/img-gpt"}, "api_app_id": ""}
+    )
 

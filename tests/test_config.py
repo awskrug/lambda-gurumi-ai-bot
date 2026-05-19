@@ -16,7 +16,7 @@ def reload_config():
 def _clear_env(monkeypatch):
     for key in [
         "SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "LLM_PROVIDER", "LLM_MODEL",
-        "IMAGE_PROVIDER", "IMAGE_MODEL", "OPENAI_API_KEY", "RESPONSE_LANGUAGE",
+        "IMAGE_PROVIDER", "IMAGE_MODEL", "IMAGE_MODEL_GPT", "IMAGE_MODEL_XAI", "OPENAI_API_KEY", "RESPONSE_LANGUAGE",
         "AGENT_MAX_STEPS", "DYNAMODB_TABLE_NAME", "AWS_REGION", "ALLOWED_CHANNEL_IDS",
         "ALLOWED_CHANNEL_MESSAGE", "ALLOWED_USER_IDS", "ALLOWED_USER_MESSAGE",
         "MAX_LEN_SLACK", "MAX_THROTTLE_COUNT",
@@ -290,3 +290,32 @@ def test_max_image_bytes_below_minimum_clamped(monkeypatch, reload_config):
     monkeypatch.setenv("MAX_IMAGE_BYTES", "1024")  # below 64KB floor
     s = reload_config()
     assert s.max_image_bytes == 64 * 1024
+
+
+def test_image_model_gpt_and_xai_defaults(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("IMAGE_MODEL_GPT", raising=False)
+    monkeypatch.delenv("IMAGE_MODEL_XAI", raising=False)
+    s = reload_config()
+    assert s.image_model_gpt == "gpt-image-1"
+    assert s.image_model_xai == "grok-imagine-image"
+
+
+def test_image_model_gpt_and_xai_env_overrides(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("IMAGE_MODEL_GPT", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_MODEL_XAI", "grok-imagine-image-quality")
+    s = reload_config()
+    assert s.image_model_gpt == "gpt-image-2"
+    assert s.image_model_xai == "grok-imagine-image-quality"
+
+
+def test_image_model_gpt_and_xai_blank_falls_back_to_default(monkeypatch, reload_config):
+    """An empty env var should not propagate as an empty model id —
+    `image.generate(model="")` would fail noisily later."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("IMAGE_MODEL_GPT", "   ")
+    monkeypatch.setenv("IMAGE_MODEL_XAI", "")
+    s = reload_config()
+    assert s.image_model_gpt == "gpt-image-1"
+    assert s.image_model_xai == "grok-imagine-image"

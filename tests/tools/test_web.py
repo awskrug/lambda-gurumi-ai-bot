@@ -379,6 +379,8 @@ def test_fetch_webpage_jina_body_over_cap_falls_back_to_raw(monkeypatch):
         llm_model="gpt-4o-mini",
         image_provider="openai",
         image_model="gpt-image-1",
+        image_model_gpt="gpt-image-1",
+        image_model_xai="grok-imagine-image",
         agent_max_steps=3,
         response_language="ko",
         dynamodb_table_name="t",

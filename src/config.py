@@ -95,6 +95,13 @@ class Settings:
     llm_model: str
     image_provider: str
     image_model: str
+    # Per-slash-command image model overrides. The default IMAGE_MODEL +
+    # IMAGE_PROVIDER apply to the agent's `generate_image` / `edit_image`
+    # tools; `/img-gpt` and `/img-xai` slash commands bypass that and use
+    # these fixed pairs so users can pick the model explicitly without
+    # changing the deployment-wide default.
+    image_model_gpt: str
+    image_model_xai: str
     agent_max_steps: int
     response_language: str
     dynamodb_table_name: str
@@ -147,6 +154,8 @@ class Settings:
             llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini").strip(),
             image_provider=image_provider,
             image_model=os.getenv("IMAGE_MODEL", "gpt-image-1").strip(),
+            image_model_gpt=(os.getenv("IMAGE_MODEL_GPT", "").strip() or "gpt-image-1"),
+            image_model_xai=(os.getenv("IMAGE_MODEL_XAI", "").strip() or "grok-imagine-image"),
             agent_max_steps=_int_env("AGENT_MAX_STEPS", 6, minimum=2),
             response_language=response_language,
             dynamodb_table_name=os.getenv("DYNAMODB_TABLE_NAME", "lambda-gurumi-bot-dev").strip(),
