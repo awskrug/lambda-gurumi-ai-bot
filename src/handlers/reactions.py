@@ -19,6 +19,7 @@ from slack_sdk import WebClient
 
 from src import runtime
 from src.app_metadata import ALLOWED_USER_IDS_ATTR
+from src.llms import get_llm
 from src.logging_utils import log_event, set_request_id
 
 
@@ -200,10 +201,150 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
         runtime.logger.warning("chat.delete failed: %s", exc)
 
 
+def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) -> None:
+    """`:img-gpt:` / `:img-xai:` → generate an image from the reacted
+    message's text and upload it as a thread reply.
+
+    Mirrors the slash-command `/img-gpt` / `/img-xai` provider mapping:
+    `img-gpt` → OpenAI + `image_model_gpt`, `img-xai` → xAI +
+    `image_model_xai`. Posting with `thread_ts` keeps the result
+    attached to the original message instead of dumping a top-level
+    file into the channel.
+
+    Errors surface as an ephemeral message to the reactor — reactions
+    have no `response_url`, and pushing failures into the channel as a
+    bot post would pollute the conversation.
+    """
+    item = event.get("item") or {}
+    channel = item.get("channel")
+    message_ts = item.get("ts")
+    reactor = event.get("user", "")
+    reaction = event.get("reaction", "")
+
+    spec = _REACTION_TO_IMAGE.get(reaction)
+    if spec is None:
+        # Defensive: REACTION_HANDLERS pre-filter should make this
+        # unreachable, but if a forged event slips through we drop it.
+        return
+    image_provider, model_attr = spec
+    settings = runtime.settings
+    image_model = getattr(settings, model_attr)
+
+    # Fetch the reacted-to message so we can use its text as the prompt
+    # and figure out the right thread to post into. Same conversations.history
+    # pattern as `_handle_reaction_x_delete`: `latest+inclusive+limit=1`
+    # reliably returns the message at-or-before `message_ts`.
+    prompt = ""
+    parent_ts = message_ts
+    try:
+        hist = client.conversations_history(
+            channel=channel,
+            latest=message_ts,
+            inclusive=True,
+            limit=1,
+        )
+        messages = (hist.get("messages") if hasattr(hist, "get") else []) or []
+        if messages:
+            msg = messages[0]
+            prompt = (msg.get("text") or "").strip()
+            # If the reacted message is a thread reply, post into the
+            # same thread (Slack rejects nesting threads, so we use the
+            # parent ts). If it's a top-level message, the message's
+            # own ts becomes the new thread root.
+            parent_ts = msg.get("thread_ts") or msg.get("ts") or message_ts
+    except Exception as exc:  # noqa: BLE001
+        runtime.logger.warning("conversations.history failed: %s", exc)
+        _notify_reactor(client, channel, reactor, "메시지를 읽을 수 없습니다.")
+        return
+
+    if not prompt:
+        _notify_reactor(client, channel, reactor, "이미지 생성에 쓸 텍스트가 없습니다.")
+        return
+
+    log_event(
+        runtime.logger,
+        "reaction.image.start",
+        reaction=reaction,
+        reactor=reactor,
+        channel=channel,
+        api_app_id=api_app_id,
+        image_provider=image_provider,
+        image_model=image_model,
+    )
+
+    try:
+        # Same explicit-LLM-build trick as the slash command worker —
+        # bypass the runtime singleton so a single deployment can serve
+        # multiple image providers via these reactions.
+        llm = get_llm(
+            provider=settings.llm_provider,
+            model=settings.llm_model,
+            image_provider=image_provider,
+            image_model=image_model,
+            region=settings.aws_region,
+            api_keys={"xai": settings.xai_api_key},
+        )
+        image_bytes = llm.generate_image(prompt)
+        client.files_upload_v2(
+            channel=channel,
+            thread_ts=parent_ts,
+            title=image_model,
+            filename="generated.png",
+            file=image_bytes,
+            initial_comment=f"`:{reaction}:` {prompt[:200]}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            runtime.logger,
+            "reaction.image.failure",
+            reaction=reaction,
+            error_class=exc.__class__.__name__,
+            api_app_id=api_app_id,
+        )
+        runtime.logger.debug("reaction image traceback", exc_info=True)
+        _notify_reactor(client, channel, reactor, f"이미지 생성 실패: {exc}")
+        return
+
+    log_event(
+        runtime.logger,
+        "reaction.image.done",
+        reaction=reaction,
+        reactor=reactor,
+        channel=channel,
+        api_app_id=api_app_id,
+    )
+
+
+def _notify_reactor(client: WebClient, channel: str, user: str, text: str) -> None:
+    """Best-effort ephemeral notice to the user who triggered the reaction.
+
+    Used for input/operational errors that the reactor needs to see but
+    that should not pollute the channel. Silent on failure — losing the
+    notice is preferable to raising into the dispatcher.
+    """
+    if not channel or not user or not text:
+        return
+    try:
+        client.chat_postEphemeral(channel=channel, user=user, text=text)
+    except Exception as exc:  # noqa: BLE001
+        runtime.logger.warning("chat.postEphemeral failed: %s", exc)
+
+
+# `img-{tag}` reaction → (image_provider, settings-attr-name). Mirrors
+# `src.handlers.commands._COMMAND_TO_IMAGE` so both interaction modes
+# (slash command, reaction) resolve to the same provider/model pairs.
+_REACTION_TO_IMAGE: dict[str, tuple[str, str]] = {
+    "img-gpt": ("openai", "image_model_gpt"),
+    "img-xai": ("xai", "image_model_xai"),
+}
+
+
 # Reaction → handler dispatch. Add a new entry here (and the matching
 # handler function above) to wire up another reaction. The Bolt receiver
 # pre-filter (`router._on_reaction_added`) reads the same dict so
 # unregistered reactions never burn a Lambda async invoke.
 REACTION_HANDLERS: dict[str, "callable"] = {
     "x": _handle_reaction_x_delete,
+    "img-gpt": _handle_reaction_image_gen,
+    "img-xai": _handle_reaction_image_gen,
 }

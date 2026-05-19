@@ -523,3 +523,245 @@ def test_on_reaction_added_handler_pre_filters_non_x_at_receiver(app_module, mon
     )
     assert len(enqueued) == 1
     assert enqueued[0][2] == "A1"
+
+
+# --------------------------------------------------------------------------- #
+# :img-gpt: / :img-xai: — image generation reactions
+# --------------------------------------------------------------------------- #
+
+
+class _ImageReactionClient:
+    """Slack client stand-in for image-gen reaction tests.
+
+    Captures `files_upload_v2` and `chat_postEphemeral` calls and serves
+    a configurable `conversations_history` response so we can flex the
+    'text/thread_ts on the reacted message' scenarios.
+    """
+
+    def __init__(
+        self,
+        text: str = "사과 한 알 그려줘",
+        thread_ts: str | None = None,
+        history_raises: bool = False,
+        upload_raises: bool = False,
+    ):
+        self.text = text
+        self.thread_ts = thread_ts
+        self.history_raises = history_raises
+        self.upload_raises = upload_raises
+        self.history_calls: list[dict] = []
+        self.uploads: list[dict] = []
+        self.ephemerals: list[dict] = []
+
+    def conversations_history(self, channel, latest, inclusive, limit):
+        self.history_calls.append(
+            {"channel": channel, "latest": latest, "inclusive": inclusive, "limit": limit}
+        )
+        if self.history_raises:
+            raise RuntimeError("missing_scope")
+        msg = {"ts": latest, "user": "U-AUTHOR", "text": self.text}
+        if self.thread_ts is not None:
+            msg["thread_ts"] = self.thread_ts
+        return {"messages": [msg]}
+
+    def files_upload_v2(self, **kwargs):
+        if self.upload_raises:
+            raise RuntimeError("file_upload_failed")
+        self.uploads.append(kwargs)
+        return {"file": {"permalink": "https://example.com/f"}}
+
+    def chat_postEphemeral(self, **kwargs):
+        self.ephemerals.append(kwargs)
+
+
+def _img_reaction_event(reaction: str, channel: str = "C1", ts: str = "1700000000.000100"):
+    return {
+        "type": "reaction_added",
+        "reaction": reaction,
+        "user": "U-REACTOR",
+        "item": {"type": "message", "channel": channel, "ts": ts},
+        "item_user": "U-AUTHOR",
+        "event_ts": "1700000001.000200",
+    }
+
+
+def _stub_get_llm(monkeypatch, image_bytes: bytes = b"PNGDATA"):
+    """Spy on `get_llm` and return a fake LLM whose generate_image yields fixed bytes."""
+    captured: dict = {}
+
+    class _LLM:
+        def generate_image(self, prompt: str) -> bytes:
+            captured["prompt"] = prompt
+            return image_bytes
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return _LLM()
+
+    monkeypatch.setattr(_reactions, "get_llm", spy)
+    return captured
+
+
+def _settings_with_image_models(monkeypatch, **overrides):
+    import dataclasses
+
+    monkeypatch.setattr(_runtime, "settings", dataclasses.replace(_runtime.settings, **overrides))
+
+
+def test_reaction_img_xai_uses_xai_provider_and_image_model_xai(app_module, monkeypatch):
+    _settings_with_image_models(monkeypatch, image_model_xai="grok-imagine-image-quality")
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    captured = _stub_get_llm(monkeypatch, image_bytes=b"xai-bytes")
+
+    client = _ImageReactionClient(text="사과 한 알", thread_ts=None)
+    _reactions._process_reaction(
+        _img_reaction_event("img-xai"), client, api_app_id="A1"
+    )
+
+    assert captured["image_provider"] == "xai"
+    assert captured["image_model"] == "grok-imagine-image-quality"
+    assert captured["prompt"] == "사과 한 알"
+
+    assert len(client.uploads) == 1
+    upload = client.uploads[0]
+    assert upload["channel"] == "C1"
+    assert upload["file"] == b"xai-bytes"
+    # No parent thread on the reacted message → use the message's own ts.
+    assert upload["thread_ts"] == "1700000000.000100"
+    assert "사과 한 알" in upload["initial_comment"]
+    assert ":img-xai:" in upload["initial_comment"]
+    assert client.ephemerals == []
+
+
+def test_reaction_img_gpt_uses_openai_provider_and_image_model_gpt(app_module, monkeypatch):
+    _settings_with_image_models(monkeypatch, image_model_gpt="gpt-image-2")
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    captured = _stub_get_llm(monkeypatch, image_bytes=b"gpt-bytes")
+
+    client = _ImageReactionClient(text="blue sky")
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt"), client, api_app_id="A1"
+    )
+
+    assert captured["image_provider"] == "openai"
+    assert captured["image_model"] == "gpt-image-2"
+    assert client.uploads[0]["file"] == b"gpt-bytes"
+
+
+def test_reaction_uses_parent_thread_when_reacted_message_is_thread_reply(
+    app_module, monkeypatch
+):
+    """If the reacted message is itself a thread reply (has `thread_ts`),
+    we must post the result into the same thread root — Slack doesn't
+    allow nested threads, and posting to the reply's own ts would
+    silently flatten to channel-level on some clients."""
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    _stub_get_llm(monkeypatch)
+
+    client = _ImageReactionClient(text="prompt", thread_ts="1699999999.000000")
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt"), client, api_app_id="A1"
+    )
+
+    assert client.uploads[0]["thread_ts"] == "1699999999.000000"
+
+
+def test_reaction_empty_message_text_notifies_reactor(app_module, monkeypatch):
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+
+    def boom_get_llm(**_kwargs):
+        raise AssertionError("get_llm must not run for empty message text")
+
+    monkeypatch.setattr(_reactions, "get_llm", boom_get_llm)
+
+    client = _ImageReactionClient(text="")
+    _reactions._process_reaction(
+        _img_reaction_event("img-xai"), client, api_app_id="A1"
+    )
+
+    assert client.uploads == []
+    assert len(client.ephemerals) == 1
+    assert client.ephemerals[0]["user"] == "U-REACTOR"
+    assert client.ephemerals[0]["channel"] == "C1"
+    assert "텍스트" in client.ephemerals[0]["text"]
+
+
+def test_reaction_history_failure_notifies_reactor(app_module, monkeypatch):
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+
+    def boom_get_llm(**_kwargs):
+        raise AssertionError("get_llm must not run when history fails")
+
+    monkeypatch.setattr(_reactions, "get_llm", boom_get_llm)
+
+    client = _ImageReactionClient(history_raises=True)
+    _reactions._process_reaction(
+        _img_reaction_event("img-xai"), client, api_app_id="A1"
+    )
+
+    assert client.uploads == []
+    assert len(client.ephemerals) == 1
+    assert "메시지" in client.ephemerals[0]["text"]
+
+
+def test_reaction_image_generation_failure_notifies_reactor(app_module, monkeypatch):
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+
+    class _BoomLLM:
+        def generate_image(self, prompt):
+            raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(_reactions, "get_llm", lambda **_kwargs: _BoomLLM())
+
+    client = _ImageReactionClient()
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt"), client, api_app_id="A1"
+    )
+
+    assert client.uploads == []
+    assert len(client.ephemerals) == 1
+    assert "이미지 생성 실패" in client.ephemerals[0]["text"]
+
+
+def test_reaction_handlers_dict_wires_both_image_reactions(app_module):
+    """Adding entries to REACTION_HANDLERS is what opens the Bolt receiver
+    pre-filter for these reactions — if either entry disappears, the
+    receiver silently drops them and the worker never runs."""
+    assert _reactions.REACTION_HANDLERS["img-gpt"] is _reactions._handle_reaction_image_gen
+    assert _reactions.REACTION_HANDLERS["img-xai"] is _reactions._handle_reaction_image_gen
+
+
+def test_on_reaction_added_handler_admits_image_reactions_at_receiver(
+    app_module, monkeypatch
+):
+    """The Bolt receiver pre-filter must let `img-gpt`/`img-xai` through to
+    the worker invoke — otherwise they'd be silently dropped before any
+    of the handler logic runs."""
+    enqueued = []
+    monkeypatch.setattr(
+        _router,
+        "_enqueue_worker",
+        lambda event, is_dm, api_app_id: enqueued.append((event, is_dm, api_app_id)),
+    )
+
+    bolt_app = _router._get_bolt_app("A-test-react-img", "sig", "tok")
+    handler = next(
+        l.ack_function
+        for l in bolt_app._listeners
+        if getattr(l.ack_function, "__name__", "") == "_on_reaction_added"
+    )
+
+    def fake_ack():
+        pass
+
+    for reaction in ("img-gpt", "img-xai"):
+        handler(
+            event={
+                "reaction": reaction,
+                "item": {"type": "message", "channel": "C1", "ts": "1.1"},
+            },
+            body={"api_app_id": "A1"},
+            ack=fake_ack,
+        )
+    assert len(enqueued) == 2
+    assert {e[0]["reaction"] for e in enqueued} == {"img-gpt", "img-xai"}
