@@ -130,7 +130,7 @@ provider:
             - ssm:GetParameter
             - ssm:GetParameters
           Resource:
-            - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/gurumi-bot/apps/*"
+            - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${env:SSM_PARAMS_PREFIX, '/gurumi-bot/apps'}/*"
 
 plugins:
   - serverless-python-requirements

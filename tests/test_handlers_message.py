@@ -332,6 +332,82 @@ def test_process_skips_metadata_when_api_app_id_blank(app_module, monkeypatch):
     )
 
 
+def test_process_allows_first_request_when_throttle_limit_is_one(app_module, monkeypatch):
+    """The current request's reservation is included in active count.
+
+    With MAX_THROTTLE_COUNT=1, active=1 means "this request only" and must
+    be allowed to run.
+    """
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+        max_throttle_count=1,
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+
+    class _OneActiveDedup(_FakeDedup):
+        def count_user_active(self, _user):
+            return 1
+
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _OneActiveDedup())
+    monkeypatch.setattr(_runtime, "_get_conversations", lambda: _StubConvo())
+    monkeypatch.setattr(_runtime, "_get_memory", lambda: _StubMemory())
+    monkeypatch.setattr(_runtime, "_get_llm", lambda: object())
+    monkeypatch.setattr(_message, "set_thread_status", lambda *a, **k: None)
+    monkeypatch.setattr(_message, "user_name_cache", _StubUserNameCache())
+    monkeypatch.setattr(_message, "SlackMentionAgent", _StubAgent)
+    monkeypatch.setattr(_message, "StreamingMessage", _StubStream)
+
+    posts = []
+
+    class _RecordingClient(_StubClient):
+        def chat_postMessage(self, **kw):
+            posts.append(kw)
+            return {"ts": "1.2"}
+
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hello", "user": "U1", "client_msg_id": "msg-throttle-one"},
+        client=_RecordingClient(),
+        say=lambda **kw: None,
+        is_dm=False,
+        api_app_id="",
+    )
+
+    assert posts == [{"channel": "C1", "thread_ts": "1.1", "text": "ok"}]
+
+
+def test_process_blocks_when_active_count_exceeds_throttle_limit(app_module, monkeypatch):
+    import dataclasses
+
+    override = dataclasses.replace(
+        _runtime.settings,
+        allowed_channel_ids=[],
+        allowed_user_ids=[],
+        max_throttle_count=1,
+    )
+    monkeypatch.setattr(_runtime, "settings", override)
+
+    class _TwoActiveDedup(_FakeDedup):
+        def count_user_active(self, _user):
+            return 2
+
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _TwoActiveDedup())
+
+    posts = []
+    _message._process(
+        {"channel": "C1", "ts": "1.1", "text": "hello", "user": "U1", "client_msg_id": "msg-throttle-two"},
+        client=_StubClient(),
+        say=lambda **kw: posts.append(kw),
+        is_dm=False,
+        api_app_id="",
+    )
+
+    assert posts == [{"text": _message.LABELS["ko"]["throttled"], "thread_ts": "1.1"}]
+
+
 # --------------------------------------------------------------------------- #
 # Stubs for the metadata tests above (kept here, not in conftest, because
 # they're tightly coupled to which _process internals get mocked).
@@ -344,6 +420,11 @@ class _StubConvo:
 
     def put(self, *_a, **_kw):
         pass
+
+
+class _StubMemory:
+    def get(self, _user):
+        return []
 
 
 class _StubUserNameCache:
@@ -1117,5 +1198,3 @@ def test_process_continues_when_memory_load_fails(app_module, monkeypatch):
 # --------------------------------------------------------------------------- #
 # reaction_added — bot self-delete on :x: from authorized reactor
 # --------------------------------------------------------------------------- #
-
-

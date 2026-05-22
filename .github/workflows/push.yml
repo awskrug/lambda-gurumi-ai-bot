@@ -54,7 +54,7 @@ jobs:
           # time at {SSM_PARAMS_PREFIX}/{api_app_id}/... and resolved per
           # request inside the Lambda. NO global SLACK_BOT_TOKEN /
           # SLACK_SIGNING_SECRET CI secrets are needed.
-          SSM_PARAMS_PREFIX: ${{ vars.SSM_PARAMS_PREFIX }}
+          SSM_PARAMS_PREFIX: ${{ vars.SSM_PARAMS_PREFIX || '/gurumi-bot/apps' }}
           SSM_CACHE_TTL_SECONDS: ${{ vars.SSM_CACHE_TTL_SECONDS }}
           # --- secrets: LLM provider keys ---
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -97,4 +97,6 @@ jobs:
           MAX_WEB_BYTES: ${{ vars.MAX_WEB_BYTES }}
           MAX_WEB_CHARS: ${{ vars.MAX_WEB_CHARS }}
           MAX_WEB_LINKS: ${{ vars.MAX_WEB_LINKS }}
+          # --- vars: External image attach ---
+          MAX_IMAGE_BYTES: ${{ vars.MAX_IMAGE_BYTES }}
         run: npx serverless deploy --stage dev --region us-east-1

@@ -78,7 +78,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 
 | 변수 | 필수 | 기본값 | 설명 |
 |------|------|--------|------|
-| `SSM_PARAMS_PREFIX` | | `/gurumi-bot/apps` | 멀티테넌트 시크릿 SSM 경로 prefix. IAM resource ARN(`serverless.yml`)과 매치 필요 |
+| `SSM_PARAMS_PREFIX` | | `/gurumi-bot/apps` | 멀티테넌트 시크릿 SSM 경로 prefix. `serverless.yml`의 Lambda env와 IAM resource ARN이 같은 값으로 배포됨 |
 | `SSM_CACHE_TTL_SECONDS` | | `300` | 시크릿 in-process 캐시 TTL (≥10). 로테이션은 이 시간 내 반영 |
 | `SLACK_BOT_TOKEN` | (localtest only) | — | `localtest.py` 에서만 사용. Lambda 런타임은 SSM 만 본다 |
 | `OPENAI_API_KEY` | OpenAI 사용 시 | — | OpenAI API 키 |

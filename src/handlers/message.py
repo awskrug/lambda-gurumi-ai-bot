@@ -185,7 +185,10 @@ def _process(event: dict, client, say, is_dm: bool, api_app_id: str = "") -> Non
     except Exception as exc:  # noqa: BLE001
         runtime.logger.warning("throttle count unavailable: %s", exc)
         active = 0
-    if active >= runtime.settings.max_throttle_count:
+    # `active` includes the reservation for this request because we reserve
+    # before checking throttle to avoid a get-then-put race. Reject only when
+    # the count exceeds the configured cap.
+    if active > runtime.settings.max_throttle_count:
         say(text=labels["throttled"], thread_ts=thread_ts)
         log_event(runtime.logger, "throttle.limit", user=user, active=active)
         return

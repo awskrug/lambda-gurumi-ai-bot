@@ -76,6 +76,32 @@ def test_count_user_active_ignores_expired():
 
 
 @mock_aws
+def test_count_user_active_counts_only_dedup_rows():
+    """Throttle must ignore non-reservation rows in the shared table.
+
+    `done:` completion markers and `ctx:` conversation history use the same
+    `user`/`expire_at` GSI attributes, but they are not active work.
+    """
+    _create_table()
+    store = DedupStore(table_name=TABLE, region=REGION)
+    store.reserve("fresh", user="U1", ttl_seconds=3600)
+    table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE)
+    table.put_item(
+        Item={"id": "done:fresh", "user": "U1", "expire_at": int(time.time()) + 3600}
+    )
+    table.put_item(
+        Item={
+            "id": "ctx:thread",
+            "user": "U1",
+            "expire_at": int(time.time()) + 3600,
+            "conversation": "[]",
+        }
+    )
+
+    assert store.count_user_active("U1") == 1
+
+
+@mock_aws
 def test_count_user_active_unknown_user_zero():
     _create_table()
     store = DedupStore(table_name=TABLE, region=REGION)

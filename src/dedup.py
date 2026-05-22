@@ -128,20 +128,40 @@ class DedupStore(_BaseStore):
             logger.warning("dedup mark_done failed: %s", exc)
 
     def count_user_active(self, user: str) -> int:
-        """Number of non-expired reservations for a user (throttle check)."""
+        """Number of non-expired in-flight reservations for a user.
+
+        The shared table also stores `done:` completion markers and `ctx:`
+        thread history rows with the same `user`/`expire_at` attributes.
+        Throttle must count only `dedup:` rows; otherwise completed requests
+        and conversation history look like active work.
+        """
         if not user:
             return 0
         table = self._get_table()
         now = int(time.time())
+        total = 0
+        start_key = None
         try:
-            res = table.query(
-                IndexName=self.GSI_NAME,
-                KeyConditionExpression="#u = :u AND expire_at > :now",
-                ExpressionAttributeNames={"#u": "user"},
-                ExpressionAttributeValues={":u": user, ":now": now},
-                Select="COUNT",
-            )
-            return int(res.get("Count", 0))
+            while True:
+                kwargs = {
+                    "IndexName": self.GSI_NAME,
+                    "KeyConditionExpression": "#u = :u AND expire_at > :now",
+                    "FilterExpression": "begins_with(#id, :dedup_prefix)",
+                    "ExpressionAttributeNames": {"#u": "user", "#id": "id"},
+                    "ExpressionAttributeValues": {
+                        ":u": user,
+                        ":now": now,
+                        ":dedup_prefix": "dedup:",
+                    },
+                    "Select": "COUNT",
+                }
+                if start_key:
+                    kwargs["ExclusiveStartKey"] = start_key
+                res = table.query(**kwargs)
+                total += int(res.get("Count", 0))
+                start_key = res.get("LastEvaluatedKey")
+                if not start_key:
+                    return total
         except ClientError as exc:
             logger.warning("count_user_active failed: %s", exc)
             return 0
