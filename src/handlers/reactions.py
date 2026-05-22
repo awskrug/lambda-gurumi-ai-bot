@@ -231,9 +231,19 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
     image_model = getattr(settings, model_attr)
 
     # Fetch the reacted-to message so we can use its text as the prompt
-    # and figure out the right thread to post into. Same conversations.history
-    # pattern as `_handle_reaction_x_delete`: `latest+inclusive+limit=1`
-    # reliably returns the message at-or-before `message_ts`.
+    # and figure out the right thread to post into.
+    #
+    # Slack's `conversations.history` only returns top-level channel
+    # messages — thread replies are NOT included. So if the reaction
+    # lands on a thread reply, `history(latest=reply_ts, inclusive=True,
+    # limit=1)` returns the closest top-level message at-or-before that
+    # ts, which is normally the thread parent (root). We detect this by
+    # comparing returned ts vs. `message_ts`: when they differ, the
+    # reaction was on a reply and we must fall back to
+    # `conversations.replies(ts=parent_ts)` to recover the reply's text.
+    # Otherwise the prompt would be the thread root's text — a bug where
+    # reacting to any reply in a thread regenerates from the original
+    # question.
     prompt = ""
     parent_ts = message_ts
     try:
@@ -244,16 +254,34 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
             limit=1,
         )
         messages = (hist.get("messages") if hasattr(hist, "get") else []) or []
-        if messages:
-            msg = messages[0]
+        if not messages:
+            _notify_reactor(client, channel, reactor, "메시지를 읽을 수 없습니다.")
+            return
+        msg = messages[0]
+        if msg.get("ts") == message_ts:
+            # Top-level message (or thread root) — use its text directly.
             prompt = (msg.get("text") or "").strip()
             # If the reacted message is a thread reply, post into the
             # same thread (Slack rejects nesting threads, so we use the
             # parent ts). If it's a top-level message, the message's
             # own ts becomes the new thread root.
             parent_ts = msg.get("thread_ts") or msg.get("ts") or message_ts
+        else:
+            # Reaction was on a thread reply — msg is the thread parent.
+            # Re-fetch via conversations.replies to find the actual reply.
+            parent_ts = msg.get("thread_ts") or msg.get("ts") or message_ts
+            replies = client.conversations_replies(channel=channel, ts=parent_ts)
+            reply_msgs = (replies.get("messages") if hasattr(replies, "get") else []) or []
+            target = next(
+                (m for m in reply_msgs if m.get("ts") == message_ts),
+                None,
+            )
+            if target is None:
+                _notify_reactor(client, channel, reactor, "메시지를 읽을 수 없습니다.")
+                return
+            prompt = (target.get("text") or "").strip()
     except Exception as exc:  # noqa: BLE001
-        runtime.logger.warning("conversations.history failed: %s", exc)
+        runtime.logger.warning("conversations lookup failed: %s", exc)
         _notify_reactor(client, channel, reactor, "메시지를 읽을 수 없습니다.")
         return
 

@@ -536,6 +536,14 @@ class _ImageReactionClient:
     Captures `files_upload_v2` and `chat_postEphemeral` calls and serves
     a configurable `conversations_history` response so we can flex the
     'text/thread_ts on the reacted message' scenarios.
+
+    Thread-reply scenario: set `reply_to_parent_ts` to model the case
+    where the reacted message is itself a thread reply.
+    `conversations.history(latest=reply_ts)` then returns the thread
+    PARENT (not the reply) — mirroring the real Slack API, which omits
+    thread replies from channel history. The handler must then call
+    `conversations.replies(ts=parent_ts)` and pick the reply with the
+    matching ts.
     """
 
     def __init__(
@@ -544,12 +552,21 @@ class _ImageReactionClient:
         thread_ts: str | None = None,
         history_raises: bool = False,
         upload_raises: bool = False,
+        reply_to_parent_ts: str | None = None,
+        reply_message_ts: str = "1700000000.000100",
+        parent_text: str = "(스레드 루트 텍스트)",
+        replies_raises: bool = False,
     ):
         self.text = text
         self.thread_ts = thread_ts
         self.history_raises = history_raises
         self.upload_raises = upload_raises
+        self.reply_to_parent_ts = reply_to_parent_ts
+        self.reply_message_ts = reply_message_ts
+        self.parent_text = parent_text
+        self.replies_raises = replies_raises
         self.history_calls: list[dict] = []
+        self.replies_calls: list[dict] = []
         self.uploads: list[dict] = []
         self.ephemerals: list[dict] = []
 
@@ -559,10 +576,42 @@ class _ImageReactionClient:
         )
         if self.history_raises:
             raise RuntimeError("missing_scope")
+        if self.reply_to_parent_ts is not None:
+            # Real Slack behavior: history(latest=<reply_ts>) returns the
+            # most recent top-level message at-or-before — typically the
+            # thread root, which has thread_ts == its own ts.
+            parent_msg = {
+                "ts": self.reply_to_parent_ts,
+                "user": "U-ASKER",
+                "text": self.parent_text,
+                "thread_ts": self.reply_to_parent_ts,
+            }
+            return {"messages": [parent_msg]}
         msg = {"ts": latest, "user": "U-AUTHOR", "text": self.text}
         if self.thread_ts is not None:
             msg["thread_ts"] = self.thread_ts
         return {"messages": [msg]}
+
+    def conversations_replies(self, channel, ts, limit=None, **_kwargs):
+        self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
+        if self.replies_raises:
+            raise RuntimeError("missing_scope")
+        # Return parent + the reply whose ts the test driver supplies via
+        # `reply_message_ts`. Callers that exercise the reply path must
+        # pass the same `ts` value used in the reaction event.
+        parent_msg = {
+            "ts": self.reply_to_parent_ts,
+            "user": "U-ASKER",
+            "text": self.parent_text,
+            "thread_ts": self.reply_to_parent_ts,
+        }
+        reply_msg = {
+            "ts": self.reply_message_ts,
+            "user": "U-AUTHOR",
+            "text": self.text,
+            "thread_ts": self.reply_to_parent_ts,
+        }
+        return {"messages": [parent_msg, reply_msg]}
 
     def files_upload_v2(self, **kwargs):
         if self.upload_raises:
@@ -664,6 +713,82 @@ def test_reaction_uses_parent_thread_when_reacted_message_is_thread_reply(
     )
 
     assert client.uploads[0]["thread_ts"] == "1699999999.000000"
+
+
+def test_reaction_in_thread_reply_uses_reply_text_not_thread_root(
+    app_module, monkeypatch
+):
+    """When the reaction is added to a thread REPLY (not the root),
+    Slack's `conversations.history` does not return the reply itself —
+    it returns the thread parent (or the closest top-level message
+    at-or-before the reply ts). The handler must detect this (returned
+    ts ≠ message_ts), then call `conversations.replies(ts=parent_ts)`
+    and use the reply's text as the image-generation prompt.
+
+    Regression for the bug where the bot used the thread root's text
+    instead of the reacted reply's text."""
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    captured = _stub_get_llm(monkeypatch)
+
+    reply_ts = "1700000000.000100"
+    parent_ts = "1699999999.000000"
+    client = _ImageReactionClient(
+        text="이 답글 텍스트로 그려줘",
+        reply_to_parent_ts=parent_ts,
+        reply_message_ts=reply_ts,
+        parent_text="스레드 루트 텍스트 (사용되면 안 됨)",
+    )
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt", ts=reply_ts),
+        client,
+        api_app_id="A1",
+    )
+
+    # Prompt is the reply's text — NOT the thread root's.
+    assert captured["prompt"] == "이 답글 텍스트로 그려줘"
+
+    # Two-step lookup actually ran: history first, then replies with parent ts.
+    assert client.history_calls[0]["latest"] == reply_ts
+    assert client.replies_calls[0]["channel"] == "C1"
+    assert client.replies_calls[0]["ts"] == parent_ts
+
+    # Result is posted into the original thread root.
+    assert len(client.uploads) == 1
+    assert client.uploads[0]["thread_ts"] == parent_ts
+    assert "이 답글 텍스트로 그려줘" in client.uploads[0]["initial_comment"]
+    assert client.ephemerals == []
+
+
+def test_reaction_in_thread_reply_replies_failure_notifies_reactor(
+    app_module, monkeypatch
+):
+    """If `conversations.replies` fails after history identified the
+    message as a thread reply, we can't recover the reply's text — surface
+    an error to the reactor rather than silently falling back to the
+    parent text (which would regress the bug this fixes)."""
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+
+    def boom_get_llm(**_kwargs):
+        raise AssertionError("get_llm must not run when reply lookup fails")
+
+    monkeypatch.setattr(_reactions, "get_llm", boom_get_llm)
+
+    reply_ts = "1700000000.000100"
+    client = _ImageReactionClient(
+        text="dontuse",
+        reply_to_parent_ts="1699999999.000000",
+        reply_message_ts=reply_ts,
+        replies_raises=True,
+    )
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt", ts=reply_ts),
+        client,
+        api_app_id="A1",
+    )
+
+    assert client.uploads == []
+    assert len(client.ephemerals) == 1
+    assert "메시지" in client.ephemerals[0]["text"]
 
 
 def test_reaction_empty_message_text_notifies_reactor(app_module, monkeypatch):
