@@ -809,6 +809,9 @@ def test_reaction_empty_message_text_notifies_reactor(app_module, monkeypatch):
     assert client.ephemerals[0]["user"] == "U-REACTOR"
     assert client.ephemerals[0]["channel"] == "C1"
     assert "텍스트" in client.ephemerals[0]["text"]
+    # Ephemeral must be attached to the message's thread context so it shows
+    # up in the thread sidebar the reactor is viewing (not at channel level).
+    assert client.ephemerals[0].get("thread_ts") == "1700000000.000100"
 
 
 def test_reaction_history_failure_notifies_reactor(app_module, monkeypatch):
@@ -827,6 +830,9 @@ def test_reaction_history_failure_notifies_reactor(app_module, monkeypatch):
     assert client.uploads == []
     assert len(client.ephemerals) == 1
     assert "메시지" in client.ephemerals[0]["text"]
+    # Even on history lookup failure, the ephemeral must carry the reacted
+    # message's ts as thread_ts so it lands in the reactor's open view.
+    assert client.ephemerals[0].get("thread_ts") == "1700000000.000100"
 
 
 def test_reaction_image_generation_failure_notifies_reactor(app_module, monkeypatch):
@@ -834,7 +840,7 @@ def test_reaction_image_generation_failure_notifies_reactor(app_module, monkeypa
 
     class _BoomLLM:
         def generate_image(self, prompt):
-            raise RuntimeError("provider exploded")
+            raise RuntimeError("provider exploded: size 1024x1024 not supported")
 
     monkeypatch.setattr(_reactions, "get_llm", lambda **_kwargs: _BoomLLM())
 
@@ -846,6 +852,45 @@ def test_reaction_image_generation_failure_notifies_reactor(app_module, monkeypa
     assert client.uploads == []
     assert len(client.ephemerals) == 1
     assert "이미지 생성 실패" in client.ephemerals[0]["text"]
+    # The provider error message must reach the reactor verbatim — without
+    # it, CloudWatch and the user both see only "BadRequestError" with no
+    # actionable detail (which is what hid the gpt-image-2 size issue).
+    assert "size 1024x1024 not supported" in client.ephemerals[0]["text"]
+    # Ephemeral must be in the thread the reactor is viewing.
+    assert client.ephemerals[0].get("thread_ts") == "1700000000.000100"
+
+
+def test_reaction_in_thread_reply_image_failure_ephemeral_lands_in_thread(
+    app_module, monkeypatch
+):
+    """When the reaction is on a thread reply and image generation fails,
+    the error ephemeral must land in the thread root (not at channel
+    level) — that's the view the reactor has open. Regression for the
+    silent-failure bug where ephemerals went to channel level and were
+    invisible to a reactor with the thread sidebar open."""
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+
+    class _BoomLLM:
+        def generate_image(self, prompt):
+            raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(_reactions, "get_llm", lambda **_kwargs: _BoomLLM())
+
+    reply_ts = "1700000000.000100"
+    parent_ts = "1699999999.000000"
+    client = _ImageReactionClient(
+        text="이 답글로 그려줘",
+        reply_to_parent_ts=parent_ts,
+        reply_message_ts=reply_ts,
+    )
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt", ts=reply_ts), client, api_app_id="A1"
+    )
+
+    assert client.uploads == []
+    assert len(client.ephemerals) == 1
+    # The ephemeral is anchored to the thread root, NOT the reply ts.
+    assert client.ephemerals[0].get("thread_ts") == parent_ts
 
 
 def test_reaction_handlers_dict_wires_both_image_reactions(app_module):
