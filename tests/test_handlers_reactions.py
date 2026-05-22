@@ -120,24 +120,24 @@ def test_process_worker_routes_reaction_event_to_process_reaction(app_module, mo
 
 
 class _RecordingClient:
-    """WebClient stand-in for reaction tests.
+    """WebClient stand-in for x-delete reaction tests.
 
-    Models the two-step asker lookup the handler does:
-      1. conversations_history(latest=msg_ts, oldest=msg_ts) → bot
-         message with `thread_ts` field pointing at the parent
-      2. conversations_replies(ts=parent_ts) → parent message whose
-         `user` is the original asker
+    Models the common lookup the handler uses: `conversations.replies`
+    with the reacted message's ts returns the full thread oldest-first
+    (`[root, …, bot_msg]`), so `thread[0].user` is the original asker.
 
     Knobs:
-      - bot_user_id          : auth.test().user_id
-      - thread_parent_user   : asker user_id returned by step 2
-                               (None ⇒ replies returns empty messages)
-      - parent_ts            : the bot message's thread_ts field (defaults
-                               to a different-from-msg-ts value so the
-                               handler's two-step lookup actually runs)
-      - history_raises       : conversations_history raises
-      - replies_raises       : conversations_replies raises
-      - delete_raises        : chat_delete raises
+      - bot_user_id            : auth.test().user_id
+      - thread_parent_user     : user_id of the thread root (the asker);
+                                 `None` ⇒ replies returns the bot message
+                                 only (no thread context recovered)
+      - parent_ts              : root ts; defaults to a value distinct
+                                 from message_ts so the bot message is
+                                 modeled as a thread reply
+      - history_raises         : conversations_history raises
+      - replies_raises         : conversations_replies raises
+      - replies_returns_empty  : conversations_replies returns `[]`
+      - delete_raises          : chat_delete raises
     """
 
     def __init__(
@@ -147,6 +147,7 @@ class _RecordingClient:
         parent_ts="1700000000.000000",
         history_raises=False,
         replies_raises=False,
+        replies_returns_empty=False,
         delete_raises=False,
     ):
         self.bot_user_id = bot_user_id
@@ -154,28 +155,38 @@ class _RecordingClient:
         self.parent_ts = parent_ts
         self.history_raises = history_raises
         self.replies_raises = replies_raises
+        self.replies_returns_empty = replies_returns_empty
         self.delete_raises = delete_raises
-        self.deleted = []
-        self.history_calls = []
-        self.replies_calls = []
+        self.deleted: list[dict] = []
+        self.history_calls: list[dict] = []
+        self.replies_calls: list[dict] = []
 
     def auth_test(self):
         return {"user_id": self.bot_user_id}
+
+    def conversations_replies(self, channel, ts, limit=None, **_kwargs):
+        self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
+        if self.replies_raises:
+            raise RuntimeError("missing_scope")
+        if self.replies_returns_empty:
+            return {"messages": []}
+        if self.thread_parent_user is None:
+            # Bot message standing alone (no thread context recovered).
+            return {"messages": [{"ts": ts, "user": self.bot_user_id}]}
+        return {"messages": [
+            {"ts": self.parent_ts, "user": self.thread_parent_user},
+            {"ts": ts, "user": self.bot_user_id, "thread_ts": self.parent_ts},
+        ]}
 
     def conversations_history(self, channel, latest, inclusive, limit):
         self.history_calls.append({"channel": channel, "ts": latest})
         if self.history_raises:
             raise RuntimeError("missing_scope")
-        # The bot message: ts is the message itself, thread_ts is the parent.
-        return {"messages": [{"ts": latest, "user": self.bot_user_id, "thread_ts": self.parent_ts}]}
-
-    def conversations_replies(self, channel, ts, limit=1):
-        self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
-        if self.replies_raises:
-            raise RuntimeError("missing_scope")
-        if self.thread_parent_user is None:
-            return {"messages": []}
-        return {"messages": [{"user": self.thread_parent_user, "ts": ts}]}
+        # Thread replies are excluded from history. The bot message is a
+        # reply, so its ts cannot match — return the previous top-level
+        # entry. Tests that need to exercise the strict-ts-equality path
+        # subclass and override.
+        return {"messages": [{"ts": self.parent_ts, "user": self.thread_parent_user or "U-OTHER"}]}
 
     def chat_delete(self, channel, ts):
         if self.delete_raises:
@@ -377,15 +388,11 @@ def test_process_reaction_chat_delete_failure_logged_not_raised(app_module, monk
     _reactions._process_reaction(event, client, api_app_id="A1")
 
 
-def test_process_reaction_two_step_lookup_finds_thread_root_asker(app_module, monkeypatch):
-    """The bot replies inside a thread, so reactions land on a thread reply.
-    `conversations.replies(ts=reply_ts)` doesn't return the parent — Slack
-    only honors thread-root ts. The handler must:
-      1. conversations.history(latest=msg_ts, oldest=msg_ts) → bot message
-         with `thread_ts` field pointing at the parent
-      2. conversations.replies(ts=parent_ts, limit=1) → the parent message
-         whose `user` is the asker
-    Verify both calls happen and reactor=asker → delete fires."""
+def test_process_reaction_replies_lookup_finds_thread_root_asker(app_module, monkeypatch):
+    """`conversations.replies(ts=msg_ts)` returns the full thread
+    oldest-first; `thread[0].user` is the original asker. A single
+    primary call covers the lookup — the history fallback is consulted
+    only when replies itself fails."""
     import dataclasses
 
     _reset_bot_user_id_cache(app_module)
@@ -396,23 +403,25 @@ def test_process_reaction_two_step_lookup_finds_thread_root_asker(app_module, mo
 
     client = _RecordingClient(
         thread_parent_user="U-REACTOR",
-        parent_ts="1699999999.000000",  # parent ts ≠ message_ts
+        parent_ts="1699999999.000000",  # root ts distinct from the reacted bot-message ts
     )
     event = _reaction_event(user="U-REACTOR")
     _reactions._process_reaction(event, client, api_app_id="A1")
 
-    # Step 1: history fetched the bot message itself (latest == message_ts)
-    assert client.history_calls == [{"channel": "C1", "ts": "1700000000.000100"}]
-    # Step 2: replies fetched with the PARENT ts from history, NOT message_ts
-    assert client.replies_calls == [{"channel": "C1", "ts": "1699999999.000000", "limit": 1}]
-    # Asker matched → deleted
+    # Single replies call with the reacted message's ts (NOT the parent ts).
+    assert client.replies_calls == [
+        {"channel": "C1", "ts": "1700000000.000100", "limit": 200}
+    ]
+    # History fallback is not consulted on the success path.
+    assert client.history_calls == []
+    # Asker matched → deleted.
     assert client.deleted == [{"channel": "C1", "ts": "1700000000.000100"}]
 
 
-def test_process_reaction_history_failure_falls_back_to_allowlist(app_module, monkeypatch):
-    """conversations.history failure (missing scope) should not abort —
-    the ALLOWED_USER_IDS check still runs. Mirror behavior for the
-    replies failure case."""
+def test_process_reaction_lookup_failures_fall_back_to_allowlist(app_module, monkeypatch):
+    """When both `conversations.replies` and `conversations.history`
+    fail (missing scope, transient outage), the original-asker path is
+    unavailable but ALLOWED_USER_IDS authorization still applies."""
     import dataclasses
 
     _reset_bot_user_id_cache(app_module)
@@ -421,12 +430,12 @@ def test_process_reaction_history_failure_falls_back_to_allowlist(app_module, mo
     monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
     monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _RecordingMetadata())
 
-    client = _RecordingClient(history_raises=True)
-    # U-OPS is in allowlist → still allowed even when history lookup is unavailable.
+    client = _RecordingClient(replies_raises=True, history_raises=True)
     _reactions._process_reaction(_reaction_event(user="U-OPS", event_ts="3.1"), client, api_app_id="A1")
     assert client.deleted == [{"channel": "C1", "ts": "1700000000.000100"}]
-    # No replies call since history failed before we knew the parent_ts.
-    assert client.replies_calls == []
+    # Both lookup tiers were attempted before giving up on asker discovery.
+    assert len(client.replies_calls) == 1
+    assert len(client.history_calls) == 1
 
 
 def test_process_reaction_replies_failure_falls_back_to_allowlist(app_module, monkeypatch):
@@ -449,6 +458,42 @@ def test_process_reaction_replies_failure_falls_back_to_allowlist(app_module, mo
     client.deleted.clear()
     _reactions._process_reaction(_reaction_event(user="U-RANDOM", event_ts="1.2"), client, api_app_id="A1")
     assert client.deleted == []
+
+
+def test_process_reaction_does_not_grant_delete_from_unrelated_thread_root(
+    app_module, monkeypatch
+):
+    """Cross-thread trap regression. When `replies` is unavailable the
+    handler falls back to `history(latest=msg_ts)`. The reacted (bot)
+    message is a thread reply, so history's nearest-top-level result has
+    a DIFFERENT ts — typically the root of an unrelated thread. That
+    root's author must not be granted asker privileges; otherwise an
+    unrelated user could delete this bot message."""
+    import dataclasses
+
+    _reset_bot_user_id_cache(app_module)
+    override = dataclasses.replace(_runtime.settings, allowed_user_ids=[])
+    monkeypatch.setattr(_runtime, "settings", override)
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+    monkeypatch.setattr(_runtime, "_get_app_metadata", lambda: _RecordingMetadata())
+
+    # `replies` raises; the default `_RecordingClient.conversations_history`
+    # returns a message whose ts is parent_ts (≠ the reacted bot-message ts)
+    # authored by `U-OTHER` — the root of an unrelated thread.
+    client = _RecordingClient(
+        replies_raises=True,
+        thread_parent_user="U-OTHER",
+        parent_ts="1699999000.000000",
+    )
+    _reactions._process_reaction(
+        _reaction_event(user="U-OTHER"),
+        client,
+        api_app_id="A1",
+    )
+    assert client.deleted == []
+    # Both lookup tiers ran; the ts-mismatch result was rejected.
+    assert len(client.replies_calls) == 1
+    assert len(client.history_calls) == 1
 
 
 def test_reaction_dispatch_to_registered_handler(app_module, monkeypatch):
@@ -533,17 +578,19 @@ def test_on_reaction_added_handler_pre_filters_non_x_at_receiver(app_module, mon
 class _ImageReactionClient:
     """Slack client stand-in for image-gen reaction tests.
 
-    Captures `files_upload_v2` and `chat_postEphemeral` calls and serves
-    a configurable `conversations_history` response so we can flex the
-    'text/thread_ts on the reacted message' scenarios.
+    Models the production-correct fetch order: `conversations.replies`
+    first (accepts ANY ts in a thread and returns the full thread; for
+    a top-level message with no thread it returns just that message),
+    `conversations.history` as fallback (compared against ts exactly to
+    avoid the cross-thread trap).
 
-    Thread-reply scenario: set `reply_to_parent_ts` to model the case
-    where the reacted message is itself a thread reply.
-    `conversations.history(latest=reply_ts)` then returns the thread
-    PARENT (not the reply) — mirroring the real Slack API, which omits
-    thread replies from channel history. The handler must then call
-    `conversations.replies(ts=parent_ts)` and pick the reply with the
-    matching ts.
+    Thread context options:
+      - top-level w/o thread: leave `thread_ts` / `reply_to_parent_ts` None
+        → `replies` returns the single message at the reacted ts.
+      - thread root with replies: pass `thread_ts` → `replies` returns
+        [root, reply] where root.ts == the reacted ts.
+      - reply inside a thread: pass `reply_to_parent_ts` → `replies`
+        returns [root, reply] where reply.ts == `reply_message_ts`.
     """
 
     def __init__(
@@ -556,6 +603,7 @@ class _ImageReactionClient:
         reply_message_ts: str = "1700000000.000100",
         parent_text: str = "(스레드 루트 텍스트)",
         replies_raises: bool = False,
+        replies_returns_empty: bool = False,
     ):
         self.text = text
         self.thread_ts = thread_ts
@@ -565,10 +613,41 @@ class _ImageReactionClient:
         self.reply_message_ts = reply_message_ts
         self.parent_text = parent_text
         self.replies_raises = replies_raises
+        self.replies_returns_empty = replies_returns_empty
         self.history_calls: list[dict] = []
         self.replies_calls: list[dict] = []
         self.uploads: list[dict] = []
         self.ephemerals: list[dict] = []
+
+    def conversations_replies(self, channel, ts, limit=None, **_kwargs):
+        self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
+        if self.replies_raises:
+            raise RuntimeError("missing_scope")
+        if self.replies_returns_empty:
+            return {"messages": []}
+        # Thread context: either knob means "the reacted message is a
+        # reply inside a thread rooted at this ts". `thread_ts` is the
+        # legacy knob from the pre-refactor tests; `reply_to_parent_ts`
+        # is the explicit one. Both produce the same shape.
+        root_ts = self.reply_to_parent_ts or self.thread_ts
+        if root_ts is not None:
+            return {"messages": [
+                {
+                    "ts": root_ts,
+                    "user": "U-ASKER",
+                    "text": self.parent_text,
+                    "thread_ts": root_ts,
+                },
+                {
+                    "ts": self.reply_message_ts,
+                    "user": "U-AUTHOR",
+                    "text": self.text,
+                    "thread_ts": root_ts,
+                },
+            ]}
+        # Top-level message with no thread — replies returns the single
+        # message at the reacted ts.
+        return {"messages": [{"ts": ts, "user": "U-AUTHOR", "text": self.text}]}
 
     def conversations_history(self, channel, latest, inclusive, limit):
         self.history_calls.append(
@@ -576,42 +655,10 @@ class _ImageReactionClient:
         )
         if self.history_raises:
             raise RuntimeError("missing_scope")
-        if self.reply_to_parent_ts is not None:
-            # Real Slack behavior: history(latest=<reply_ts>) returns the
-            # most recent top-level message at-or-before — typically the
-            # thread root, which has thread_ts == its own ts.
-            parent_msg = {
-                "ts": self.reply_to_parent_ts,
-                "user": "U-ASKER",
-                "text": self.parent_text,
-                "thread_ts": self.reply_to_parent_ts,
-            }
-            return {"messages": [parent_msg]}
         msg = {"ts": latest, "user": "U-AUTHOR", "text": self.text}
         if self.thread_ts is not None:
             msg["thread_ts"] = self.thread_ts
         return {"messages": [msg]}
-
-    def conversations_replies(self, channel, ts, limit=None, **_kwargs):
-        self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
-        if self.replies_raises:
-            raise RuntimeError("missing_scope")
-        # Return parent + the reply whose ts the test driver supplies via
-        # `reply_message_ts`. Callers that exercise the reply path must
-        # pass the same `ts` value used in the reaction event.
-        parent_msg = {
-            "ts": self.reply_to_parent_ts,
-            "user": "U-ASKER",
-            "text": self.parent_text,
-            "thread_ts": self.reply_to_parent_ts,
-        }
-        reply_msg = {
-            "ts": self.reply_message_ts,
-            "user": "U-AUTHOR",
-            "text": self.text,
-            "thread_ts": self.reply_to_parent_ts,
-        }
-        return {"messages": [parent_msg, reply_msg]}
 
     def files_upload_v2(self, **kwargs):
         if self.upload_raises:
@@ -718,15 +765,17 @@ def test_reaction_uses_parent_thread_when_reacted_message_is_thread_reply(
 def test_reaction_in_thread_reply_uses_reply_text_not_thread_root(
     app_module, monkeypatch
 ):
-    """When the reaction is added to a thread REPLY (not the root),
-    Slack's `conversations.history` does not return the reply itself —
-    it returns the thread parent (or the closest top-level message
-    at-or-before the reply ts). The handler must detect this (returned
-    ts ≠ message_ts), then call `conversations.replies(ts=parent_ts)`
-    and use the reply's text as the image-generation prompt.
+    """When the reaction is added to a thread REPLY (not the root), the
+    handler must use `conversations.replies(ts=reply_ts)` — which Slack
+    accepts as ANY ts in a thread — and pick the reply with the matching
+    ts. The prompt must be the reply's text, NOT the thread root's, and
+    the result must post into the thread root.
 
-    Regression for the bug where the bot used the thread root's text
-    instead of the reacted reply's text."""
+    Regression for two bugs:
+      1. prompt was sometimes the thread root's text
+      2. cross-thread trap from history(latest=reply_ts) anchoring
+         parent_ts on an unrelated thread's root
+    """
     monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
     captured = _stub_get_llm(monkeypatch)
 
@@ -747,10 +796,13 @@ def test_reaction_in_thread_reply_uses_reply_text_not_thread_root(
     # Prompt is the reply's text — NOT the thread root's.
     assert captured["prompt"] == "이 답글 텍스트로 그려줘"
 
-    # Two-step lookup actually ran: history first, then replies with parent ts.
-    assert client.history_calls[0]["latest"] == reply_ts
+    # Single replies call with the reply's ts (NOT the parent ts). Slack
+    # accepts any ts in the thread and returns the full thread.
+    assert len(client.replies_calls) == 1
     assert client.replies_calls[0]["channel"] == "C1"
-    assert client.replies_calls[0]["ts"] == parent_ts
+    assert client.replies_calls[0]["ts"] == reply_ts
+    # No history fallback needed — replies returned the message.
+    assert client.history_calls == []
 
     # Result is posted into the original thread root.
     assert len(client.uploads) == 1
@@ -759,17 +811,18 @@ def test_reaction_in_thread_reply_uses_reply_text_not_thread_root(
     assert client.ephemerals == []
 
 
-def test_reaction_in_thread_reply_replies_failure_notifies_reactor(
+def test_reaction_in_thread_reply_replies_failure_falls_back_to_history(
     app_module, monkeypatch
 ):
-    """If `conversations.replies` fails after history identified the
-    message as a thread reply, we can't recover the reply's text — surface
-    an error to the reactor rather than silently falling back to the
-    parent text (which would regress the bug this fixes)."""
+    """If `conversations.replies` fails (transient outage, missing scope),
+    the handler must still try `conversations.history` as a fallback —
+    but only accept the result when ts matches exactly, to avoid the
+    cross-thread trap. When history also can't recover the message,
+    surface an error ephemeral to the reactor."""
     monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
 
     def boom_get_llm(**_kwargs):
-        raise AssertionError("get_llm must not run when reply lookup fails")
+        raise AssertionError("get_llm must not run when both lookups fail")
 
     monkeypatch.setattr(_reactions, "get_llm", boom_get_llm)
 
@@ -779,6 +832,7 @@ def test_reaction_in_thread_reply_replies_failure_notifies_reactor(
         reply_to_parent_ts="1699999999.000000",
         reply_message_ts=reply_ts,
         replies_raises=True,
+        history_raises=True,
     )
     _reactions._process_reaction(
         _img_reaction_event("img-gpt", ts=reply_ts),
@@ -789,6 +843,62 @@ def test_reaction_in_thread_reply_replies_failure_notifies_reactor(
     assert client.uploads == []
     assert len(client.ephemerals) == 1
     assert "메시지" in client.ephemerals[0]["text"]
+    # Both lookup tiers were attempted before giving up.
+    assert len(client.replies_calls) == 1
+    assert len(client.history_calls) == 1
+
+
+def test_reaction_does_not_post_to_wrong_thread_when_history_returns_other_thread(
+    app_module, monkeypatch
+):
+    """Regression for the cross-thread trap that this whole rewrite
+    targets: if `conversations.replies` is unavailable AND `history`
+    returns a message whose ts differs from the reacted message_ts
+    (real Slack: that's a different thread's root that happens to sit
+    nearest in time), the handler must REFUSE to use it. Otherwise we
+    would post the generated image into someone else's thread."""
+    monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
+
+    def boom_get_llm(**_kwargs):
+        raise AssertionError("get_llm must not run when ts mismatch")
+
+    monkeypatch.setattr(_reactions, "get_llm", boom_get_llm)
+
+    reply_ts = "1700000000.000100"
+    foreign_root_ts = "1699999999.000000"
+
+    # Custom client: replies fails, history returns a DIFFERENT thread's
+    # root (ts mismatches the reacted message_ts).
+    class _CrossThreadClient(_ImageReactionClient):
+        def conversations_replies(self, channel, ts, limit=None, **_kwargs):
+            self.replies_calls.append({"channel": channel, "ts": ts, "limit": limit})
+            raise RuntimeError("missing_scope")
+
+        def conversations_history(self, channel, latest, inclusive, limit):
+            self.history_calls.append(
+                {"channel": channel, "latest": latest, "inclusive": inclusive, "limit": limit}
+            )
+            # Real Slack quirk: returns the nearest top-level msg, which
+            # may be a foreign thread's root.
+            return {"messages": [{
+                "ts": foreign_root_ts,
+                "user": "U-STRANGER",
+                "text": "남의 스레드 루트",
+                "thread_ts": foreign_root_ts,
+            }]}
+
+    client = _CrossThreadClient(text="ignored")
+    _reactions._process_reaction(
+        _img_reaction_event("img-gpt", ts=reply_ts), client, api_app_id="A1"
+    )
+
+    # Must NOT have posted anything — the only safe response is to give
+    # up and notify the reactor.
+    assert client.uploads == []
+    assert len(client.ephemerals) == 1
+    assert "메시지를 읽을 수 없습니다" in client.ephemerals[0]["text"]
+    # Ephemeral lands at the reacted message's ts, not the foreign thread.
+    assert client.ephemerals[0].get("thread_ts") == reply_ts
 
 
 def test_reaction_empty_message_text_notifies_reactor(app_module, monkeypatch):
@@ -814,15 +924,18 @@ def test_reaction_empty_message_text_notifies_reactor(app_module, monkeypatch):
     assert client.ephemerals[0].get("thread_ts") == "1700000000.000100"
 
 
-def test_reaction_history_failure_notifies_reactor(app_module, monkeypatch):
+def test_reaction_both_lookups_fail_notifies_reactor(app_module, monkeypatch):
+    """When neither `conversations.replies` nor the `conversations.history`
+    fallback can recover the message, surface an error to the reactor and
+    do NOT proceed to image generation."""
     monkeypatch.setattr(_runtime, "_get_dedup", lambda: _FakeDedup())
 
     def boom_get_llm(**_kwargs):
-        raise AssertionError("get_llm must not run when history fails")
+        raise AssertionError("get_llm must not run when lookup fails")
 
     monkeypatch.setattr(_reactions, "get_llm", boom_get_llm)
 
-    client = _ImageReactionClient(history_raises=True)
+    client = _ImageReactionClient(replies_raises=True, history_raises=True)
     _reactions._process_reaction(
         _img_reaction_event("img-xai"), client, api_app_id="A1"
     )
@@ -830,8 +943,8 @@ def test_reaction_history_failure_notifies_reactor(app_module, monkeypatch):
     assert client.uploads == []
     assert len(client.ephemerals) == 1
     assert "메시지" in client.ephemerals[0]["text"]
-    # Even on history lookup failure, the ephemeral must carry the reacted
-    # message's ts as thread_ts so it lands in the reactor's open view.
+    # Even on lookup failure, the ephemeral must carry the reacted message's
+    # ts as thread_ts so it lands in the reactor's open view.
     assert client.ephemerals[0].get("thread_ts") == "1700000000.000100"
 
 

@@ -77,14 +77,96 @@ def _process_reaction(event: dict, client: WebClient, api_app_id: str) -> None:
         runtime.logger.debug("dedup.mark_done failed: %s", exc)
 
 
+def _lookup_reacted_message(
+    client: WebClient,
+    channel: str,
+    message_ts: str,
+    api_app_id: str,
+) -> tuple[dict | None, str, list[dict]]:
+    """Resolve a reacted-to message and the thread it lives in.
+
+    `conversations.replies(ts=any_ts_in_thread)` returns the full thread
+    oldest-first; for a top-level message with no thread it returns just
+    that message. A single call therefore covers top-level / thread-root
+    / thread-reply uniformly, so it is the primary lookup.
+
+    `conversations.history(latest=ts, limit=1)` is the fallback for when
+    `replies` itself fails (missing scope, transient outage). The history
+    result is accepted only when the returned ts equals `message_ts`
+    exactly — otherwise Slack returns the nearest top-level message
+    at-or-before that ts, which can be the root of an unrelated thread.
+
+    Returns:
+      target: the reacted message dict, or None if not found.
+      parent_ts: thread root ts (= `message_ts` for a top-level message
+        or for the "not found" case).
+      thread: full thread oldest-first when `replies` returned data;
+        `[target]` when reached via the history fallback; `[]` otherwise.
+    """
+    target: dict | None = None
+    parent_ts = message_ts
+    thread: list[dict] = []
+
+    try:
+        replies = client.conversations_replies(
+            channel=channel,
+            ts=message_ts,
+            limit=200,
+        )
+        reply_msgs = (replies.get("messages") if hasattr(replies, "get") else []) or []
+        if reply_msgs:
+            thread = reply_msgs
+            target = next(
+                (m for m in reply_msgs if m.get("ts") == message_ts),
+                None,
+            )
+            parent_ts = reply_msgs[0].get("ts") or message_ts
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            runtime.logger,
+            "reaction.lookup.replies_failed",
+            channel=channel,
+            ts=message_ts,
+            error_class=exc.__class__.__name__,
+            error_message=str(exc)[:200],
+            api_app_id=api_app_id,
+        )
+
+    if target is None:
+        try:
+            hist = client.conversations_history(
+                channel=channel,
+                latest=message_ts,
+                inclusive=True,
+                limit=1,
+            )
+            hist_msgs = (hist.get("messages") if hasattr(hist, "get") else []) or []
+            if hist_msgs and hist_msgs[0].get("ts") == message_ts:
+                target = hist_msgs[0]
+                parent_ts = target.get("thread_ts") or target.get("ts") or message_ts
+                thread = [target]
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                runtime.logger,
+                "reaction.lookup.history_failed",
+                channel=channel,
+                ts=message_ts,
+                error_class=exc.__class__.__name__,
+                error_message=str(exc)[:200],
+                api_app_id=api_app_id,
+            )
+
+    return target, parent_ts, thread
+
+
 def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -> None:
     """`:x:` → delete the bot-authored message it was attached to.
 
     Authorization: the reactor must be either (a) the original asker —
-    the user whose message started the thread the bot answered in — or
-    (b) a user listed in the effective ALLOWED_USER_IDS for this app
-    (per-app override > global env var). The target message must be one
-    this bot itself authored.
+    the user who started the thread the bot replied in — or (b) a user
+    listed in the effective ALLOWED_USER_IDS for this app (per-app
+    override > global env var). The target message must be one this bot
+    itself authored.
     """
     item = event.get("item") or {}
     channel = item.get("channel")
@@ -96,9 +178,8 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
     if not bot_user_id:
         log_event(runtime.logger, "reaction.no_bot_id", api_app_id=api_app_id)
         return
-    # When item_user is present and disagrees, the message is not ours —
-    # chat.delete would 403. When item_user is missing (some payloads
-    # omit it), we proceed and let chat.delete itself enforce.
+    # item_user present and disagreeing → not our message; chat.delete
+    # would 403. When absent, proceed and let chat.delete itself enforce.
     if item_user and item_user != bot_user_id:
         log_event(
             runtime.logger,
@@ -109,11 +190,9 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
         )
         return
 
-    # ALLOWED_USER_IDS resolution mirrors the message-path contract:
-    # attribute absent → global env var; attribute present → use as-is
-    # (including [] for "explicitly allow nobody from this list" — in
-    # the reaction context that just means the original-asker check is
-    # the only path to authorization for this app).
+    # ALLOWED_USER_IDS resolution: attribute absent → global env var;
+    # attribute present → use as-is (including `[]` as an explicit empty
+    # override, in which case the original-asker check is the only path).
     app_row: dict | None = None
     try:
         app_row = runtime._get_app_metadata().record(api_app_id, team_id=event.get("team"))
@@ -125,50 +204,17 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
     else:
         effective_users = list(runtime.settings.allowed_user_ids)
 
-    # Find the original asker. The bot always replies inside a thread —
-    # `handlers.message._process` posts with `thread_ts=event.thread_ts
-    # or event.ts`, so the bot message either is or sits inside a thread.
-    # We can't pass the bot message ts to conversations.replies directly:
-    # Slack only treats the parent (thread root) ts as a valid lookup key.
-    # Instead:
-    #   1. conversations.history(latest=msg_ts, inclusive=True, limit=1)
-    #      returns the bot message; we read its `thread_ts` (parent ts).
-    #      We deliberately omit `oldest` — passing oldest=latest hits a
-    #      Slack quirk where the bracket can return zero messages even
-    #      with inclusive=True. `latest+inclusive+limit=1` reliably
-    #      returns the message at-or-before that ts (which is the
-    #      message itself).
-    #   2. conversations.replies(ts=parent_ts, limit=1) returns the
-    #      parent message — first (oldest_first) — whose `user` is the
-    #      asker.
+    # The bot posts inside a thread (`handlers.message._process` sets
+    # `thread_ts=event.thread_ts or event.ts`), so the bot message is
+    # either a thread reply or a thread root that has replies. Either
+    # way, `thread[0]` from the common lookup is the thread root and
+    # its `user` is the original asker.
+    _target, parent_ts, thread = _lookup_reacted_message(
+        client, channel, message_ts, api_app_id
+    )
     original_asker = ""
-    parent_ts = ""
-    history_messages_count = -1  # -1 = call failed; 0+ = number of messages returned
-    try:
-        hist = client.conversations_history(
-            channel=channel,
-            latest=message_ts,
-            inclusive=True,
-            limit=1,
-        )
-        hist_messages = (hist.get("messages") if hasattr(hist, "get") else []) or []
-        history_messages_count = len(hist_messages)
-        if hist_messages:
-            bot_msg = hist_messages[0]
-            # `thread_ts` is set on thread replies AND on a thread root
-            # that has any replies. Either way, lookup the parent.
-            parent_ts = bot_msg.get("thread_ts") or bot_msg.get("ts") or ""
-    except Exception as exc:  # noqa: BLE001
-        runtime.logger.warning("conversations.history failed: %s", exc)
-
-    if parent_ts and parent_ts != message_ts:
-        try:
-            resp = client.conversations_replies(channel=channel, ts=parent_ts, limit=1)
-            messages = (resp.get("messages") if hasattr(resp, "get") else []) or []
-            if messages:
-                original_asker = messages[0].get("user", "") or ""
-        except Exception as exc:  # noqa: BLE001
-            runtime.logger.warning("conversations.replies failed: %s", exc)
+    if thread and parent_ts != message_ts:
+        original_asker = thread[0].get("user", "") or ""
 
     allowed = (
         (original_asker and reactor == original_asker)
@@ -184,7 +230,6 @@ def _handle_reaction_x_delete(event: dict, client: WebClient, api_app_id: str) -
             api_app_id=api_app_id,
             original_asker=original_asker or "(lookup_failed)",
             parent_ts=parent_ts or "(none)",
-            history_messages_count=history_messages_count,
         )
         return
 
@@ -209,12 +254,9 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
     Mirrors the slash-command `/img-gpt` / `/img-xai` provider mapping:
     `img-gpt` → OpenAI + `image_model_gpt`, `img-xai` → xAI +
     `image_model_xai`. Posting with `thread_ts` keeps the result
-    attached to the original message instead of dumping a top-level
-    file into the channel.
-
-    Errors surface as an ephemeral message to the reactor — reactions
-    have no `response_url`, and pushing failures into the channel as a
-    bot post would pollute the conversation.
+    attached to the original message. Errors surface as an ephemeral to
+    the reactor — reactions have no `response_url`, and pushing failures
+    into the channel as a bot post would pollute the conversation.
     """
     item = event.get("item") or {}
     channel = item.get("channel")
@@ -224,90 +266,30 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
 
     spec = _REACTION_TO_IMAGE.get(reaction)
     if spec is None:
-        # Defensive: REACTION_HANDLERS pre-filter should make this
-        # unreachable, but if a forged event slips through we drop it.
+        # Defense-in-depth: REACTION_HANDLERS pre-filter normally blocks
+        # this, but a forged payload reaching the worker is dropped here.
         return
     image_provider, model_attr = spec
     settings = runtime.settings
     image_model = getattr(settings, model_attr)
 
-    # Fetch the reacted-to message so we can use its text as the prompt
-    # and figure out the right thread to post into.
-    #
-    # Slack's `conversations.history` only returns top-level channel
-    # messages — thread replies are NOT included. So if the reaction
-    # lands on a thread reply, `history(latest=reply_ts, inclusive=True,
-    # limit=1)` returns the closest top-level message at-or-before that
-    # ts, which is normally the thread parent (root). We detect this by
-    # comparing returned ts vs. `message_ts`: when they differ, the
-    # reaction was on a reply and we must fall back to
-    # `conversations.replies(ts=parent_ts)` to recover the reply's text.
-    # Otherwise the prompt would be the thread root's text — a bug where
-    # reacting to any reply in a thread regenerates from the original
-    # question.
-    prompt = ""
-    parent_ts = message_ts
-    try:
-        hist = client.conversations_history(
+    target, parent_ts, _thread = _lookup_reacted_message(
+        client, channel, message_ts, api_app_id
+    )
+    if target is None:
+        log_event(
+            runtime.logger,
+            "reaction.image.message_not_found",
             channel=channel,
-            latest=message_ts,
-            inclusive=True,
-            limit=1,
+            ts=message_ts,
+            api_app_id=api_app_id,
         )
-        messages = (hist.get("messages") if hasattr(hist, "get") else []) or []
-        if not messages:
-            log_event(
-                runtime.logger,
-                "reaction.image.history_empty",
-                channel=channel,
-                ts=message_ts,
-                api_app_id=api_app_id,
-            )
-            _notify_reactor(
-                client, channel, reactor, "메시지를 읽을 수 없습니다.", thread_ts=message_ts
-            )
-            return
-        msg = messages[0]
-        if msg.get("ts") == message_ts:
-            # Top-level message (or thread root) — use its text directly.
-            prompt = (msg.get("text") or "").strip()
-            # If the reacted message is a thread reply, post into the
-            # same thread (Slack rejects nesting threads, so we use the
-            # parent ts). If it's a top-level message, the message's
-            # own ts becomes the new thread root.
-            parent_ts = msg.get("thread_ts") or msg.get("ts") or message_ts
-        else:
-            # Reaction was on a thread reply — msg is the thread parent.
-            # Re-fetch via conversations.replies to find the actual reply.
-            parent_ts = msg.get("thread_ts") or msg.get("ts") or message_ts
-            replies = client.conversations_replies(channel=channel, ts=parent_ts)
-            reply_msgs = (replies.get("messages") if hasattr(replies, "get") else []) or []
-            target = next(
-                (m for m in reply_msgs if m.get("ts") == message_ts),
-                None,
-            )
-            if target is None:
-                log_event(
-                    runtime.logger,
-                    "reaction.image.reply_not_found",
-                    channel=channel,
-                    ts=message_ts,
-                    parent_ts=parent_ts,
-                    replies_count=len(reply_msgs),
-                    api_app_id=api_app_id,
-                )
-                _notify_reactor(
-                    client, channel, reactor, "메시지를 읽을 수 없습니다.", thread_ts=parent_ts
-                )
-                return
-            prompt = (target.get("text") or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        runtime.logger.warning("conversations lookup failed: %s", exc)
         _notify_reactor(
             client, channel, reactor, "메시지를 읽을 수 없습니다.", thread_ts=message_ts
         )
         return
 
+    prompt = (target.get("text") or "").strip()
     if not prompt:
         _notify_reactor(
             client, channel, reactor, "이미지 생성에 쓸 텍스트가 없습니다.", thread_ts=parent_ts
@@ -326,9 +308,9 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
     )
 
     try:
-        # Same explicit-LLM-build trick as the slash command worker —
-        # bypass the runtime singleton so a single deployment can serve
-        # multiple image providers via these reactions.
+        # Build the LLM explicitly (not via the runtime singleton) so
+        # one deployment can serve multiple image providers — same trick
+        # the slash-command worker uses.
         llm = get_llm(
             provider=settings.llm_provider,
             model=settings.llm_model,
@@ -347,10 +329,9 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
             initial_comment=f"`:{reaction}:` {prompt[:200]}",
         )
     except Exception as exc:  # noqa: BLE001
-        # error_message is included at INFO so CloudWatch retains the
-        # provider's BadRequest detail (e.g. "size 1024x1024 not supported
-        # for gpt-image-2") even when DEBUG traceback is off. Capped to
-        # avoid bloating log rows; the full traceback still goes to DEBUG.
+        # error_message at INFO so CloudWatch retains the provider's
+        # BadRequest detail even with DEBUG traceback off; capped to
+        # avoid bloating log rows.
         log_event(
             runtime.logger,
             "reaction.image.failure",
