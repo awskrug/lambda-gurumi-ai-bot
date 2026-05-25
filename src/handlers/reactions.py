@@ -326,7 +326,7 @@ def _handle_reaction_image_gen(event: dict, client: WebClient, api_app_id: str) 
             title=image_model,
             filename="generated.png",
             file=image_bytes,
-            initial_comment=f"`:{reaction}:` {prompt[:200]}",
+            initial_comment=f":{reaction}: {prompt[:200]}",
         )
     except Exception as exc:  # noqa: BLE001
         # error_message at INFO so CloudWatch retains the provider's
