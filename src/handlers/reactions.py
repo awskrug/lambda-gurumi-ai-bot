@@ -85,23 +85,27 @@ def _lookup_reacted_message(
 ) -> tuple[dict | None, str, list[dict]]:
     """Resolve a reacted-to message and the thread it lives in.
 
-    `conversations.replies(ts=any_ts_in_thread)` returns the full thread
-    oldest-first; for a top-level message with no thread it returns just
-    that message. A single call therefore covers top-level / thread-root
-    / thread-reply uniformly, so it is the primary lookup.
+    `conversations.replies(ts=root_ts)` returns the full thread
+    oldest-first. Keyed by a *reply* ts, Slack returns only that single
+    reply (carrying a `thread_ts` that points at the root) — not the
+    whole thread. So when the reacted message is a thread reply, a second
+    `replies` call keyed by its `thread_ts` recovers the root and the
+    full thread. `thread[0]` is then the thread root and its `user` the
+    original asker.
 
     `conversations.history(latest=ts, limit=1)` is the fallback for when
-    `replies` itself fails (missing scope, transient outage). The history
-    result is accepted only when the returned ts equals `message_ts`
-    exactly — otherwise Slack returns the nearest top-level message
-    at-or-before that ts, which can be the root of an unrelated thread.
+    the primary `replies` call fails (missing scope, transient outage).
+    The history result is accepted only when the returned ts equals
+    `message_ts` exactly — otherwise Slack returns the nearest top-level
+    message at-or-before that ts, which can be the root of an unrelated
+    thread.
 
     Returns:
       target: the reacted message dict, or None if not found.
       parent_ts: thread root ts (= `message_ts` for a top-level message
         or for the "not found" case).
-      thread: full thread oldest-first when `replies` returned data;
-        `[target]` when reached via the history fallback; `[]` otherwise.
+      thread: full thread oldest-first; `[target]` when reached via the
+        history fallback; `[]` otherwise.
     """
     target: dict | None = None
     parent_ts = message_ts
@@ -151,6 +155,39 @@ def _lookup_reacted_message(
                 "reaction.lookup.history_failed",
                 channel=channel,
                 ts=message_ts,
+                error_class=exc.__class__.__name__,
+                error_message=str(exc)[:200],
+                api_app_id=api_app_id,
+            )
+
+    # The reacted message is a thread reply when its `thread_ts` differs
+    # from its own ts. The primary `replies` call keyed by that reply ts
+    # returned only the reply, so `thread[0]`/`parent_ts` still point at
+    # the reply, not the root. Re-fetch keyed by the reply's `thread_ts`
+    # to recover the root (and thus the original asker) and the full
+    # thread.
+    root_ts = (target.get("thread_ts") if target else "") or ""
+    if root_ts and root_ts != message_ts:
+        try:
+            root_replies = client.conversations_replies(
+                channel=channel,
+                ts=root_ts,
+                limit=200,
+            )
+            root_msgs = (root_replies.get("messages") if hasattr(root_replies, "get") else []) or []
+            if root_msgs:
+                thread = root_msgs
+                parent_ts = root_msgs[0].get("ts") or root_ts
+                target = next(
+                    (m for m in root_msgs if m.get("ts") == message_ts),
+                    target,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                runtime.logger,
+                "reaction.lookup.root_replies_failed",
+                channel=channel,
+                ts=root_ts,
                 error_class=exc.__class__.__name__,
                 error_message=str(exc)[:200],
                 api_app_id=api_app_id,

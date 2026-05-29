@@ -122,9 +122,12 @@ def test_process_worker_routes_reaction_event_to_process_reaction(app_module, mo
 class _RecordingClient:
     """WebClient stand-in for x-delete reaction tests.
 
-    Models the common lookup the handler uses: `conversations.replies`
-    with the reacted message's ts returns the full thread oldest-first
-    (`[root, …, bot_msg]`), so `thread[0].user` is the original asker.
+    Models real Slack `conversations.replies`: keyed by a thread ROOT ts
+    it returns the full thread oldest-first (`[root, bot_reply]`); keyed
+    by a REPLY ts it returns only that single reply (carrying its
+    `thread_ts`). The bot message is a thread reply, so the handler must
+    re-fetch by `thread_ts` to recover the root — `thread[0].user` is
+    then the original asker.
 
     Knobs:
       - bot_user_id            : auth.test().user_id
@@ -132,8 +135,10 @@ class _RecordingClient:
                                  `None` ⇒ replies returns the bot message
                                  only (no thread context recovered)
       - parent_ts              : root ts; defaults to a value distinct
-                                 from message_ts so the bot message is
+                                 from reacted_ts so the bot message is
                                  modeled as a thread reply
+      - reacted_ts             : ts of the reacted bot reply (matches the
+                                 default _reaction_event ts)
       - history_raises         : conversations_history raises
       - replies_raises         : conversations_replies raises
       - replies_returns_empty  : conversations_replies returns `[]`
@@ -145,6 +150,7 @@ class _RecordingClient:
         bot_user_id="U-BOT",
         thread_parent_user="U-ASKER",
         parent_ts="1700000000.000000",
+        reacted_ts="1700000000.000100",
         history_raises=False,
         replies_raises=False,
         replies_returns_empty=False,
@@ -153,6 +159,7 @@ class _RecordingClient:
         self.bot_user_id = bot_user_id
         self.thread_parent_user = thread_parent_user
         self.parent_ts = parent_ts
+        self.reacted_ts = reacted_ts
         self.history_raises = history_raises
         self.replies_raises = replies_raises
         self.replies_returns_empty = replies_returns_empty
@@ -173,10 +180,17 @@ class _RecordingClient:
         if self.thread_parent_user is None:
             # Bot message standing alone (no thread context recovered).
             return {"messages": [{"ts": ts, "user": self.bot_user_id}]}
-        return {"messages": [
-            {"ts": self.parent_ts, "user": self.thread_parent_user},
-            {"ts": ts, "user": self.bot_user_id, "thread_ts": self.parent_ts},
-        ]}
+        root = {"ts": self.parent_ts, "user": self.thread_parent_user}
+        reply = {
+            "ts": self.reacted_ts,
+            "user": self.bot_user_id,
+            "thread_ts": self.parent_ts,
+        }
+        # Real Slack: only a thread ROOT ts returns the whole thread; a
+        # reply ts returns just that single reply (with its thread_ts).
+        if ts == self.parent_ts:
+            return {"messages": [root, reply]}
+        return {"messages": [reply]}
 
     def conversations_history(self, channel, latest, inclusive, limit):
         self.history_calls.append({"channel": channel, "ts": latest})
@@ -389,10 +403,11 @@ def test_process_reaction_chat_delete_failure_logged_not_raised(app_module, monk
 
 
 def test_process_reaction_replies_lookup_finds_thread_root_asker(app_module, monkeypatch):
-    """`conversations.replies(ts=msg_ts)` returns the full thread
-    oldest-first; `thread[0].user` is the original asker. A single
-    primary call covers the lookup — the history fallback is consulted
-    only when replies itself fails."""
+    """The reacted bot message is a thread reply. Slack's
+    `conversations.replies` keyed by the reply ts returns only that
+    reply, so the handler re-fetches keyed by the reply's `thread_ts`
+    (the root) to recover the original asker — `thread[0].user`. The
+    history fallback is consulted only when `replies` itself fails."""
     import dataclasses
 
     _reset_bot_user_id_cache(app_module)
@@ -408,9 +423,11 @@ def test_process_reaction_replies_lookup_finds_thread_root_asker(app_module, mon
     event = _reaction_event(user="U-REACTOR")
     _reactions._process_reaction(event, client, api_app_id="A1")
 
-    # Single replies call with the reacted message's ts (NOT the parent ts).
+    # First call keyed by the reply ts returns only the reply; the second
+    # is keyed by the reply's thread_ts (the root) to recover the asker.
     assert client.replies_calls == [
-        {"channel": "C1", "ts": "1700000000.000100", "limit": 200}
+        {"channel": "C1", "ts": "1700000000.000100", "limit": 200},
+        {"channel": "C1", "ts": "1699999999.000000", "limit": 200},
     ]
     # History fallback is not consulted on the success path.
     assert client.history_calls == []
@@ -579,8 +596,9 @@ class _ImageReactionClient:
     """Slack client stand-in for image-gen reaction tests.
 
     Models the production-correct fetch order: `conversations.replies`
-    first (accepts ANY ts in a thread and returns the full thread; for
-    a top-level message with no thread it returns just that message),
+    first (keyed by a thread ROOT ts it returns the full thread; keyed by
+    a REPLY ts it returns only that single reply with its `thread_ts`;
+    for a top-level message with no thread it returns just that message),
     `conversations.history` as fallback (compared against ts exactly to
     avoid the cross-thread trap).
 
@@ -631,20 +649,23 @@ class _ImageReactionClient:
         # is the explicit one. Both produce the same shape.
         root_ts = self.reply_to_parent_ts or self.thread_ts
         if root_ts is not None:
-            return {"messages": [
-                {
-                    "ts": root_ts,
-                    "user": "U-ASKER",
-                    "text": self.parent_text,
-                    "thread_ts": root_ts,
-                },
-                {
-                    "ts": self.reply_message_ts,
-                    "user": "U-AUTHOR",
-                    "text": self.text,
-                    "thread_ts": root_ts,
-                },
-            ]}
+            root = {
+                "ts": root_ts,
+                "user": "U-ASKER",
+                "text": self.parent_text,
+                "thread_ts": root_ts,
+            }
+            reply = {
+                "ts": self.reply_message_ts,
+                "user": "U-AUTHOR",
+                "text": self.text,
+                "thread_ts": root_ts,
+            }
+            # Real Slack: only the ROOT ts returns the whole thread; a
+            # reply ts returns just that single reply (with its thread_ts).
+            if ts == root_ts:
+                return {"messages": [root, reply]}
+            return {"messages": [reply]}
         # Top-level message with no thread — replies returns the single
         # message at the reacted ts.
         return {"messages": [{"ts": ts, "user": "U-AUTHOR", "text": self.text}]}
@@ -766,10 +787,10 @@ def test_reaction_in_thread_reply_uses_reply_text_not_thread_root(
     app_module, monkeypatch
 ):
     """When the reaction is added to a thread REPLY (not the root), the
-    handler must use `conversations.replies(ts=reply_ts)` — which Slack
-    accepts as ANY ts in a thread — and pick the reply with the matching
-    ts. The prompt must be the reply's text, NOT the thread root's, and
-    the result must post into the thread root.
+    handler calls `conversations.replies(ts=reply_ts)` — which returns
+    only that reply — then re-fetches by the reply's `thread_ts` to
+    recover the root. The prompt must be the reply's text, NOT the
+    thread root's, and the result must post into the thread root.
 
     Regression for two bugs:
       1. prompt was sometimes the thread root's text
@@ -796,11 +817,12 @@ def test_reaction_in_thread_reply_uses_reply_text_not_thread_root(
     # Prompt is the reply's text — NOT the thread root's.
     assert captured["prompt"] == "이 답글 텍스트로 그려줘"
 
-    # Single replies call with the reply's ts (NOT the parent ts). Slack
-    # accepts any ts in the thread and returns the full thread.
-    assert len(client.replies_calls) == 1
+    # First call keyed by the reply ts (returns only the reply); second
+    # keyed by the reply's thread_ts (the root) to recover full context.
+    assert len(client.replies_calls) == 2
     assert client.replies_calls[0]["channel"] == "C1"
     assert client.replies_calls[0]["ts"] == reply_ts
+    assert client.replies_calls[1]["ts"] == parent_ts
     # No history fallback needed — replies returned the message.
     assert client.history_calls == []
 
