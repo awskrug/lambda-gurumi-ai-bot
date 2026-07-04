@@ -225,6 +225,10 @@ def main() -> None:
         if not settings.xai_api_key:
             print("[오류] XAI_API_KEY가 설정되지 않았습니다. .env.local 을 확인하세요.", file=sys.stderr)
             sys.exit(1)
+    elif settings.llm_provider == "upstage":
+        if not settings.upstage_api_key:
+            print("[오류] UPSTAGE_API_KEY가 설정되지 않았습니다. .env.local 을 확인하세요.", file=sys.stderr)
+            sys.exit(1)
 
     llm = get_llm(
         provider=settings.llm_provider,
@@ -232,7 +236,7 @@ def main() -> None:
         image_provider=settings.image_provider,
         image_model=settings.image_model,
         region=settings.aws_region,
-        api_keys={"xai": settings.xai_api_key},
+        api_keys={"xai": settings.xai_api_key, "upstage": settings.upstage_api_key},
     )
 
     slack_client = _build_slack_client(settings.slack_bot_token)

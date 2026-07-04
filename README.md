@@ -83,10 +83,11 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `SLACK_BOT_TOKEN` | (localtest only) | — | `localtest.py` 에서만 사용. Lambda 런타임은 SSM 만 본다 |
 | `OPENAI_API_KEY` | OpenAI 사용 시 | — | OpenAI API 키 |
 | `XAI_API_KEY` | xAI 사용 시 | — | xAI (Grok) API 키 — https://console.x.ai |
+| `UPSTAGE_API_KEY` | Upstage 사용 시 | — | Upstage (Solar) API 키 — https://console.upstage.ai |
 | `TAVILY_API_KEY` | | — | 설정 시 Tavily 웹 검색 활성화 |
-| `LLM_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` |
+| `LLM_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` / `upstage` |
 | `LLM_MODEL` | | `gpt-4o-mini` | 텍스트 모델 |
-| `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` |
+| `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` (upstage 는 이미지 생성 미지원) |
 | `IMAGE_MODEL` | | `gpt-image-1` | 이미지 모델 |
 | `AGENT_MAX_STEPS` | | `6` | tool 루프 최대 iteration |
 | `RESPONSE_LANGUAGE` | | `ko` | `ko` / `en` |
@@ -213,7 +214,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 
 ### 2. GitHub 저장소 설정
 
-- **Secrets**: `AWS_ACCOUNT_ID`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택). Slack 시크릿은 SSM Parameter Store 에 별도 등록 — CI 시크릿 아님.
+- **Secrets**: `AWS_ACCOUNT_ID`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `UPSTAGE_API_KEY`(Upstage 사용 시), `TAVILY_API_KEY`(선택). Slack 시크릿은 SSM Parameter Store 에 별도 등록 — CI 시크릿 아님.
 - **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `MAX_IMAGE_BYTES`, `JINA_READER_BASE`, `SSM_PARAMS_PREFIX`, `SSM_CACHE_TTL_SECONDS`
 
 ### 3. 배포
@@ -255,7 +256,7 @@ src/
 ├── slack_helpers.py         메시지 분할·스트리밍·사용자 캐시
 ├── config.py                Settings (env → dataclass, lazy validation)
 ├── logging_utils.py         구조화 JSON 로깅 + request_id
-├── llms/                    LLM provider 패키지 (OpenAI · xAI · Bedrock 분기)
+├── llms/                    LLM provider 패키지 (OpenAI · xAI · Bedrock · Upstage 분기)
 └── tools/                   Tool 패키지 (@tool 데코레이터로 self-register)
 ```
 

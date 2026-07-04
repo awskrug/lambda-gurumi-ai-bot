@@ -22,7 +22,7 @@ _load_env_local()
 
 
 _VALID_LANGUAGES = {"ko", "en"}
-_VALID_PROVIDERS = {"openai", "bedrock", "xai"}
+_VALID_PROVIDERS = {"openai", "bedrock", "xai", "upstage"}
 
 
 def _int_env(name: str, default: int, minimum: int = 1) -> int:
@@ -121,6 +121,7 @@ class Settings:
     persona_message: str | None = None
     tavily_api_key: str | None = None
     xai_api_key: str | None = None
+    upstage_api_key: str | None = None
     log_level: str = "INFO"
     default_timezone: str = "Asia/Seoul"
     max_doc_chars: int = 20_000
@@ -148,6 +149,7 @@ class Settings:
         persona_message = os.getenv("PERSONA_MESSAGE", "").strip() or None
         tavily_key = os.getenv("TAVILY_API_KEY", "").strip() or None
         xai_key = os.getenv("XAI_API_KEY", "").strip() or None
+        upstage_key = os.getenv("UPSTAGE_API_KEY", "").strip() or None
         return cls(
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN", "").strip(),
             llm_provider=llm_provider,
@@ -184,6 +186,7 @@ class Settings:
             persona_message=persona_message,
             tavily_api_key=tavily_key,
             xai_api_key=xai_key,
+            upstage_api_key=upstage_key,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
             default_timezone=_tz_env("DEFAULT_TIMEZONE", "Asia/Seoul"),
             max_doc_chars=_int_env("MAX_DOC_CHARS", 20_000, minimum=1000),

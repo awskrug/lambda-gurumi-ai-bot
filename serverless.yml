@@ -37,6 +37,7 @@ provider:
     # --- secrets: LLM provider keys ---
     OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
     XAI_API_KEY: ${env:XAI_API_KEY, ''}
+    UPSTAGE_API_KEY: ${env:UPSTAGE_API_KEY, ''}
     # --- secrets: Web search ---
     TAVILY_API_KEY: ${env:TAVILY_API_KEY, ''}
     # --- vars: LLM / Image ---

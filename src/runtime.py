@@ -63,7 +63,7 @@ def _get_llm():
             image_provider=settings.image_provider,
             image_model=settings.image_model,
             region=settings.aws_region,
-            api_keys={"xai": settings.xai_api_key},
+            api_keys={"xai": settings.xai_api_key, "upstage": settings.upstage_api_key},
         )
     return _llm
 
