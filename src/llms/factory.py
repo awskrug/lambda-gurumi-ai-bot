@@ -5,6 +5,7 @@ from src.llms.base import LLMProvider
 from src.llms.bedrock import BedrockProvider
 from src.llms.composite import _CompositeProvider
 from src.llms.openai import OpenAIProvider
+from src.llms.upstage import UpstageProvider
 from src.llms.xai import XAIProvider
 
 
@@ -29,6 +30,8 @@ def get_llm(
             return BedrockProvider(model=model, image_model=image_model, region=region)
         if p == "xai":
             return XAIProvider(model=model, image_model=image_model, api_key=api_keys.get("xai"))
+        if p == "upstage":
+            return UpstageProvider(model=model, image_model=image_model, api_key=api_keys.get("upstage"))
         return OpenAIProvider(model=model, image_model=image_model)
 
     text = build(provider)
