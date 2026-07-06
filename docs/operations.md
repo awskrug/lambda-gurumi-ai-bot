@@ -15,11 +15,13 @@ Slack API 콘솔 (https://api.slack.com/apps) 에서 새 앱을 만들고 다음
   - `app_mentions:read`, `im:history`, `im:read`, `im:write` — 멘션/DM 수신
   - `users:read` — 사용자 이름 lookup
   - `files:read` — 첨부 파일 읽기 (`read_attached_images`/`read_attached_document`)
+  - `files:write` — 이미지 업로드 (`generate_image`/`edit_image`/`attach_image_from_url` tool, `/img-gpt`·`/img-xai`, 이미지 생성 reaction)
   - `assistant:write` — 스레드 status 인디케이터
   - **(reaction 기능 사용 시)** `reactions:read` + `channels:history` / `groups:history` / `im:history` / `mpim:history` (봇이 동작하는 채널 종류에 맞게)
 - **Event Subscriptions**
   - Request URL: `https://{your-api-gateway}/slack/events`
   - Subscribe to bot events: `app_mention`, `message.im`, **(reaction 기능 사용 시)** `reaction_added`
+- **(slash command 사용 시) Slash Commands** — `/img-gpt`, `/img-xai` 두 명령을 생성, Request URL: `https://{your-api-gateway}/slack/command` (`commands` scope는 명령 생성 시 자동 추가)
 - **App Home → Show Tabs → Allow users to send Slash commands and messages from the messages tab**
 - 워크스페이스에 설치/재인증
 
@@ -278,7 +280,7 @@ GitHub Actions에서 `serverless deploy`를 위해 사용. Lambda 런타임 role
 
 ## Reaction 기능 운영
 
-`:x:` 이모지로 봇 글 삭제 기능을 사용하려면 추가 Slack OAuth scope와 Event Subscription이 필요합니다. 자세한 설정과 권한 모델은 [docs/reactions.md](reactions.md)를 보세요.
+`:x:`(봇 글 삭제)와 `:img-gpt:`/`:img-xai:`(이미지 생성) reaction을 사용하려면 추가 Slack OAuth scope와 Event Subscription이 필요합니다. `img-gpt`/`img-xai`는 워크스페이스에 custom emoji로 등록되어 있어야 합니다. 자세한 설정과 권한 모델은 [docs/reactions.md](reactions.md)를 보세요.
 
 ## 배포
 

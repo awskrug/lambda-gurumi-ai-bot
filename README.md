@@ -1,6 +1,6 @@
 # lambda-gurumi-bot
 
-Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xAI(Grok) LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다.
+Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xAI(Grok) · Upstage(Solar) LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다.
 
 ![Gurumi Bot](images/gurumi-bot.png)
 
@@ -17,8 +17,9 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 
 ## 주요 기능
 
-- **이벤트**: `app_mention`, DM(`message.im`), `reaction_added`(`:x:`로 봇 글 삭제 — [docs/reactions.md](docs/reactions.md))
-- **Provider**: OpenAI · AWS Bedrock(Anthropic Claude 3/3.5/4.x · Amazon Nova) · xAI(Grok) 선택 가능
+- **이벤트**: `app_mention`, DM(`message.im`), `reaction_added`(`:x:` 봇 글 삭제, `:img-gpt:`/`:img-xai:` 이미지 생성 — [docs/reactions.md](docs/reactions.md))
+- **Slash command**: `/img-gpt <prompt>` / `/img-xai <prompt>` — 배포 기본값(`IMAGE_PROVIDER`/`IMAGE_MODEL`)과 무관하게 명령별 고정 provider/model(`IMAGE_MODEL_GPT`/`IMAGE_MODEL_XAI`)로 이미지 생성
+- **Provider**: OpenAI · AWS Bedrock(Anthropic Claude 3/3.5/4.x · Amazon Nova) · xAI(Grok) · Upstage(Solar, 텍스트 전용) 선택 가능
 - **Tools (네이티브 function calling)**
   - `read_attached_images` — 첨부 이미지 Vision 요약
   - `read_attached_document` — 첨부 PDF/텍스트 추출 (페이지·바이트·문자 상한)
@@ -89,6 +90,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `LLM_MODEL` | | `gpt-4o-mini` | 텍스트 모델 |
 | `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` (upstage 는 이미지 생성 미지원) |
 | `IMAGE_MODEL` | | `gpt-image-1` | 이미지 모델 |
+| `IMAGE_MODEL_GPT` | | `gpt-image-1` | `/img-gpt` slash command · `:img-gpt:` reaction 이 쓰는 OpenAI 이미지 모델 (`IMAGE_PROVIDER`/`IMAGE_MODEL` 과 독립) |
+| `IMAGE_MODEL_XAI` | | `grok-imagine-image` | `/img-xai` slash command · `:img-xai:` reaction 이 쓰는 xAI 이미지 모델 |
 | `AGENT_MAX_STEPS` | | `6` | tool 루프 최대 iteration |
 | `RESPONSE_LANGUAGE` | | `ko` | `ko` / `en` |
 | `DYNAMODB_TABLE_NAME` | | `lambda-gurumi-bot-dev` | dedup / 대화 저장 테이블 |
@@ -159,14 +162,15 @@ python scripts/apps.py name unset A0123ABC                             # 자동 
 
 ## 모델 매트릭스
 
-| 용도 | OpenAI | Bedrock | xAI (Grok) |
-|------|--------|---------|------------|
-| 텍스트 + tool calling | `gpt-4o-mini`, `gpt-4o`, `gpt-5-*`, `o1/o3/o4` | `us.anthropic.claude-opus-4-6-v1`, `us.anthropic.claude-sonnet-4-5-...`, `amazon.nova-pro-v1:0` | `grok-4-1-fast-reasoning`, `grok-4.20-0309-reasoning`, `grok-4.20-multi-agent-0309` |
-| 이미지 생성 | `gpt-image-1`, `dall-e-3` | `amazon.nova-canvas-v1:0`, `amazon.titan-image-generator-v2:0` | `grok-imagine-image`, `grok-imagine-image-pro` |
-| 이미지 편집 (`edit_image`) | `gpt-image-1` (멀티 입력), `dall-e-2` (단일+마스크) | — (미지원, `NotImplementedError`) | `grok-imagine-image`, `grok-imagine-image-pro` (xAI 자체 `/v1/images/edits` 엔드포인트) |
+| 용도 | OpenAI | Bedrock | xAI (Grok) | Upstage (Solar) |
+|------|--------|---------|------------|-----------------|
+| 텍스트 + tool calling | `gpt-4o-mini`, `gpt-4o`, `gpt-5-*`, `o1/o3/o4` | `us.anthropic.claude-opus-4-6-v1`, `us.anthropic.claude-sonnet-4-5-...`, `amazon.nova-pro-v1:0` | `grok-4-1-fast-reasoning`, `grok-4.20-0309-reasoning`, `grok-4.20-multi-agent-0309` | `solar-pro2`, `solar-pro`, `solar-mini` |
+| 이미지 생성 | `gpt-image-1`, `dall-e-3` | `amazon.nova-canvas-v1:0`, `amazon.titan-image-generator-v2:0` | `grok-imagine-image`, `grok-imagine-image-pro` | — (미지원, `NotImplementedError`) |
+| 이미지 편집 (`edit_image`) | `gpt-image-1` (멀티 입력), `dall-e-2` (단일+마스크) | — (미지원, `NotImplementedError`) | `grok-imagine-image`, `grok-imagine-image-pro` (xAI 자체 `/v1/images/edits` 엔드포인트) | — (미지원, `NotImplementedError`) |
 
 - Claude 는 Messages API (`tools=[{name, description, input_schema}]`), Nova 는 Converse API (`toolConfig`) 로 자동 분기됩니다.
 - xAI 는 OpenAI wire 호환이라 OpenAI Python SDK 에 `base_url="https://api.x.ai/v1"` 만 swap 해서 호출합니다. 별도 `XAIProvider` 클래스로 분리되어 있습니다.
+- Upstage 도 OpenAI wire 호환(`base_url="https://api.upstage.ai/v1"`)이며 **텍스트 전용**입니다. `LLM_PROVIDER=upstage` 사용 시 `IMAGE_PROVIDER` 를 `openai`/`xai`/`bedrock` 중 하나로 명시하세요.
 - Bedrock 최신 모델은 `us./eu./apac./global.` inference-profile prefix 가 붙은 ID 로만 호출됩니다. `BedrockProvider` 가 자동 인식합니다.
 
 ## 로컬 개발
@@ -215,7 +219,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 ### 2. GitHub 저장소 설정
 
 - **Secrets**: `AWS_ACCOUNT_ID`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `UPSTAGE_API_KEY`(Upstage 사용 시), `TAVILY_API_KEY`(선택). Slack 시크릿은 SSM Parameter Store 에 별도 등록 — CI 시크릿 아님.
-- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `MAX_IMAGE_BYTES`, `JINA_READER_BASE`, `SSM_PARAMS_PREFIX`, `SSM_CACHE_TTL_SECONDS`
+- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `IMAGE_MODEL_GPT`, `IMAGE_MODEL_XAI`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `ALLOWED_USER_IDS`, `ALLOWED_USER_MESSAGE`, `SYSTEM_MESSAGE`, `PERSONA_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`, `MAX_WEB_CHARS`, `MAX_WEB_BYTES`, `MAX_WEB_LINKS`, `MAX_IMAGE_BYTES`, `JINA_READER_BASE`, `SSM_PARAMS_PREFIX`, `SSM_CACHE_TTL_SECONDS`
 
 ### 3. 배포
 
@@ -247,7 +251,8 @@ src/
 ├── router.py                receiver path + worker path + per-app Bolt 캐시
 ├── handlers/
 │   ├── message.py           _process — app_mention/DM (allowlist, agent, streaming, history)
-│   └── reactions.py         _process_reaction + REACTION_HANDLERS dict + 핸들러 (현재 :x: → chat.delete)
+│   ├── reactions.py         _process_reaction + REACTION_HANDLERS dict + 핸들러 (:x: 삭제, :img-gpt:/:img-xai: 이미지 생성)
+│   └── commands.py          _process_command — /img-gpt·/img-xai slash command (명령별 고정 이미지 provider/model)
 ├── agent.py                 Agent 루프 (native function calling 반복)
 ├── credentials.py           SSM 기반 멀티테넌트 시크릿 캐시
 ├── app_metadata.py          app:{api_app_id} DDB 행 — 자동 등록 + per-app override
@@ -269,13 +274,13 @@ src/
 - **[CLAUDE.md](CLAUDE.md)** — AI agent(Claude Code)를 위한 invariant + 깨지기 쉬운 부분
 - **[docs/architecture.md](docs/architecture.md)** — 멀티테넌트 모델, receiver/worker split, dedup, streaming, LLM provider 설계 등 깊은 자료
 - **[docs/operations.md](docs/operations.md)** — `scripts/apps.py` 운영 CLI, ACL/persona 시나리오, 시크릿 로테이션, 트러블슈팅
-- **[docs/reactions.md](docs/reactions.md)** — `:x:` 권한 모델, 새 reaction 추가 방법, 필요한 Slack scope
+- **[docs/reactions.md](docs/reactions.md)** — `:x:` 권한 모델, `:img-gpt:`/`:img-xai:` 이미지 생성 reaction, 새 reaction 추가 방법, 필요한 Slack scope
 - **[docs/extending.md](docs/extending.md)** — 새 tool / LLM provider 추가 절차
 
 ## 아키텍처 요약
 
 ```
-┌────────────────┐  POST /slack/events
+┌────────────────┐  POST /slack/events · /slack/command
 │ Slack workspace│──────────────────┐
 └────────────────┘                  ▼
                 ┌────────────────────────────────────┐
@@ -291,6 +296,8 @@ src/
                 ┌────────────────────────────────────┐
                 │ Lambda async self-invoke           │
                 │ src.router._process_worker         │
+                │   ├─ kind == command?              │
+                │   │   → handlers.commands          │
                 │   ├─ event.type == reaction_added? │
                 │   │   → handlers.reactions         │
                 │   └─ otherwise                     │

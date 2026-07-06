@@ -21,6 +21,8 @@
                 ┌──────────────────────────────────────┐
                 │ Lambda async self-invoke             │
                 │ src.router._process_worker           │
+                │   ├─ kind == command?                │
+                │   │   → handlers.commands            │
                 │   ├─ event.type == reaction_added?   │
                 │   │   → handlers.reactions           │
                 │   └─ otherwise                       │
@@ -30,7 +32,7 @@
                 ▼              ▼
         ┌────────────┐   ┌─────────────────────────────┐
         │ DynamoDB   │   │ src.agent.SlackMentionAgent │
-        │ (3 prefix) │   │  ├─ LLM.chat(tools=spec)    │
+        │ (5 prefix) │   │  ├─ LLM.chat(tools=spec)    │
         │            │   │  ├─ ToolExecutor.execute    │
         │            │   │  └─ loop ≤ AGENT_MAX_STEPS  │
         └────────────┘   └─────────────────────────────┘
@@ -54,9 +56,10 @@
 | `src/runtime.py` | 프로세스 단위 싱글톤 (LLM·DDB·SSM·Lambda 클라이언트, Bolt 앱 캐시, bot user_id 캐시) + lazy accessors + `settings` + `logger`. Lambda 웜 컨테이너에서 모든 요청이 재사용. |
 | `src/router.py` | Receiver path(parse → resolve creds → Bolt) + worker path(`_process_worker`가 event 타입에 따라 분기) + per-app Bolt 앱 캐시. |
 | `src/handlers/message.py` | `app_mention` + DM `message` 이벤트 처리. allowlist + per-app override + agent 실행 + streaming + history 저장. |
-| `src/handlers/reactions.py` | `_process_reaction` dispatcher + `REACTION_HANDLERS` dict + 개별 reaction handler (현재 `:x:` → `chat.delete`). |
+| `src/handlers/reactions.py` | `_process_reaction` dispatcher + `REACTION_HANDLERS` dict + 개별 reaction handler (`:x:` → `chat.delete`, `:img-gpt:`/`:img-xai:` → 이미지 생성). |
+| `src/handlers/commands.py` | `/img-gpt`·`/img-xai` slash command worker. 명령별 고정 이미지 provider/model(`IMAGE_MODEL_GPT`/`IMAGE_MODEL_XAI`)로 `generate_image` + `files_upload_v2`. 오류는 `response_url` ephemeral. |
 | `src/agent.py` | Native function calling 기반 agent 루프. 4-phase 파이프라인(질문 → 의도·계획 → 툴 사용 → 응답)의 핵심. |
-| `src/llms/` | LLM provider 패키지. Protocol + OpenAI/xAI/Bedrock 구현. |
+| `src/llms/` | LLM provider 패키지. Protocol + OpenAI/xAI/Bedrock/Upstage 구현. |
 | `src/tools/` | Tool 패키지. `@tool` 데코레이터로 self-register. |
 | `src/credentials.py` | SSM Parameter Store 기반 멀티테넌트 credentials 캐시 (positive + negative). |
 | `src/app_metadata.py` | `app:{api_app_id}` DynamoDB 행 — 자동 등록되는 앱 레지스트리 + per-app override 저장. |
@@ -67,7 +70,7 @@
 
 ### Cross-module 호출 규약 (load-bearing)
 
-`src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py`는 공유 상태를 다음 패턴으로만 접근합니다:
+`src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py`, `src/handlers/commands.py`는 공유 상태를 다음 패턴으로만 접근합니다:
 
 ```python
 # ✅ 모듈 객체 import + 속성 접근 (late binding)
@@ -81,7 +84,7 @@ def some_handler(...):
     dedup = _get_dedup()  # 테스트의 patch가 안 보임
 ```
 
-이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding합니다. 이후 누군가가 `monkeypatch.setattr(src.runtime, "Y", fake)`를 해도, 이미 caller가 들고 있는 reference는 바뀌지 않습니다. 모듈 객체를 import한 뒤 속성으로 접근하면 매 호출마다 속성 lookup이 일어나 patch가 즉시 반영됩니다. 테스트 420개의 절반 정도가 이 패턴에 의존합니다.
+이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding합니다. 이후 누군가가 `monkeypatch.setattr(src.runtime, "Y", fake)`를 해도, 이미 caller가 들고 있는 reference는 바뀌지 않습니다. 모듈 객체를 import한 뒤 속성으로 접근하면 매 호출마다 속성 lookup이 일어나 patch가 즉시 반영됩니다. 테스트 스위트의 절반 정도가 이 패턴에 의존합니다.
 
 ## 멀티테넌트 credential resolution
 
@@ -126,9 +129,9 @@ API Gateway HTTP 통합은 응답 30초 제한이 있습니다. 하지만 LLM �
 ### Receiver path (HTTP)
 
 1. `lambda_handler` — `X-Slack-Retry-Num` 헤더 있으면 200 OK 즉시 반환 (Slack 재시도 흡수)
-2. `router._route_request` — body parse → `api_app_id` → SSM credentials → 캐시된 Bolt App
-3. Bolt — 시그니처 검증 → 등록된 핸들러(`_on_mention`, `_on_message`, `_on_reaction_added`) 디스패치
-4. 핸들러 — `ack()` → `router._enqueue_worker(event, ...)` → 즉시 return
+2. `router._route_request` — path가 `/slack/command`로 끝나면 `_route_command`(form-urlencoded body에서 `api_app_id`만 추출), 아니면 JSON body parse → `api_app_id` → SSM credentials → 캐시된 Bolt App
+3. Bolt — 시그니처 검증 → 등록된 핸들러(`_on_mention`, `_on_message`, `_on_reaction_added`, `@app.command` 핸들러) 디스패치
+4. 핸들러 — `ack()` → `router._enqueue_worker(event, ...)` (slash command는 `_enqueue_command_worker`) → 즉시 return
 
 전체 receiver 경로는 보통 수백 ms.
 
@@ -138,9 +141,10 @@ API Gateway HTTP 통합은 응답 30초 제한이 있습니다. 하지만 LLM �
 
 **시크릿은 페이로드에 절대 넣지 않습니다.** Lambda invoke payload는 CloudTrail 등 다양한 곳에 노출될 수 있으므로 `api_app_id`만 운반하고 worker가 다시 SSM에서 시크릿을 조회합니다.
 
-`lambda_handler`는 `event["_worker"] is True`를 보고 worker 경로로 진입 → `router._process_worker` 호출 → `event["type"]`에 따라:
+`lambda_handler`는 `event["_worker"] is True`를 보고 worker 경로로 진입 → `router._process_worker` 호출 → payload에 따라:
 
-- `reaction_added` → `handlers.reactions._process_reaction(...)`
+- `kind == "command"` → `handlers.commands._process_command(...)` (slash command — payload는 `{"_worker": True, "kind": "command", "command_payload": {...}, "api_app_id": ...}`)
+- `event["type"] == "reaction_added"` → `handlers.reactions._process_reaction(...)`
 - 그 외 → `handlers.message._process(...)`
 
 Worker는 Lambda의 300초 budget(`serverless.yml: timeout: 300`)을 모두 씁니다. 도구 timeout (예: `generate_image` 240초)는 compose + upload + history-save가 남은 budget에 들어가도록 잡혀 있습니다.
@@ -150,6 +154,16 @@ Worker는 Lambda의 300초 budget(`serverless.yml: timeout: 300`)을 모두 씁�
 `AWS_LAMBDA_FUNCTION_NAME` env가 없는 *로컬/테스트* 환경에서는 `_enqueue_worker`가 `_process_worker`를 inline 실행합니다 — receiver/worker 경계가 없는 단일 프로세스라 안전.
 
 Lambda 환경에서 `lambda.invoke`가 raise하면 inline 실행을 *하지 않습니다*. receiver는 API Gateway 30s + Slack ack 3s 윈도우 안에 있고 inline agent run은 둘 다 초과해 retry 폭주를 유발하기 때문입니다. 대신 best-effort `chat_postMessage`로 "잠시 후 다시 시도" 안내를 보내고 drop. 운영자가 IAM/throttle/네트워크 등 invoke 실패 원인을 해결해야 합니다 (CloudWatch에 traceback 기록).
+
+### Slash command 경로 (`/img-gpt`, `/img-xai`)
+
+Slash command는 `application/x-www-form-urlencoded`로 별도 엔드포인트 `/slack/command`에 도착합니다. `_route_command`가 body에서 `api_app_id`만 추출(원본 body는 Bolt 시그니처 검증을 위해 유지)하고, `@app.command(...)` 핸들러가 `ack()` 후 `_enqueue_command_worker`로 위임합니다. Worker(`handlers.commands._process_command`)는:
+
+- `_COMMAND_TO_IMAGE` 매핑으로 명령별 고정 provider/model 결정 (`/img-gpt` → OpenAI + `IMAGE_MODEL_GPT`, `/img-xai` → xAI + `IMAGE_MODEL_XAI`) — 배포 기본값 `IMAGE_PROVIDER`/`IMAGE_MODEL` 우회
+- `trigger_id` 기반 두 단계 dedup (`dedup:cmd:{trigger_id}`) — 생성/업로드 실패 시 `mark_done`을 생략해 Lambda async retry가 재시도 가능
+- 오류는 `response_url`로 ephemeral 응답 (호출자에게만 보임)
+
+invoke 실패 시에도 inline 실행하지 않고 `response_url` ephemeral 안내 후 drop — `_enqueue_worker`와 같은 trade-off.
 
 ## DynamoDB — 단일 테이블, 다섯 prefix
 
@@ -179,7 +193,7 @@ DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시�
 - **`dedup:` (5분)** — *in-flight 보호*. 무거운 도구(`generate_image`/`edit_image`, 240s)가 실행 중인 동안에는 같은 payload의 동시 재전달을 차단합니다. TTL이 Lambda timeout과 같으므로 워커가 강제 종료된 직후엔 row가 만료되어 다음 async retry가 새 in-flight 슬롯을 잡을 수 있습니다.
 - **`done:` (1시간)** — *영구 idempotency*. 정상 종료된 요청에 대해 한 시간 동안 모든 retry를 차단합니다.
 
-Reaction은 별도 키 형태: `dedup:reaction:{event_ts}:{reactor}` / `done:reaction:...`. 같은 두 단계 패턴.
+Reaction은 별도 키 형태: `dedup:reaction:{event_ts}:{reactor}` / `done:reaction:...`. Slash command는 `dedup:cmd:{trigger_id}` (생성 실패 시 `mark_done` 생략 — retry가 재시도 가능). 모두 같은 두 단계 패턴.
 
 ### GSI: `user-index`
 
@@ -270,10 +284,11 @@ LLM이 한 turn에 emit한 독립 `tool_calls`는 `ToolExecutor.execute_many`로
 
 ## LLM provider families
 
-`LLMProvider` Protocol은 `chat`, `stream_chat`, `describe_image`, `generate_image`, `edit_image` 다섯 메서드. 세 구현:
+`LLMProvider` Protocol은 `chat`, `stream_chat`, `describe_image`, `generate_image`, `edit_image` 다섯 메서드. 네 구현:
 
 - **`OpenAIProvider`**: 기본 OpenAI 엔드포인트. `_token_params`가 모델군에 따라 `max_tokens`(legacy chat) vs `max_completion_tokens`(gpt-5/o1/o3/o4 reasoning) 자동 선택.
 - **`XAIProvider`**: `base_url="https://api.x.ai/v1"`, 명시적 `api_key`. OpenAI wire 호환이라 `_OpenAICompatProvider` 공유. Grok chat은 legacy `max_tokens + temperature` 조합 사용. 이미지 생성은 `size` 대신 `aspect_ratio`/`resolution`, 항상 `response_format="b64_json"`. **이미지 편집은 OpenAI SDK `images.edit()`가 미지원**(xAI 공식 문서 명시)이라 `urllib`로 `/v1/images/edits` 에 raw JSON POST — `image: {url, type}` 블록(단일은 객체, 다중은 배열).
+- **`UpstageProvider`**: `base_url="https://api.upstage.ai/v1"`. OpenAI wire 호환이라 xAI처럼 `_OpenAICompatProvider` 공유 — Solar chat 모델은 legacy `max_tokens + temperature` 그대로 사용. **텍스트 전용** — `generate_image`/`edit_image`는 `NotImplementedError` raise. `IMAGE_PROVIDER`가 `LLM_PROVIDER`로 fallback하므로 `LLM_PROVIDER=upstage`에 `IMAGE_PROVIDER` 미지정이면 이미지 요청이 opaque한 API 에러 대신 명확한 메시지로 거부됩니다.
 - **`BedrockProvider`**: 모델 family prefix로 내부 라우팅. Bedrock 직접 ID와 `us./eu./apac./global.` inference-profile variant 둘 다 인식.
   - `anthropic.claude*` → `invoke_model` + Messages API
   - `amazon.nova*` → `converse`/`converse_stream` + `toolConfig`
@@ -376,9 +391,9 @@ Enum/int 검증은 조용히 fallback + 경고:
 
 ## Reaction 처리
 
-별도 문서 [docs/reactions.md](reactions.md) 참조 — `:x:` 권한 모델, 필요한 Slack scope, 새 reaction handler 추가 절차.
+별도 문서 [docs/reactions.md](reactions.md) 참조 — `:x:` 권한 모델, 이미지 생성 reaction(`:img-gpt:`/`:img-xai:`), 필요한 Slack scope, 새 reaction handler 추가 절차.
 
-원 질문자 lookup이 두 단계인 이유: Slack의 `conversations.replies`는 thread *parent* ts만 valid key로 받습니다. 봇은 항상 thread reply로 답하므로 reaction이 달린 ts는 thread reply의 ts입니다. 따라서 먼저 `conversations.history(latest=msg_ts, oldest=msg_ts)`로 봇 메시지의 `thread_ts` 필드(parent ts)를 알아낸 다음 `conversations.replies(ts=parent_ts, limit=1)`로 parent message의 user를 가져옵니다.
+대상 메시지·스레드 resolution은 공통 헬퍼 `_lookup_reacted_message`가 담당합니다. Slack의 `conversations.replies`를 *reply* ts로 호출하면 전체 스레드가 아니라 그 reply 하나만(자신의 `thread_ts` 포함) 반환됩니다. 그래서: ① 1차 `conversations.replies(ts=대상ts)` (실패 시 `conversations.history(latest=ts, inclusive, limit=1)` fallback — 반환 ts가 정확히 일치할 때만 수용) → ② 대상 메시지의 `thread_ts`가 자기 ts와 다르면(스레드 reply) `conversations.replies(ts=thread_ts)`로 root 기준 재조회. 최종 `thread[0]`이 스레드 root이고 그 `user`가 원 질문자입니다.
 
 ## 미구현 / Phase 2+
 

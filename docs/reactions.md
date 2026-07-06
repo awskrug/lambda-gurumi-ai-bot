@@ -1,10 +1,14 @@
 # Reactions
 
-봇이 작성한 메시지에 특정 이모지로 반응하면 봇이 자기 메시지에 동작을 수행할 수 있습니다. 현재 구현된 reaction:
+메시지에 특정 이모지로 반응하면 봇이 동작을 수행합니다. 현재 구현된 reaction:
 
-| 이모지 | 동작 | 권한 |
-|--------|------|------|
-| `:x:` | 봇 메시지 삭제 (`chat.delete`) | 원 질문자 OR `ALLOWED_USER_IDS` 유저 |
+| 이모지 | 동작 | 대상 | 권한 |
+|--------|------|------|------|
+| `:x:` | 봇 메시지 삭제 (`chat.delete`) | 봇이 작성한 메시지만 | 원 질문자 OR `ALLOWED_USER_IDS` 유저 |
+| `:img-gpt:` | 메시지 텍스트를 프롬프트로 이미지 생성 (OpenAI + `IMAGE_MODEL_GPT`) 후 스레드에 업로드 | 텍스트가 있는 아무 메시지 | 없음 — react 가능한 누구나 |
+| `:img-xai:` | 위와 동일, xAI + `IMAGE_MODEL_XAI` | 텍스트가 있는 아무 메시지 | 없음 — react 가능한 누구나 |
+
+`img-gpt` / `img-xai` 는 표준 이모지가 아니므로 워크스페이스에 **custom emoji** 로 등록되어 있어야 합니다.
 
 ## 동작 흐름
 
@@ -35,10 +39,10 @@ Receiver의 pre-filter와 worker의 dispatch가 **같은 `REACTION_HANDLERS` dic
 
 봇 메시지에 `:x:` reaction이 달렸을 때 다음 두 조건 중 하나라도 만족하면 메시지가 삭제됩니다:
 
-1. **원 질문자**: 봇이 답한 thread를 시작한 사용자. 두 단계 lookup으로 결정:
-   - `conversations.history(latest=msg_ts, oldest=msg_ts, inclusive=True, limit=1)` → 봇 메시지를 가져와 그 `thread_ts` 필드(원 질문 ts)를 추출
-   - `conversations.replies(ts=parent_ts, limit=1)` → thread root parent 메시지의 `user`가 원 질문자
-   - 한 번의 `conversations.replies(ts=봇답변ts)` 호출로는 안 됨 — Slack은 thread reply의 ts를 valid lookup key로 인정하지 않아 빈 결과를 반환합니다.
+1. **원 질문자**: 봇이 답한 thread를 시작한 사용자. 공통 헬퍼 `_lookup_reacted_message`가 결정:
+   - 1차 `conversations.replies(ts=봇답변ts)` — Slack은 *reply* ts로 호출하면 전체 스레드가 아니라 그 reply 하나만(`thread_ts` 포함) 반환합니다. 실패 시 `conversations.history(latest=ts, inclusive=True, limit=1)` fallback (반환 ts가 정확히 일치할 때만 수용 — 아니면 무관한 인접 메시지일 수 있음).
+   - 대상 메시지의 `thread_ts`가 자기 ts와 다르면(스레드 reply) `conversations.replies(ts=thread_ts)`로 스레드 root 기준 재조회.
+   - 최종 `thread[0]`(스레드 root)의 `user`가 원 질문자.
 2. **`ALLOWED_USER_IDS`에 있는 유저**: per-app override → 글로벌 env var 순서로 resolve.
 
 ### 두 조건의 OR
@@ -55,9 +59,9 @@ receiver pre-filter가 `REACTION_HANDLERS` 키와 비교 → 등록되지 않은
 
 `item_user`가 payload에서 누락된 경우(드물지만)에는 체크를 건너뛰고 `chat.delete` 자체가 enforce하게 둡니다.
 
-### `conversations.history` / `conversations.replies` 실패 시
+### `conversations.replies` / `conversations.history` 실패 시
 
-두 단계 lookup 중 어느 쪽이든 실패해도(missing scope, network) `ALLOWED_USER_IDS` 체크는 그대로 진행됩니다. 즉:
+lookup이 전부 실패해도(missing scope, network) `ALLOWED_USER_IDS` 체크는 그대로 진행됩니다. 즉:
 
 - ops user는 영향 없음
 - 일반 유저는 자기 질문에 대한 답변도 지울 수 없게 됨 (fail-closed)
@@ -77,6 +81,15 @@ receiver pre-filter가 `REACTION_HANDLERS` 키와 비교 → 등록되지 않은
 
 권한 없는 reactor는 **아무 응답도 받지 않습니다** — 차단 메시지를 보내지 않습니다. 봇의 존재나 reaction-delete 기능을 외부에 노출하지 않기 위함. 운영자는 `reaction.unauthorized` 로그로 모니터링.
 
+## 이미지 생성 reaction (`:img-gpt:` / `:img-xai:`)
+
+메시지에 `:img-gpt:` 또는 `:img-xai:` reaction을 달면 그 메시지의 **텍스트를 프롬프트로** 이미지를 생성해 스레드에 업로드합니다 (`files_upload_v2`, `initial_comment`에 `:{reaction}: {프롬프트 앞 200자}`).
+
+- **Provider/model 매핑은 slash command와 동일**: `img-gpt` → OpenAI + `IMAGE_MODEL_GPT`, `img-xai` → xAI + `IMAGE_MODEL_XAI` (`_REACTION_TO_IMAGE`가 `handlers.commands._COMMAND_TO_IMAGE`를 미러링). 배포 기본값 `IMAGE_PROVIDER`/`IMAGE_MODEL`은 우회합니다.
+- **권한 체크 없음**: `:x:`와 달리 봇 메시지 여부·원 질문자·`ALLOWED_USER_IDS`를 확인하지 않습니다 — react할 수 있는 누구나 트리거 가능. 이미지 생성은 파괴적 동작이 아니기 때문.
+- **오류는 reactor에게만**: 대상 메시지를 못 읽거나 텍스트가 없거나 생성이 실패하면 `chat.postEphemeral`(스레드에 붙여서)로 reactor에게만 알립니다 — reaction에는 `response_url`이 없고, 실패를 채널 공개 메시지로 올리면 대화를 오염시키기 때문.
+- **Custom emoji 필요**: `img-gpt`/`img-xai`는 워크스페이스 custom emoji로 등록되어 있어야 reaction 자체가 가능합니다.
+
 ## Slack 앱 설정 — 필요한 권한
 
 reaction 기능을 켜려면 Slack 앱 콘솔에서 추가 설정이 필요합니다.
@@ -90,6 +103,7 @@ reaction 기능을 켜려면 Slack 앱 콘솔에서 추가 설정이 필요합�
 - **`groups:history`** — private 채널에서 동작 시
 - **`im:history`** — DM에서 동작 시 (봇과의 1:1 DM은 보통 적용 안 됨)
 - **`mpim:history`** — multi-person IM에서 동작 시
+- **`files:write`** — 이미지 생성 reaction(`:img-gpt:`/`:img-xai:`) 사용 시. `files_upload_v2` 업로드용
 
 `*:history` scope는 `conversations.replies`로 thread parent를 조회하기 위함. 봇이 동작하는 채널 종류에 맞게 하나 이상 추가하세요.
 

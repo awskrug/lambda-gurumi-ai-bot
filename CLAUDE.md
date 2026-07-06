@@ -19,6 +19,8 @@
 3. **Tool orchestration은 agent 루프 안에서.** `src/handlers/message.py`는 Slack 관련만(placeholder, streaming, history). `src/agent.py`가 루프를 owns. 의도 탐지를 agent 밖으로 빼지 마세요.
 4. **속도 문제는 streaming/infrastructure 문제.** 파이프라인 단축이 아니라 async invocation, 모델 선택, streaming UX로 해결.
 
+**예외 — 명시적 이미지 생성 surface**: `/img-gpt`·`/img-xai` slash command 와 `:img-gpt:`/`:img-xai:` reaction 은 사용자가 *명시적으로* 이미지 생성을 지시하는 인터페이스라 agent 파이프라인을 타지 않고 `handlers.commands`/`handlers.reactions` 가 `generate_image` 를 직접 호출합니다. 이건 키워드 휴리스틱이 아닙니다 — 자연어 메시지 경로(멘션·DM)는 여전히 위 4단계 전 과정을 통과해야 합니다.
+
 ## 모듈 layout
 
 `app.py`는 Lambda entrypoint(`serverless.yml: handler: app.lambda_handler`)만. 진짜 로직은 `src/`:
@@ -28,7 +30,8 @@ app.py                       ← lambda_handler — _worker / receiver / X-Slack
 src/runtime.py               ← 싱글톤 (DDB/SSM/Lambda 클라이언트, Bolt 캐시, bot_user_id, MemoryStore) + accessors + settings + logger
 src/router.py                ← receiver path + worker path + per-app Bolt 캐시
 src/handlers/message.py      ← _process — app_mention/DM 처리 (allowlist, mention pre-warm, memory load, agent, streaming)
-src/handlers/reactions.py    ← _process_reaction + REACTION_HANDLERS dict + 핸들러 (현재 :x: → chat.delete)
+src/handlers/reactions.py    ← _process_reaction + REACTION_HANDLERS dict + 핸들러 (:x: → chat.delete, :img-gpt:/:img-xai: → 이미지 생성)
+src/handlers/commands.py     ← _process_command — /img-gpt·/img-xai slash command (명령별 고정 이미지 provider/model)
 src/dedup.py                 ← DedupStore(reserve/is_done/mark_done) + ConversationStore + truncate
 src/memory.py                ← MemoryStore — mem:{user_id} 행 (사용자별 영속 메모리, TTL 없음)
 src/tools/memory.py          ← remember / forget — system prompt에 자동 주입되는 사용자 메모리 도구
@@ -40,7 +43,7 @@ src/tools/memory.py          ← remember / forget — system prompt에 자동 �
 
 ## Cross-module 호출 규약 — load-bearing
 
-`src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py` 안에서 공유 상태 접근은 **모듈 객체 import + 속성 lookup** 패턴으로만:
+`src/router.py`, `src/handlers/message.py`, `src/handlers/reactions.py`, `src/handlers/commands.py` 안에서 공유 상태 접근은 **모듈 객체 import + 속성 lookup** 패턴으로만:
 
 ```python
 # ✅ Late binding — monkeypatch가 동작
@@ -54,9 +57,9 @@ def some_handler(...):
     dedup = _get_dedup()  # 테스트 patch가 안 보임
 ```
 
-이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding. 이후 `monkeypatch.setattr(src.runtime, "Y", fake)`가 실행돼도 caller가 들고 있는 reference는 옛 객체. 테스트 420개의 절반 이상이 이 패턴에 의존합니다.
+이유: `from X import Y`는 import 시점에 `Y` 객체를 자기 namespace에 binding. 이후 `monkeypatch.setattr(src.runtime, "Y", fake)`가 실행돼도 caller가 들고 있는 reference는 옛 객체. 테스트 스위트의 절반 이상이 이 패턴에 의존합니다.
 
-테스트도 같은 규칙 — `_runtime`, `_router`, `_message`, `_reactions` 모듈 객체에 patch.
+테스트도 같은 규칙 — `_runtime`, `_router`, `_message`, `_reactions`, `_commands` 모듈 객체에 patch.
 
 ## 코드 변경 시 깨지기 쉬운 것들
 
@@ -132,7 +135,7 @@ def some_handler(...):
 - DNS rebinding 한계 인지: `_validate_public_https_url`의 pre-flight `getaddrinfo`와 실제 TCP connect는 별개 lookup. Lambda는 VPC 밖이라 영향 제한적이지만 VPC/private-subnet egress 추가 시 재검토 필요.
 
 **Receiver/worker fallback**:
-- `_enqueue_worker`의 invoke 실패 분기에서 `_process_worker`를 inline 실행 → receiver는 API Gateway 30s + Slack ack 3s 윈도우만 있고 inline agent run은 둘 다 초과 → retry 폭주. inline은 `AWS_LAMBDA_FUNCTION_NAME` 미설정인 로컬/테스트 경로에서만. Lambda 환경 invoke 실패는 best-effort `chat_postMessage` 안내 후 drop.
+- `_enqueue_worker`의 invoke 실패 분기에서 `_process_worker`를 inline 실행 → receiver는 API Gateway 30s + Slack ack 3s 윈도우만 있고 inline agent run은 둘 다 초과 → retry 폭주. inline은 `AWS_LAMBDA_FUNCTION_NAME` 미설정인 로컬/테스트 경로에서만. Lambda 환경 invoke 실패는 best-effort `chat_postMessage` 안내 후 drop. slash command 경로(`_enqueue_command_worker`)도 동일 trade-off — 실패 시 `response_url` ephemeral 안내 후 drop.
 
 운영 정책에 가까운 것들(예: `scripts/apps.py delete`의 `app_id` 재입력 확인 약화)은 [docs/operations.md](docs/operations.md)에 정리되어 있습니다.
 
@@ -145,7 +148,8 @@ def some_handler(...):
 | `tests/test_app.py` | `app.lambda_handler` (worker/receiver/retry 분기) |
 | `tests/test_router.py` | `src.router` (receiver path, worker path, Bolt 캐시) |
 | `tests/test_handlers_message.py` | `src.handlers.message._process` |
-| `tests/test_handlers_reactions.py` | `src.handlers.reactions` (dispatcher + `:x:` 핸들러) |
+| `tests/test_handlers_reactions.py` | `src.handlers.reactions` (dispatcher + `:x:`/이미지 생성 핸들러) |
+| `tests/test_handlers_commands.py` | `src.handlers.commands._process_command` (slash command worker) |
 | `tests/llms/`, `tests/tools/` | provider/tool 단위 테스트 |
 | `tests/_helpers.py` | 공유 픽스처 (`_FakeCreds`, `_FakeDedup`, `_NullMetadata`) |
 | `tests/tools/_helpers.py` | tool 테스트 공유 픽스처 (`_ctx`, `_settings`, `_streamed_read`) |

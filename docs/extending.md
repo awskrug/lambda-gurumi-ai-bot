@@ -140,7 +140,8 @@ from src.llms.openai_wire import _OpenAICompatProvider
 
 class MistralProvider(_OpenAICompatProvider):
     """Mistral 의 chat completions API 는 OpenAI wire 와 호환되므로
-    `_OpenAICompatProvider` 를 재사용합니다 (xAI 와 같은 패턴).
+    `_OpenAICompatProvider` 를 재사용합니다 (xAI · Upstage 와 같은 패턴 —
+    실제 예시는 `src/llms/upstage.py` 참고).
 
     `_OpenAICompatProvider.__init__(model, image_model, api_key)` 를 그대로
     쓰고, `BASE_URL` · `API_KEY_ENV_VAR` 클래스 속성으로 엔드포인트와 키 환경
@@ -179,6 +180,8 @@ def get_llm(
             return BedrockProvider(model=model, image_model=image_model, region=region)
         if p == "xai":
             return XAIProvider(model=model, image_model=image_model, api_key=api_keys.get("xai"))
+        if p == "upstage":
+            return UpstageProvider(model=model, image_model=image_model, api_key=api_keys.get("upstage"))
         if p == "mistral":   # ← 추가
             return MistralProvider(model=model, image_model=image_model, api_key=api_keys.get("mistral"))
         return OpenAIProvider(model=model, image_model=image_model)
@@ -214,7 +217,7 @@ class Settings:
 같은 파일의 enum 상수에 `"mistral"` 을 추가합니다. 그래야 `LLM_PROVIDER=mistral` 이 enum 검증을 통과합니다.
 
 ```python
-_VALID_PROVIDERS = {"openai", "bedrock", "xai", "mistral"}
+_VALID_PROVIDERS = {"openai", "bedrock", "xai", "upstage", "mistral"}
 ```
 
 ### 5. `get_llm` 호출부 업데이트
@@ -229,7 +232,7 @@ llm = get_llm(
     image_provider=settings.image_provider,
     image_model=settings.image_model,
     region=settings.aws_region,
-    api_keys={"xai": settings.xai_api_key},
+    api_keys={"xai": settings.xai_api_key, "upstage": settings.upstage_api_key},
 )
 
 # ↓ Mistral 지원 추가 후
@@ -241,6 +244,7 @@ llm = get_llm(
     region=settings.aws_region,
     api_keys={
         "xai": settings.xai_api_key,
+        "upstage": settings.upstage_api_key,
         "mistral": settings.mistral_api_key,   # ← 추가
     },
 )
