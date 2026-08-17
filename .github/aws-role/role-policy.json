@@ -26,7 +26,7 @@
         "cloudformation:DeleteChangeSet",
         "cloudformation:DescribeChangeSet"
       ],
-      "Resource": "arn:aws:cloudformation:*:*:stack/lambda-gurumi-ai-bot-*"
+      "Resource": "arn:aws:cloudformation:*:*:stack/lambda-gurumi-bot-*"
     },
     {
       "Sid": "Lambda",
@@ -47,7 +47,7 @@
         "lambda:ListTags"
       ],
       "Resource": [
-        "arn:aws:lambda:*:*:function:lambda-gurumi-ai-bot-*"
+        "arn:aws:lambda:*:*:function:lambda-gurumi-bot-*"
       ]
     },
     {
@@ -65,7 +65,7 @@
         "iam:UntagRole",
         "iam:ListRoleTags"
       ],
-      "Resource": "arn:aws:iam::*:role/lambda-gurumi-ai-bot-*"
+      "Resource": "arn:aws:iam::*:role/lambda-gurumi-bot-*"
     },
     {
       "Sid": "S3",
@@ -89,10 +89,8 @@
         "s3:DeleteObject"
       ],
       "Resource": [
-        "arn:aws:s3:::lambda-gurumi-ai-bot-*",
-        "arn:aws:s3:::lambda-gurumi-ai-bot-*/*",
-        "arn:aws:s3:::gurumi-ai-bot-*",
-        "arn:aws:s3:::gurumi-ai-bot-*/*"
+        "arn:aws:s3:::lambda-gurumi-bot-*",
+        "arn:aws:s3:::lambda-gurumi-bot-*/*"
       ]
     },
     {
@@ -110,7 +108,7 @@
         "dynamodb:ListTagsOfResource"
       ],
       "Resource": [
-        "arn:aws:dynamodb:*:*:table/gurumi-ai-bot-*"
+        "arn:aws:dynamodb:*:*:table/lambda-gurumi-bot-*"
       ]
     },
     {
@@ -121,11 +119,16 @@
         "apigateway:POST",
         "apigateway:PUT",
         "apigateway:PATCH",
-        "apigateway:DELETE"
+        "apigateway:DELETE",
+        "apigateway:UpdateRestApiPolicy",
+        "apigateway:GetRestApiPolicy",
+        "apigateway:DeleteRestApiPolicy"
       ],
       "Resource": [
         "arn:aws:apigateway:*::/restapis",
-        "arn:aws:apigateway:*::/restapis/*"
+        "arn:aws:apigateway:*::/restapis/*",
+        "arn:aws:apigateway:*::/tags",
+        "arn:aws:apigateway:*::/tags/*"
       ]
     },
     {
@@ -141,7 +144,7 @@
         "logs:UntagResource",
         "logs:ListTagsForResource"
       ],
-      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/lambda-gurumi-ai-bot-*"
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/lambda-gurumi-bot-*"
     },
     {
       "Sid": "S3Vectors",
@@ -160,8 +163,8 @@
         "s3vectors:ListTagsForResource"
       ],
       "Resource": [
-        "arn:aws:s3vectors:*:*:bucket/gurumi-ai-bot-*",
-        "arn:aws:s3vectors:*:*:bucket/gurumi-ai-bot-*/index/*"
+        "arn:aws:s3vectors:*:*:bucket/lambda-gurumi-bot-*",
+        "arn:aws:s3vectors:*:*:bucket/lambda-gurumi-bot-*/index/*"
       ]
     },
     {

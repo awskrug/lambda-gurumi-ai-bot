@@ -7,8 +7,8 @@ on:
 
 env:
   AWS_REGION: "us-east-1"
-  AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
-  STACK_NAME: "lambda-gurumi-ai-bot-dev"
+  AWS_ROLE_NAME: "lambda-gurumi-bot"
+  STACK_NAME: "lambda-gurumi-bot-dev"
 
   ENABLE_SYNC_AWSDOCS: ${{ vars.ENABLE_SYNC_AWSDOCS }}
 
@@ -25,19 +25,19 @@ jobs:
 
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Install qpdf
+      - name: Install qpdf 📄
         run: sudo apt-get install -y qpdf
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC) 🔑
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE_NAME }}"
           role-session-name: github-actions-sync-awsdocs
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get stack outputs
+      - name: Get stack outputs 📝
         id: stack
         run: |
           BUCKET=$(aws cloudformation describe-stack-resource \
@@ -59,10 +59,10 @@ jobs:
             --output text)
           echo "ds_id=${DS_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Sync AWS docs to S3
+      - name: Sync AWS docs to S3 📂
         run: ./scripts/awsdocs/sync.sh ${{ steps.stack.outputs.bucket }}
 
-      - name: Start Knowledge Base ingestion
+      - name: Start Knowledge Base ingestion 🚀
         run: |
           aws bedrock-agent start-ingestion-job \
             --knowledge-base-id ${{ steps.stack.outputs.kb_id }} \

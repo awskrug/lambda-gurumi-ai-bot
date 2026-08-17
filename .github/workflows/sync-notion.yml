@@ -7,8 +7,8 @@ on:
 
 env:
   AWS_REGION: "us-east-1"
-  AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
-  STACK_NAME: "lambda-gurumi-ai-bot-dev"
+  AWS_ROLE_NAME: "lambda-gurumi-bot"
+  STACK_NAME: "lambda-gurumi-bot-dev"
 
   ENABLE_SYNC_NOTION: ${{ vars.ENABLE_SYNC_NOTION }}
 
@@ -28,29 +28,29 @@ jobs:
 
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python 3.12 🐍
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install dependencies 📦
         run: pip install notion-exporter
 
-      - name: Export Notion pages to Markdown
+      - name: Export Notion pages to Markdown 📝
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
         run: python scripts/notion/export.py
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC) 🔑
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE_NAME }}"
           role-session-name: github-actions-sync-notion
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get S3 bucket name from CloudFormation
+      - name: Get S3 bucket name from CloudFormation 📝
         id: stack
         run: |
           BUCKET=$(aws cloudformation describe-stack-resource \
@@ -72,13 +72,13 @@ jobs:
             --output text)
           echo "ds_id=${DS_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Sync documents to S3
+      - name: Sync documents to S3 📂
         run: |
           aws s3 sync --delete \
             build/${{ env.NOTION_PAGE_NAME }}/ \
             s3://${{ steps.stack.outputs.bucket }}/documents/${{ env.NOTION_PAGE_NAME }}/
 
-      - name: Start Knowledge Base ingestion
+      - name: Start Knowledge Base ingestion 🚀
         run: |
           aws bedrock-agent start-ingestion-job \
             --knowledge-base-id ${{ steps.stack.outputs.kb_id }} \

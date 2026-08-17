@@ -1,0 +1,5 @@
+pytest>=8.0
+pytest-cov>=5.0
+moto[dynamodb]>=5.0
+responses>=0.25
+reportlab>=4.0,<5.0

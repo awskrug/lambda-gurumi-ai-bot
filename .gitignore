@@ -37,10 +37,13 @@ dist/
 
 # python
 venv
-*.pyc
 staticfiles
 db.sqlite3
-__pycache__
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.uploads/
 
 # node
 node_modules
@@ -51,7 +54,5 @@ node_modules
 
 # claude
 .claude/
-.prompt-*.md
 .prompt.md
-prompt-*.md
 prompt.md

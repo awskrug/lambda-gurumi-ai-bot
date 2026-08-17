@@ -2,107 +2,101 @@ name: Deploy to AWS Lambda
 
 on:
   push:
-    branches:
-      - main
-  repository_dispatch:
-    types:
-      - deploy
-  workflow_dispatch:
+    branches: [main]
+  workflow_dispatch: {}
+  repository_dispatch: {}
 
-env:
-  AWS_REGION: "us-east-1"
-  AWS_ROLE_NAME: "lambda-gurumi-ai-bot"
-
-  STAGE: "dev"
-
-  FOUNDATION_MODEL: ${{ vars.FOUNDATION_MODEL }}
-
-  ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
-  ALLOWED_CHANNEL_MESSAGE: ${{ vars.ALLOWED_CHANNEL_MESSAGE }}
-  BOT_CURSOR: ${{ vars.BOT_CURSOR }}
-  MAX_LEN_BEDROCK: ${{ vars.MAX_LEN_BEDROCK }}
-  MAX_LEN_SLACK: ${{ vars.MAX_LEN_SLACK }}
-  MAX_THROTTLE_COUNT: ${{ vars.MAX_THROTTLE_COUNT }}
-  PERSONAL_MESSAGE: ${{ vars.PERSONAL_MESSAGE }}
-  REACTION_EMOJIS: ${{ vars.REACTION_EMOJIS }}
-  SLACK_SAY_INTERVAL: ${{ vars.SLACK_SAY_INTERVAL }}
-  SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
-
-  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-  SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-  SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
-
-# Permission can be added at job level or workflow level
 permissions:
-  id-token: write   # This is required for requesting the JWT
-  contents: read    # This is required for actions/checkout
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-24.04
-
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Set up Python 🐍
+        uses: actions/setup-python@v6
         with:
-          fetch-depth: 0
+          python-version: "3.12"
 
-      - name: Setup Python 3.12 🐍
-        uses: actions/setup-python@v5
+      - name: Set up Node.js 🟢
+        uses: actions/setup-node@v5
         with:
-          python-version: '3.12'
+          node-version: "24"
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Install Python dependencies
-        run: npx serverless plugin install --name serverless-python-requirements
-
-      - name: Install dotenv plugin
-        run: npx serverless plugin install --name serverless-dotenv-plugin
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Set up environment variables 📝
+      - name: Install Python deps 📦
         run: |
-          echo "FOUNDATION_MODEL=${FOUNDATION_MODEL}" >> .env
-          echo "ALLOWED_CHANNEL_IDS=${ALLOWED_CHANNEL_IDS}" >> .env
-          echo "ALLOWED_CHANNEL_MESSAGE=${ALLOWED_CHANNEL_MESSAGE}" >> .env
-          echo "BOT_CURSOR=${BOT_CURSOR}" >> .env
-          echo "MAX_LEN_BEDROCK=${MAX_LEN_BEDROCK}" >> .env
-          echo "MAX_LEN_SLACK=${MAX_LEN_SLACK}" >> .env
-          echo "MAX_THROTTLE_COUNT=${MAX_THROTTLE_COUNT}" >> .env
-          echo "PERSONAL_MESSAGE=${PERSONAL_MESSAGE}" >> .env
-          echo "REACTION_EMOJIS=${REACTION_EMOJIS}" >> .env
-          echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> .env
-          echo "SLACK_SAY_INTERVAL=${SLACK_SAY_INTERVAL}" >> .env
-          echo "SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}" >> .env
-          echo "SYSTEM_MESSAGE=${SYSTEM_MESSAGE}" >> .env
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
-      - name: configure aws credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Run tests and check coverage ✅
+        run: pytest --cov=src --cov-report=term-missing
+
+      - name: Install Serverless + plugins 🛠️
+        run: |
+          npm install -g serverless@3
+          npm install serverless-python-requirements
+
+      - name: Configure AWS credentials (OIDC) 🔑
+        uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: "arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE_NAME }}"
-          role-session-name: github-actions-ci-bot
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-gurumi-bot
+          aws-region: us-east-1
 
       - name: Deploy to AWS Lambda 🚀
-        run: npx serverless deploy --stage ${{ env.STAGE }} --region ${{ env.AWS_REGION }}
-
-      - name: Update Bedrock Agent Alias 🔄
-        run: |
-          AGENT_ID=$(aws cloudformation describe-stacks \
-            --stack-name lambda-gurumi-ai-bot-${{ env.STAGE }} \
-            --query "Stacks[0].Outputs[?OutputKey=='AgentId'].OutputValue" \
-            --output text)
-          ALIAS_ID=$(aws cloudformation describe-stacks \
-            --stack-name lambda-gurumi-ai-bot-${{ env.STAGE }} \
-            --query "Stacks[0].Outputs[?OutputKey=='AgentAliasId'].OutputValue" \
-            --output text)
-
-          aws bedrock-agent update-agent-alias \
-            --agent-id "${AGENT_ID}" \
-            --agent-alias-id "${ALIAS_ID}" \
-            --agent-alias-name live \
-            --region ${{ env.AWS_REGION }}
+        env:
+          # --- multi-tenant Slack credentials live in SSM Parameter Store ---
+          # Per-app `signing_secret` + `bot_token` are provisioned ahead of
+          # time at {SSM_PARAMS_PREFIX}/{api_app_id}/... and resolved per
+          # request inside the Lambda. NO global SLACK_BOT_TOKEN /
+          # SLACK_SIGNING_SECRET CI secrets are needed.
+          SSM_PARAMS_PREFIX: ${{ vars.SSM_PARAMS_PREFIX || '/gurumi-bot/apps' }}
+          SSM_CACHE_TTL_SECONDS: ${{ vars.SSM_CACHE_TTL_SECONDS }}
+          # --- secrets: LLM provider keys ---
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # --- secrets: Web search ---
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          # --- vars: LLM / Image ---
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+          IMAGE_MODEL: ${{ vars.IMAGE_MODEL }}
+          IMAGE_PROVIDER: ${{ vars.IMAGE_PROVIDER }}
+          IMAGE_MODEL_GPT: ${{ vars.IMAGE_MODEL_GPT }}
+          IMAGE_MODEL_XAI: ${{ vars.IMAGE_MODEL_XAI }}
+          # --- vars: Agent behavior ---
+          AGENT_MAX_STEPS: ${{ vars.AGENT_MAX_STEPS }}
+          MAX_OUTPUT_TOKENS: ${{ vars.MAX_OUTPUT_TOKENS }}
+          RESPONSE_LANGUAGE: ${{ vars.RESPONSE_LANGUAGE }}
+          # --- vars: Slack UX ---
+          BOT_CURSOR: ${{ vars.BOT_CURSOR }}
+          MAX_LEN_SLACK: ${{ vars.MAX_LEN_SLACK }}
+          SYSTEM_MESSAGE: ${{ vars.SYSTEM_MESSAGE }}
+          PERSONA_MESSAGE: ${{ vars.PERSONA_MESSAGE }}
+          # --- vars: Access control / throttle ---
+          ALLOWED_CHANNEL_IDS: ${{ vars.ALLOWED_CHANNEL_IDS }}
+          ALLOWED_CHANNEL_MESSAGE: ${{ vars.ALLOWED_CHANNEL_MESSAGE }}
+          ALLOWED_USER_IDS: ${{ vars.ALLOWED_USER_IDS }}
+          ALLOWED_USER_MESSAGE: ${{ vars.ALLOWED_USER_MESSAGE }}
+          MAX_THROTTLE_COUNT: ${{ vars.MAX_THROTTLE_COUNT }}
+          # --- vars: Storage ---
+          MAX_HISTORY_CHARS: ${{ vars.MAX_HISTORY_CHARS }}
+          # --- vars: Observability ---
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          # --- vars: Document / time ---
+          DEFAULT_TIMEZONE: ${{ vars.DEFAULT_TIMEZONE }}
+          MAX_DOC_BYTES: ${{ vars.MAX_DOC_BYTES }}
+          MAX_DOC_CHARS: ${{ vars.MAX_DOC_CHARS }}
+          MAX_DOC_PAGES: ${{ vars.MAX_DOC_PAGES }}
+          # --- vars: Web fetch ---
+          JINA_READER_BASE: ${{ vars.JINA_READER_BASE }}
+          MAX_WEB_BYTES: ${{ vars.MAX_WEB_BYTES }}
+          MAX_WEB_CHARS: ${{ vars.MAX_WEB_CHARS }}
+          MAX_WEB_LINKS: ${{ vars.MAX_WEB_LINKS }}
+          # --- vars: External image attach ---
+          MAX_IMAGE_BYTES: ${{ vars.MAX_IMAGE_BYTES }}
+        run: npx serverless deploy --stage dev --region us-east-1
