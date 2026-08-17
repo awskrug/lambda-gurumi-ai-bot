@@ -124,14 +124,14 @@ def some_handler(...):
 
 **Slack 응답 처리**:
 - `LoggerAdapter.info(extra=…)`로 변경 → Python 3.12에서 `LoggerAdapter.process()`가 `extra`를 덮어씀. `log_event`는 `logger.logger`(underlying `Logger`)로 dispatch 유지.
-- `MessageFormatter` 분할 우선순위(코드펜스 → 문단 → 문장 → hard slice) 변경 → 코드블록이 잘리거나 문맥 없는 chunk
+- `MessageFormatter` 분할 우선순위(문단 `\n\n` → 코드펜스 균형 보정 → 문장 → 단일 `\n` → hard slice) 변경 → 코드블록이 잘리거나 문맥 없는 chunk
 
 **SSRF 가드**:
 - `_validate_public_https_url` 제거 (`fetch_webpage`) → RFC1918 / cloud metadata(`169.254.169.254`) fetch 가능
 - `fetch_webpage` raw fallback의 `_NoRedirectHandler` 제거 → 302가 사설 호스트로 우회
 - Slack file fetch의 `_http_get` helper(`_SlackRedirectHandler` 적용)를 직접 `urlopen` 또는 `_NoRedirectHandler` 기반 opener 로 교체 → Slack 이 `url_private_download` 에 대해 자주 발급하는 same-zone 302(signed CDN URL refresh)가 차단되거나, 반대로 3xx 가 봇 Authorization 헤더를 cross-host 로 leak. `_SlackRedirectHandler` 는 `SLACK_IMAGE_HOSTS` 내 redirect 만 허용하고 `SLACK_FILE_HOSTS` 밖으로 갈 때 Authorization 을 strip 함. `src/tools/slack.py`/`src/tools/image.py` 의 모든 Slack 다운로드는 `_http_get` 을 거쳐야 함.
 - Slack file fetch host allowlist(`SLACK_FILE_HOSTS`) 제거 → 봇 토큰으로 임의 URL fetch
-- `attach_image_from_url`의 magic bytes 검증(`_detect_image_mime`) 제거 → 악성 서버가 `Content-Type: image/png`로 HTML/SVG를 줘도 Slack에 업로드. PNG/JPEG/GIF/WEBP/BMP 시그니처 8바이트 검증 유지.
+- `attach_image_from_url`의 magic bytes 검증(`_detect_image_mime`) 제거 → 악성 서버가 `Content-Type: image/png`로 HTML/SVG를 줘도 Slack에 업로드. PNG/JPEG/GIF/WEBP/BMP 시그니처 검증(선두 최대 12바이트 — WEBP 는 `RIFF`+`WEBP` 판정에 12바이트 필요) 유지.
 - DNS rebinding 한계 인지: `_validate_public_https_url`의 pre-flight `getaddrinfo`와 실제 TCP connect는 별개 lookup. Lambda는 VPC 밖이라 영향 제한적이지만 VPC/private-subnet egress 추가 시 재검토 필요.
 
 **Receiver/worker fallback**:

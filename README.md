@@ -41,7 +41,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - 채널 allowlist + 유저당 동시 요청 **throttle**
   - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h) + **사용자별 영속 메모리**(TTL 없음, `remember`/`forget`)
   - 두 단계 **dedup**: in-flight 예약(`dedup:`, Lambda timeout과 일치한 5분) + 성공 후 영구 마커(`done:` 1h) — 워커 크래시 시 Lambda async retry 회복
-  - 긴 응답 **계층적 분할** (코드블록 → 문단 → 문장 → hard slice) + `MAX_LEN_SLACK` 기반 rolling 스트리밍
+  - 긴 응답 **계층적 분할** (문단 → 코드펜스 균형 보정 → 문장 → 단일 개행 → hard slice) + `MAX_LEN_SLACK` 기반 rolling 스트리밍
   - 첫 content delta 도착 시점에 placeholder 메시지 지연 posting — status UI와 중복 방지
   - 구조화 JSON 로깅 + request_id, 에러 메시지 sanitize
 
@@ -88,7 +88,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `TAVILY_API_KEY` | | — | 설정 시 Tavily 웹 검색 활성화 |
 | `LLM_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` / `upstage` |
 | `LLM_MODEL` | | `gpt-4o-mini` | 텍스트 모델 |
-| `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` (upstage 는 이미지 생성 미지원) |
+| `IMAGE_PROVIDER` | | `LLM_PROVIDER` 값 | `openai` / `bedrock` / `xai` (upstage 는 이미지 생성 미지원). 미지정 시 `LLM_PROVIDER` 를 따라감 — `serverless.yml` 은 배포 시 `openai` 로 채움 |
 | `IMAGE_MODEL` | | `gpt-image-1` | 이미지 모델 |
 | `IMAGE_MODEL_GPT` | | `gpt-image-1` | `/img-gpt` slash command · `:img-gpt:` reaction 이 쓰는 OpenAI 이미지 모델 (`IMAGE_PROVIDER`/`IMAGE_MODEL` 과 독립) |
 | `IMAGE_MODEL_XAI` | | `grok-imagine-image` | `/img-xai` slash command · `:img-xai:` reaction 이 쓰는 xAI 이미지 모델 |
@@ -97,9 +97,9 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `DYNAMODB_TABLE_NAME` | | `lambda-gurumi-bot-dev` | dedup / 대화 저장 테이블 |
 | `AWS_REGION` | | `us-east-1` | AWS 리전 |
 | `ALLOWED_CHANNEL_IDS` | | (empty) | **앱별 오버라이드 가능** (DynamoDB → `scripts/apps.py acl set`). 글로벌 fallback. 비어있으면 모든 채널 허용. **DM 은 채널 allowlist 대상이 아님** — allowlist 를 설정해도 DM 경로는 항상 허용 |
-| `ALLOWED_CHANNEL_MESSAGE` | | — | 비허용 채널 응답 메시지 (DM 에는 적용되지 않음). `{}` 가 있으면 *effective* allowlist 의 첫 채널을 `<#ID>` 멘션 형태로 치환 |
+| `ALLOWED_CHANNEL_MESSAGE` | | `질문은 {} 채널을 이용해 주세요~` | 비허용 채널 응답 메시지 (DM 에는 적용되지 않음). `{}` 가 있으면 *effective* allowlist 의 첫 채널을 `<#ID>` 멘션 형태로 치환. 빈 문자열이면 기본 문구로 폴백 |
 | `ALLOWED_USER_IDS` | | (empty) | **앱별 오버라이드 가능** (DynamoDB → `scripts/apps.py acl set`). 글로벌 fallback. 비어있으면 모든 유저 허용. **채널·DM 모든 경로에 적용** — DM 도 차단 |
-| `ALLOWED_USER_MESSAGE` | | — | 비허용 유저 응답 메시지. `{}` 가 있으면 *effective* allowlist 의 첫 유저를 `<@ID>` 멘션 형태로 치환 |
+| `ALLOWED_USER_MESSAGE` | | `허용된 유저만 응답합니다.` | **현재 어떤 경로에서도 사용되지 않음** — 유저 차단은 의도적으로 silent drop 이며 `user.blocked` 로그로만 관측된다 (`src/handlers/message.py`) |
 | `MAX_LEN_SLACK` | | `3000` | 메시지 분할 기준 (≥500). `.env.example` · `serverless.yml` 기본 `3000`, 미지정 시 `config.py` 폴백 `2000`. |
 | `MAX_OUTPUT_TOKENS` | | `4096` | LLM hop 당 출력 토큰 상한 (≥256) |
 | `MAX_THROTTLE_COUNT` | | `100` | 유저별 동시 요청 상한 |
@@ -146,16 +146,16 @@ python scripts/apps.py persona set A0123ABC --from-file persona.txt    # 멀티�
 python scripts/apps.py persona set A0123ABC ""                         # 명시적 페르소나 없음
 python scripts/apps.py persona unset A0123ABC
 
-# 앱 식별 (apps list NAME 컬럼)
+# 앱 식별 (apps list APP_INFO 컬럼)
 python scripts/apps.py refresh A0123ABC                                # auth.test 로 team/bot 갱신
 python scripts/apps.py name set A0123ABC "Production - Acme"           # 운영자 라벨 (최우선)
 python scripts/apps.py name unset A0123ABC                             # 자동 채워진 team/bot 으로 복귀
 # `apps set` 은 기본으로 auth.test 호출해서 즉시 team_name/bot_user_name 채움. --no-verify 로 스킵.
 ```
 
-차단 메시지(`ALLOWED_CHANNEL_MESSAGE` 등)의 `{}` 치환은 *effective* 리스트의
-첫 항목을 사용 — per-app 오버라이드가 적용된 앱은 자기 채널/유저로 안내됩니다.
-메시지 템플릿 자체는 글로벌로 유지.
+`ALLOWED_CHANNEL_MESSAGE` 의 `{}` 치환은 *effective* 채널 리스트의 첫 항목을
+사용 — per-app 오버라이드가 적용된 앱은 자기 채널로 안내됩니다. 메시지
+템플릿 자체는 글로벌로 유지. 유저 차단에는 응답 메시지가 없습니다 (silent drop).
 
 `SYSTEM_MESSAGE`는 운영 정책(보안·컴플라이언스)이라 일관성을 위해 **글로벌
 전용**입니다. per-app 오버라이드 없음.

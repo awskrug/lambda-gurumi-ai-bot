@@ -17,7 +17,8 @@ Slack API 콘솔 (https://api.slack.com/apps) 에서 새 앱을 만들고 다음
   - `files:read` — 첨부 파일 읽기 (`read_attached_images`/`read_attached_document`)
   - `files:write` — 이미지 업로드 (`generate_image`/`edit_image`/`attach_image_from_url` tool, `/img-gpt`·`/img-xai`, 이미지 생성 reaction)
   - `assistant:write` — 스레드 status 인디케이터
-  - **(reaction 기능 사용 시)** `reactions:read` + `channels:history` / `groups:history` / `im:history` / `mpim:history` (봇이 동작하는 채널 종류에 맞게)
+  - `channels:history` / `groups:history` / `im:history` / `mpim:history` — 봇이 동작하는 채널 종류에 맞게. **reaction 전용이 아니다**: core tool `fetch_thread_history` 가 `conversations.replies` 를 호출하므로 스레드 컨텍스트 조회에 필수
+  - **(reaction 기능 사용 시)** `reactions:read` — `reaction_added` 이벤트 수신
 - **Event Subscriptions**
   - Request URL: `https://{your-api-gateway}/slack/events`
   - Subscribe to bot events: `app_mention`, `message.im`, **(reaction 기능 사용 시)** `reaction_added`
@@ -61,8 +62,10 @@ SSM에 시크릿이 있는 상태에서 Slack 이벤트가 들어오면 봇이 �
 
 ```bash
 $ python scripts/apps.py list
-APP_ID         TEAM             BOT          NAME                       SSM    DDB    LAST_SEEN
-A0123ABCXYZ    Acme Corp        gurumi       (auto)                     ✓      ✓      2025-01-15T10:30Z
+APP_ID       KEYS             META  APP_INFO            LAST_SEEN
+-----------  ---------------  ----  ------------------  --------------------
+A0123ABCXYZ  🟢               🟢    Acme Corp / gurumi  2025-01-15 10:30 UTC
+A0456DEFXYZ  🟡 no bot_token  🔴    -                   -
 ```
 
 ## Slack 앱 관리 — `scripts/apps.py`
@@ -91,7 +94,7 @@ python scripts/apps.py set A0123ABC \
 
 `--yes` 플래그가 있지만 이는 **스크립트 자동화용**입니다. 평소 운영에서는 사용하지 마세요.
 
-### 앱 식별 (apps list NAME 컬럼)
+### 앱 식별 (apps list APP_INFO 컬럼)
 
 ```bash
 # Slack auth.test 호출해서 team/bot 정보 갱신 (apps list 가독성)
@@ -102,7 +105,7 @@ python scripts/apps.py name set A0123ABC "Production - Acme"
 python scripts/apps.py name unset A0123ABC   # 자동 채워진 team/bot으로 복귀
 ```
 
-`apps set`은 기본적으로 `auth.test`를 호출해 즉시 `team_name`/`bot_user_name`을 채웁니다. `--no-verify`로 스킵 가능 (오프라인 환경).
+`apps set`은 **bot_token 을 새로 넣을 때** `auth.test`를 호출해 `team_name`/`bot_user_name`/`team_domain`을 채웁니다. `--no-verify`로 스킵 가능 (오프라인 환경). signing_secret 만 회전하면 bot_token 이 비어 있어 `auth.test`를 호출하지 않습니다.
 
 ## Per-app override
 
@@ -163,7 +166,9 @@ python scripts/apps.py persona unset A0123ABC
 
 ### 차단 메시지 치환
 
-`ALLOWED_CHANNEL_MESSAGE` / `ALLOWED_USER_MESSAGE`의 `{}`는 *effective* 리스트의 첫 항목을 사용합니다. 즉 per-app override가 적용된 앱은 자기 채널/유저로 안내됩니다 (글로벌 채널/유저가 아니라). 메시지 *템플릿 자체*는 글로벌로 유지.
+`ALLOWED_CHANNEL_MESSAGE`의 `{}`는 *effective* 채널 리스트의 첫 항목을 사용합니다. 즉 per-app override가 적용된 앱은 자기 채널로 안내됩니다 (글로벌 채널이 아니라). 메시지 *템플릿 자체*는 글로벌로 유지.
+
+유저 차단(`ALLOWED_USER_IDS`)에는 응답 메시지가 없습니다 — 봇의 존재를 외부에 노출하지 않으려 의도적으로 silent drop 이고, 운영자는 `user.blocked` 로그 이벤트로만 관측합니다. `ALLOWED_USER_MESSAGE` env var 는 정의만 남아 있고 런타임에서 읽히지 않습니다.
 
 ### `SYSTEM_MESSAGE`는 per-app override 불가
 
@@ -182,9 +187,10 @@ python scripts/apps.py persona unset A0123ABC
 
 ### 즉시 반영이 필요하면
 
-옵션 A: TTL 짧게 (예: `SSM_CACHE_TTL_SECONDS=60`) → 5분 대신 1분
-옵션 B: Lambda 재배포 (warm 컨테이너 모두 폐기)
-옵션 C: 무시하고 5분 기다림 (대부분 케이스)
+옵션 A: Lambda 재배포 (warm 컨테이너 모두 폐기) — 즉시 반영되는 유일한 방법
+옵션 B: 무시하고 5분 기다림 (대부분 케이스)
+
+`SSM_CACHE_TTL_SECONDS` 를 줄이는 것은 *앞으로의* 로테이션 반영을 빠르게 할 뿐, 지금 캐시된 값을 비우지 못합니다 — 이 값 자체가 Lambda 환경변수라 변경에 재배포가 필요합니다.
 
 ### 시크릿 누출 시
 
@@ -208,8 +214,11 @@ python scripts/apps.py persona unset A0123ABC
 aws ssm get-parameter \
   --name /gurumi-bot/apps/A0123ABC/signing_secret --with-decryption
 
-# Lambda IAM 정책 확인
-aws iam get-role-policy --role-name lambda-gurumi-bot ...
+# Lambda 런타임 role 정책 확인 (serverless 가 생성 — 배포용 OIDC role
+# `lambda-gurumi-bot` 과 다른 role 이다)
+ROLE=$(aws lambda get-function-configuration \
+  --function-name lambda-gurumi-bot-dev-mention --query Role --output text)
+aws iam list-role-policies --role-name "${ROLE##*/}"
 ```
 
 해결: `python scripts/apps.py set A0123ABC` 다시 실행. `SSM_CACHE_TTL_SECONDS` 내 반영.
@@ -242,7 +251,7 @@ DM은 의도적으로 **채널 allowlist 대상이 아닙니다**. `ALLOWED_CHAN
 
 DM도 막고 싶으면 `ALLOWED_USER_IDS`를 사용하세요 (이건 채널·DM 양쪽 적용).
 
-### `apps list`에서 NAME 컬럼이 비어 있음
+### `apps list`에서 APP_INFO 컬럼이 `-` 로 나옴
 
 원인: `auth.test`가 호출되지 않았거나 실패. `apps set`은 기본 호출하지만 `--no-verify`로 스킵했거나 Slack 도달 실패 시.
 
@@ -258,7 +267,7 @@ python scripts/apps.py refresh A0123ABC
 
 ### 긴 응답이 한 곳에 다 안 보임
 
-응답이 `MAX_LEN_SLACK`을 초과하면 `MessageFormatter.split_message`가 코드펜스 → 문단 → 문장 → hard slice 우선순위로 분할. 첫 chunk는 placeholder 메시지 update, 나머지는 thread 새 메시지.
+응답이 `MAX_LEN_SLACK`을 초과하면 `MessageFormatter.split_message`가 문단 → 코드펜스 균형 보정 → 문장 → 단일 개행 → hard slice 우선순위로 분할. 첫 chunk는 placeholder 메시지 update, 나머지는 thread 새 메시지.
 
 ## IAM / 권한
 
@@ -266,17 +275,18 @@ python scripts/apps.py refresh A0123ABC
 
 `serverless.yml`이 정의:
 
-- `dynamodb:GetItem/PutItem/Query/UpdateItem` on table + `user-index` GSI
-- `ssm:GetParameters` on `{SSM_PARAMS_PREFIX}/*` (배포 prefix와 일치)
-- `kms:Decrypt` on the SSM SecureString의 KMS 키 (default key 사용 시 자동, custom key는 명시 필요)
+- `dynamodb:GetItem/PutItem/Query/UpdateItem/DeleteItem` on table + `user-index` GSI (`DeleteItem` 은 `MemoryStore.delete` 가 마지막 memory entry 삭제 시 사용)
+- `ssm:GetParameter` + `ssm:GetParameters` on `{SSM_PARAMS_PREFIX}/*` (배포 prefix와 일치)
 - `bedrock:InvokeModel*`, `bedrock:Converse*` (Bedrock provider 사용 시)
 - `lambda:InvokeFunction` on **자기 자신의 ARN** — `_enqueue_worker`의 self-invoke
+
+`kms:*` statement 는 `serverless.yml`에 **없습니다**. SecureString 이 기본 키(`alias/aws/ssm`)를 쓰면 SSM 이 복호화를 대신 처리하므로 불필요하고, CMK 로 전환하면 운영자가 그 키에 대한 `kms:Decrypt` 를 직접 추가해야 합니다.
 
 `dynamodb:UpdateItem` 누락 시 `AppMetadataStore.record()`가 silent fail → `app:` 행이 안 생기고 per-app override가 글로벌로 fallback. `dedup:`/`ctx:` 행은 `put_item` 사용이라 영향 없음 → 알아채기 어려운 회귀.
 
 ### OIDC role (배포용, `.github/aws-role/`)
 
-GitHub Actions에서 `serverless deploy`를 위해 사용. Lambda 런타임 role과 별개. 자세한 절차는 [README의 배포 섹션](../README.md#배포)을 보세요.
+GitHub Actions에서 `serverless deploy`를 위해 사용. Lambda 런타임 role과 별개. 자세한 절차는 [README의 배포 섹션](../README.md#배포-serverless-framework-v3)을 보세요.
 
 ## Reaction 기능 운영
 
@@ -284,4 +294,4 @@ GitHub Actions에서 `serverless deploy`를 위해 사용. Lambda 런타임 role
 
 ## 배포
 
-배포 절차는 [README의 배포 섹션](../README.md#배포)에 정리되어 있습니다.
+배포 절차는 [README의 배포 섹션](../README.md#배포-serverless-framework-v3)에 정리되어 있습니다.

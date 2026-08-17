@@ -186,7 +186,7 @@ DynamoDB TTL은 `expire_at` 속성이 *명시적으로 있는* 행만 만료시�
 1. `is_done(key)` 확인 → 이미 완료면 silent return
 2. `reserve(key)` (300s TTL — Lambda function timeout과 일치) — 실패면 in-flight skip
 3. agent.run + 응답 전송 + history persist
-4. **응답 전송 *직후*** `mark_done(key)` (1h `done:` 마커)
+4. **응답 전송 + history persist 직후** `mark_done(key)` (1h `done:` 마커). history persist 는 try/except 로 감싸여 있어 실패해도 `mark_done` 은 건너뛰지 않는다
 
 두 단계의 의미가 다릅니다:
 
@@ -315,13 +315,10 @@ LLM이 한 turn에 emit한 독립 `tool_calls`는 `ToolExecutor.execute_many`로
 
 ### Code-fence-aware split
 
-`MessageFormatter.split_message`가 우선순위로 분할:
-1. ` ``` ` (코드블록 보존)
-2. `\n\n` (문단)
-3. `.!?` (문장 경계)
-4. hard slice
-
-`_merge_small`이 인접한 작은 chunk를 `max_len`까지 재합침.
+`MessageFormatter.split_message`는 **문단 우선** greedy 분할이고, 코드펜스는 그 뒤의 *보정* 단계입니다:
+1. `max_len` 안에서 마지막 `\n\n` (문단) 컷
+2. 컷이 ` ``` ` 블록 안에 떨어지면(펜스 개수 홀수) 블록 직전 `\n\n`으로 재컷 — 블록이 `max_len`보다 크면 블록 안에서 `\n\n`/`\n`으로 자르고 `\n``` ` + ` ```\n`으로 닫고 연다
+3. `max_len` 안에 `\n\n`이 아예 없으면 `_fallback_cut` — 문장 경계(`.!?` + 공백) → 단일 `\n` → hard slice
 
 첫 chunk는 placeholder 메시지에 `chat.update`. 나머지는 `chat.postMessage(thread_ts=...)`로 새 메시지. `chat.update` 실패 시 (msg_too_long 등) 그 chunk도 새 메시지로 fallback.
 
@@ -346,12 +343,13 @@ Jina Reader path (`{JINA_READER_BASE}/{percent-encoded url}`)가 실제 네트�
 
 ### External image fetch (`attach_image_from_url`)
 
-공개 HTTPS 이미지를 Slack에 첨부하는 경로는 4겹 방어:
+공개 HTTPS 이미지를 Slack에 첨부하는 경로는 5겹 방어:
 
 1. `_validate_public_https_url` — DNS 검증 (`fetch_webpage`와 동일).
 2. `_NoRedirectHandler` — 3xx 거부.
 3. `_read_body_capped(MAX_IMAGE_BYTES)` — Content-Length + streamed cap.
-4. `_detect_image_mime` — 응답 본문의 첫 8바이트 magic 시그니처 검증 (PNG/JPEG/GIF/WEBP/BMP). `Content-Type: image/png`로 위장한 HTML/SVG가 Slack preview 파이프라인에 들어가는 것을 막습니다.
+4. Content-Type allowlist — 헤더가 `image/*`를 주장하지 않으면 즉시 거부.
+5. `_detect_image_mime` — 응답 본문 선두(최대 12바이트) magic 시그니처 검증 (PNG/JPEG/GIF/WEBP/BMP). 헤더는 값싸게 거짓말할 수 있으므로 4단계만으로는 부족 — `Content-Type: image/png`로 위장한 HTML/SVG가 Slack preview 파이프라인에 들어가는 것을 막습니다.
 
 ## Structured logging + request_id
 

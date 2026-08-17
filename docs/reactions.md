@@ -16,8 +16,9 @@
 Slack reaction_added 이벤트
   ↓
 router._on_reaction_added (Bolt receiver)
+  ├─ ack() 먼저 (Slack 3초 윈도우 확보)
   ├─ pre-filter: REACTION_HANDLERS 키에 있는 reaction인지 + item.type == "message"인지
-  └─ ack() → _enqueue_worker(...)
+  └─ _enqueue_worker(...)
   ↓
 router._process_worker (worker self-invoke)
   └─ event["type"] == "reaction_added" → handlers.reactions._process_reaction
@@ -99,13 +100,9 @@ reaction 기능을 켜려면 Slack 앱 콘솔에서 추가 설정이 필요합�
 기존(메시지 처리용)에 더해 추가:
 
 - **`reactions:read`** — 필수. `reaction_added` 이벤트 수신
-- **`channels:history`** — public 채널에서 동작 시
-- **`groups:history`** — private 채널에서 동작 시
-- **`im:history`** — DM에서 동작 시 (봇과의 1:1 DM은 보통 적용 안 됨)
-- **`mpim:history`** — multi-person IM에서 동작 시
 - **`files:write`** — 이미지 생성 reaction(`:img-gpt:`/`:img-xai:`) 사용 시. `files_upload_v2` 업로드용
 
-`*:history` scope는 `conversations.replies`로 thread parent를 조회하기 위함. 봇이 동작하는 채널 종류에 맞게 하나 이상 추가하세요.
+`*:history` scope(`channels:history` / `groups:history` / `im:history` / `mpim:history`)는 `:x:` 핸들러가 `conversations.replies`로 thread parent를 조회하는 데 쓰입니다. 다만 **reaction 전용이 아닙니다** — core tool `fetch_thread_history` 도 같은 scope 를 쓰므로 봇이 동작하는 채널 종류에 맞게 이미 설정돼 있어야 합니다 ([docs/operations.md](operations.md) 참조).
 
 `chat:write`는 이미 메시지 전송용으로 있을 것 — 그게 자기 메시지 `chat.delete`에도 사용됩니다.
 
@@ -198,6 +195,8 @@ def _handle_reaction_thumbsup_log(event: dict, client: WebClient, api_app_id: st
 ```python
 REACTION_HANDLERS: dict[str, "callable"] = {
     "x": _handle_reaction_x_delete,
+    "img-gpt": _handle_reaction_image_gen,
+    "img-xai": _handle_reaction_image_gen,
     "thumbsup": _handle_reaction_thumbsup_log,   # ← 추가
 }
 ```
