@@ -222,7 +222,16 @@ _VALID_PROVIDERS = {"openai", "bedrock", "xai", "upstage", "mistral"}
 
 ### 5. `get_llm` 호출부 업데이트
 
-Lambda 런타임은 `src/runtime.py::_get_llm()`에서, 로컬 CLI는 `localtest.py`에서 `get_llm`을 호출합니다. 둘 다 `api_keys` dict에 provider-key 쌍을 담아 넘깁니다 — 새 provider를 위해 dict에 항목 추가.
+`get_llm` 호출부는 **네 곳**입니다 — 전부 `api_keys` dict에 새 provider-key 쌍을 추가해야 합니다:
+
+| 호출부 | 용도 | 현재 넘기는 `api_keys` |
+|--------|------|----------------------|
+| `src/runtime.py::_get_llm()` | Lambda 런타임 (메시지 경로) | `xai` + `upstage` |
+| `localtest.py` | 로컬 CLI | `xai` + `upstage` |
+| `src/handlers/commands.py` | `/img-gpt`·`/img-xai` slash command | `xai` 만 |
+| `src/handlers/reactions.py` | `:img-gpt:`·`:img-xai:` reaction | `xai` 만 |
+
+뒤 두 곳은 이미지 생성 전용이라 텍스트 provider의 key를 쓰지 않아 지금은 무해하지만, 새 provider를 `LLM_PROVIDER`로 쓰는 경우를 위해 같이 갱신하는 편이 안전합니다.
 
 ```python
 # src/runtime.py / localtest.py — 기존
